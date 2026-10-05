@@ -4881,19 +4881,20 @@ heading("Every release build is named, and the name is in every file");
       .every((result) => typeof result === "string" && /names no release/.test(result)),
   );
 
-  const readJson = (file) => JSON.parse(readFileSync(join(root, file), "utf8"));
-  const rpConfig = readJson("release-please-config.json");
+  const readJson = (dir, file) => JSON.parse(readFileSync(join(dir, file), "utf8"));
+  const rpConfig = readJson(root, "release-please-config.json");
 
-  // Until the first release, release-please finds no GitHub release to bump
-  // from and proposes its initial-version, 1.0.0 unless configured, whatever
-  // the manifest says. Unconfigured, it titled the first release PR "release
+  // Until the first release, release-please finds no release matching the
+  // manifest's 0.0.0 to bump from and proposes its initial-version, 1.0.0
+  // unless configured. Unconfigured, it titled the first release PR "release
   // 1.0.0", bumping the tree past the whole 0.x series before anything was
   // released. release-please moves the manifest off 0.0.0 when it releases, so
   // 0.0.0 (or no entry) is the no-release state, and after it initial-version
   // is inert. A stamped tree carries a -pre suffix, so only x.y.z is compared.
-  const released = readJson(".release-please-manifest.json")["."];
+  const manifest = join(root, ".release-please-manifest.json");
+  const released = existsSync(manifest) ? readJson(root, ".release-please-manifest.json")["."] : undefined;
   const firstVersion = rpConfig.packages["."]["initial-version"] ?? "1.0.0";
-  const treeVersion = readJson("package.json").version.replace(/-.*$/, "");
+  const treeVersion = readJson(root, "package.json").version.replace(/-.*$/, "");
   check(
     "before the first release, release-please proposes the version the tree carries",
     (released !== undefined && released !== "0.0.0") || firstVersion === treeVersion,
@@ -4910,7 +4911,7 @@ heading("Every release build is named, and the name is in every file");
     writeFileSync(join(tree, file), readFileSync(join(root, file)));
   }
   stamp("0.2.0-pre.4", tree);
-  const read = (file) => JSON.parse(readFileSync(join(tree, file), "utf8"));
+  const read = (file) => readJson(tree, file);
   const lock = read("package-lock.json");
   const unstamped = extras.filter((file) => read(file).version !== "0.2.0-pre.4");
   check(

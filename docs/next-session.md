@@ -17,11 +17,10 @@ in `docs/design.md`.
 1. **The first release.** release-please proposes `0.1.0` from its configured
    `initial-version` (without it, its first run asked for `1.0.0`). Check that release PR #1
    was rewritten to `chore(main): release 0.1.0` — title, `package.json`, `plugin.json`,
-   `CHANGELOG.md` — and close it if it was not. Check that no `v1.0.0-pre.*` release or tag
-   exists: one would rank above every 0.x build for anyone who installed it, so delete it
-   (`gh release delete <tag> --cleanup-tag`) before anything else is published. Then check the release PR,
-   its pre-release `v0.1.0-pre.1`, and that merging it publishes `v0.1.0` with the bundle, the
-   plugin archive and `SHA256SUMS.txt` attached (`docs/releasing.md`).
+   `CHANGELOG.md` — and close it if it was not. (The `1.0.0` run was cancelled before it
+   tagged or published anything.) Then check its pre-release `v0.1.0-pre.1`, and that merging
+   it publishes `v0.1.0` with the bundle, the plugin archive and `SHA256SUMS.txt` attached
+   (`docs/releasing.md`).
 2. **The flaky start-timeout check.** "the library's deferredBackend runs on the configured
    start timeout" races two 2 s timers — the preparation deadline and the kernel's own handshake
    timeout — and accepts only the first's wording; seen once, passed on rerun. Reproduce it
