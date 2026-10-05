@@ -41,7 +41,7 @@ import {
   type BackoffState,
   type CandidateIdentity,
 } from "./prepare.js";
-import { KernelSession } from "./kernel.js";
+import { HandshakeTimeout, KernelSession } from "./kernel.js";
 import type { KernelInstall } from "./locate.js";
 import { errorText, type Logger } from "./log.js";
 import { PKG } from "./version.js";
@@ -185,12 +185,21 @@ export class LocalBackend implements KernelBackend {
     deadline.check("starting the kernel");
     // A beat of grace, so the handshake's own timer fires first: its error
     // carries the kernel's last output, which names the actual cause.
-    await deadline.within(
-      "starting the kernel",
-      this.#session.ensure(deadline.remaining()),
-      undefined,
-      1_000,
-    );
+    try {
+      await deadline.within(
+        "starting the kernel",
+        this.#session.ensure(deadline.remaining()),
+        undefined,
+        1_000,
+      );
+    } catch (err) {
+      // That timer was the deadline's remainder, so its expiry is the
+      // deadline's, even when it fires before the deadline's own clock says so.
+      if (err instanceof HandshakeTimeout) {
+        throw new PreparationTimeout("starting the kernel", deadline.totalMs, errorText(err));
+      }
+      throw err;
+    }
   }
 
   async capabilities(): Promise<ServerCapabilities> {

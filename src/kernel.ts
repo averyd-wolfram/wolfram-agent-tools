@@ -64,6 +64,22 @@ export class DeadlineExceeded extends Error {
   }
 }
 
+/**
+ * Raised when a start's handshake runs out of its own time.
+ *
+ * Typed so that a caller which set that time from a larger budget can report the
+ * expiry as that budget's: `LocalBackend.prepare` hands the handshake what its
+ * preparation deadline has left, but the two timers read different clocks, and
+ * the handshake's could fire first by a millisecond, escaping as a bare error
+ * that named neither the stage nor the setting to raise.
+ */
+export class HandshakeTimeout extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "HandshakeTimeout";
+  }
+}
+
 /** The SDK's own timeout, for ops this server gives no deadline of its own. */
 // Widened to number once: the SDK types McpError.code as a number while
 // ErrorCode is the enum of its values, and comparing them raw is an unsafe mix.
@@ -299,7 +315,7 @@ export class KernelSession {
       timer = setTimeout(
         () =>
           reject(
-            new Error(
+            new HandshakeTimeout(
               `the Wolfram kernel did not complete MCP initialization within ` +
                 `${Math.round(startTimeoutMs / 1000)}s. Common causes: the ` +
                 `Wolfram/AgentTools paclet is missing or is being downloaded, the ` +
@@ -318,7 +334,8 @@ export class KernelSession {
       await Promise.race([client.connect(transport), fatal, timeout]);
     } catch (err) {
       await transport.close().catch(() => {});
-      throw withKernelOutput(errorText(err), transport.recentOutput());
+      const failure = withKernelOutput(errorText(err), transport.recentOutput());
+      throw err instanceof HandshakeTimeout ? new HandshakeTimeout(failure.message) : failure;
     } finally {
       clearTimeout(timer);
       this.#handshaking = null;

@@ -7,6 +7,9 @@ in `docs/design.md`.
 ## Where things stand
 
 - **M0 and M1 are built**, and M1's acceptance is nearly done (plan §5 M1).
+- **`v0.1.0` is released**, with the bundle, the plugin archive and `SHA256SUMS.txt`. Below
+  1.0.0 every release is marked a GitHub pre-release, which `releases/latest` skips, so link a
+  release by its tag (`releases/download/v0.1.0/...`), never by `latest`.
 - **The release pipeline versions itself** from the commit types on `main`. `docs/releasing.md`
   has the whole of it; the short form is under *How releases work* below.
 - **The direction is client-neutral agent tools with a package per client** (plan §5 MA,
@@ -14,33 +17,26 @@ in `docs/design.md`.
 
 ## What to do next, in order
 
-1. **The first release.** release-please proposes `0.1.0` from its configured
-   `initial-version` (without it, its first run asked for `1.0.0`). Check that release PR #1
-   was rewritten to `chore(main): release 0.1.0` — title, `package.json`, `plugin.json`,
-   `CHANGELOG.md` — and close it if it was not. (The `1.0.0` run was cancelled before it
-   tagged or published anything.) Then check its pre-release `v0.1.0-pre.1`, and that merging
-   it publishes `v0.1.0` with the bundle, the plugin archive and `SHA256SUMS.txt` attached
-   (`docs/releasing.md`).
-2. **The flaky start-timeout check.** "the library's deferredBackend runs on the configured
+1. **The flaky start-timeout check.** "the library's deferredBackend runs on the configured
    start timeout" races two 2 s timers — the preparation deadline and the kernel's own handshake
    timeout — and accepts only the first's wording; seen once, passed on rerun. Reproduce it
    deterministically, test, then fix. It is a `fix:`, so it releases 0.1.1: the first automatic
    bump, worth watching end to end.
-3. **MA's experiments**, each a ledger row (plan §5 MA, *Order of work*): Codex installing a
+2. **MA's experiments**, each a ledger row (plan §5 MA, *Order of work*): Codex installing a
    Claude Code marketplace entry and trusting our hook; Cursor importing an installed Claude Code
    plugin, and whether its `sessionStart` injects context; Copilot honouring `userConfig`; the
    Agent Plugins precedence in VS Code; Codex's filtered environment against our broker.
-4. **The restructure** (MA). M1's `archive` install, update and bad-digest rows need only public
+3. **The restructure** (MA). M1's `archive` install, update and bad-digest rows need only public
    releases (`v0.1.0` then `v0.1.1` is an update), as does a Claude run of the plugin installed
    from the archive.
-5. **MD, downstream packages** (plan §5 MD, D33), after the restructure: another project's
+4. **MD, downstream packages** (plan §5 MD, D33), after the restructure: another project's
    plugin built on the release bundle. Its item 3 holds a defect for today's users too — a
    server not found starts the ten-minute back-off, which creating the server does not end.
-6. **The rest of M1**: the chat checklist and M1b's client version, `SessionStart` and file
+5. **The rest of M1**: the chat checklist and M1b's client version, `SessionStart` and file
    workflow (run by a maintainer); entitlement leases outliving clean kernel exits by about an hour
    (measured, cause not found, matters only to entitlement users); a resumed Claude Desktop
    session after a re-upload may lose the LSP (a new session works).
-7. **M2's design checkpoint**, which starts with the stable-2.2.0 union experiment and needs
+6. **M2's design checkpoint**, which starts with the stable-2.2.0 union experiment and needs
    AgentTools 2.2.7 disabled — agree it with the maintainers first.
 
 ## How releases work
