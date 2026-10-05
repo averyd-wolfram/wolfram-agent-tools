@@ -4881,17 +4881,14 @@ heading("Every release build is named, and the name is in every file");
       .every((result) => typeof result === "string" && /names no release/.test(result)),
   );
 
-  // Stamped into a copy, never this checkout. The files are the ones
-  // release-please bumps, so a pre-release and a release carry the version in
-  // the same places.
-  const tree = join(home, "stamp-tree");
   const rpConfig = JSON.parse(readFileSync(join(root, "release-please-config.json"), "utf8"));
-  const extras = rpConfig.packages["."]["extra-files"].map((extra) => extra.path);
 
   // Until the first release, release-please finds no tag to bump from and
   // ignores the manifest's 0.0.0: it proposes its initial-version, 1.0.0 unless
   // configured, which titled the first release PR "release 1.0.0" and would have
-  // published v1.0.0-pre.1 over a tree that says 0.1.0.
+  // published v1.0.0-pre.1 over a tree that says 0.1.0. release-please itself
+  // moves the manifest off 0.0.0 when it releases, so 0.0.0 is the no-release
+  // state, and after it initial-version is inert.
   const released = JSON.parse(readFileSync(join(root, ".release-please-manifest.json"), "utf8"))["."];
   const firstVersion = rpConfig.packages["."]["initial-version"] ?? "1.0.0";
   const treeVersion = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
@@ -4900,6 +4897,12 @@ heading("Every release build is named, and the name is in every file");
     released !== "0.0.0" || firstVersion === treeVersion,
     `first release ${firstVersion}, tree ${treeVersion}`,
   );
+
+  // Stamped into a copy, never this checkout. The files are the ones
+  // release-please bumps, so a pre-release and a release carry the version in
+  // the same places.
+  const tree = join(home, "stamp-tree");
+  const extras = rpConfig.packages["."]["extra-files"].map((extra) => extra.path);
   for (const file of ["package.json", "package-lock.json", "release-please-config.json", ...extras]) {
     mkdirSync(dirname(join(tree, file)), { recursive: true });
     writeFileSync(join(tree, file), readFileSync(join(root, file)));
