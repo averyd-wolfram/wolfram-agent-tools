@@ -4881,20 +4881,22 @@ heading("Every release build is named, and the name is in every file");
       .every((result) => typeof result === "string" && /names no release/.test(result)),
   );
 
-  const rpConfig = JSON.parse(readFileSync(join(root, "release-please-config.json"), "utf8"));
+  const readJson = (file) => JSON.parse(readFileSync(join(root, file), "utf8"));
+  const rpConfig = readJson("release-please-config.json");
 
-  // Until the first release, release-please finds no tag to bump from and
-  // ignores the manifest's 0.0.0: it proposes its initial-version, 1.0.0 unless
-  // configured, which titled the first release PR "release 1.0.0" and would have
-  // published v1.0.0-pre.1 over a tree that says 0.1.0. release-please itself
-  // moves the manifest off 0.0.0 when it releases, so 0.0.0 is the no-release
-  // state, and after it initial-version is inert.
-  const released = JSON.parse(readFileSync(join(root, ".release-please-manifest.json"), "utf8"))["."];
+  // Until the first release, release-please finds no GitHub release to bump
+  // from and proposes its initial-version, 1.0.0 unless configured, whatever
+  // the manifest says. Unconfigured, it titled the first release PR "release
+  // 1.0.0", bumping the tree past the whole 0.x series before anything was
+  // released. release-please moves the manifest off 0.0.0 when it releases, so
+  // 0.0.0 (or no entry) is the no-release state, and after it initial-version
+  // is inert. A stamped tree carries a -pre suffix, so only x.y.z is compared.
+  const released = readJson(".release-please-manifest.json")["."];
   const firstVersion = rpConfig.packages["."]["initial-version"] ?? "1.0.0";
-  const treeVersion = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
+  const treeVersion = readJson("package.json").version.replace(/-.*$/, "");
   check(
     "before the first release, release-please proposes the version the tree carries",
-    released !== "0.0.0" || firstVersion === treeVersion,
+    (released !== undefined && released !== "0.0.0") || firstVersion === treeVersion,
     `first release ${firstVersion}, tree ${treeVersion}`,
   );
 
