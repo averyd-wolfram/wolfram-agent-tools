@@ -1,0 +1,7 @@
+node_modules/
+dist/
+settings.local.json
+*.tgz
+.DS_Store
+bundle/
+release/

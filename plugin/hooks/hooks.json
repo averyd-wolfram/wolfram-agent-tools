@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "WOLFRAM_MCP_DEFAULT_SERVER=WolframLanguage node \"${CLAUDE_PLUGIN_ROOT}/wolfram-mcp-server.mjs\" session-status",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

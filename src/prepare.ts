@@ -1,0 +1,218 @@
+/**
+ * Preparation: everything between a session's first real request and the first
+ * request a kernel actually receives — attaching to a broker and waiting for it,
+ * and the kernel's MCP handshake. (It also covered an installation probe kernel,
+ * until kernels began reporting their installation themselves: plugin plan D20.)
+ *
+ * Each of those used to carry its own bound — the probe 120s, the handshake
+ * `WOLFRAM_MCP_START_TIMEOUT_SECONDS`, the broker the call ceiling plus grace —
+ * so the wait before a first call could run to several minutes, and the error
+ * at the end named only the last step. One `Deadline` now covers all of it and
+ * says which stage it ran out in.
+ *
+ * A preparation that failed is not retried on the next call. A kernel that
+ * cannot start costs a licence seat and the whole deadline on every attempt, so
+ * a client retrying in a loop spent both continuously. `Backoff` makes the next
+ * calls fail at once, saying how long is left, until the window passes or the
+ * installation itself changes.
+ */
+import { statSync } from "node:fs";
+import { errorText } from "./log.js";
+
+/** How long a failed preparation is not retried, unless the binary changes. */
+export const PREPARATION_BACKOFF_MS = 10 * 60_000;
+
+/** A preparation that did not finish in time, naming the stage it was in. */
+export class PreparationTimeout extends Error {
+  readonly stage: string;
+  constructor(stage: string, totalMs: number, detail?: string) {
+    super(
+      `a Wolfram kernel was not ready within ${Math.round(totalMs / 1000)}s ` +
+        `(WOLFRAM_MCP_START_TIMEOUT_SECONDS): time ran out while ${stage}` +
+        (detail ? `. ${detail}` : ""),
+    );
+    this.name = "PreparationTimeout";
+    this.stage = stage;
+  }
+}
+
+/** A preparation ended by `stop()`: not a failure, so it starts no back-off. */
+export class PreparationStopped extends Error {
+  constructor() {
+    super("the Wolfram server was stopped while a kernel was being prepared");
+    this.name = "PreparationStopped";
+  }
+}
+
+/**
+ * One elapsed budget, shared by every stage of a preparation — and the way to
+ * end it early. `signal` fires when the server stops: every stage races it,
+ * and work this process owns takes it too (the probe's execFile kills its
+ * kernel on it), so a stop reaches a preparation that has not yet produced
+ * anything else to stop.
+ */
+export class Deadline {
+  readonly totalMs: number;
+  readonly signal: AbortSignal;
+  readonly #at: number;
+  readonly #clock: () => number;
+
+  constructor(
+    totalMs: number,
+    clock: () => number = Date.now,
+    signal: AbortSignal = new AbortController().signal,
+  ) {
+    this.totalMs = totalMs;
+    this.signal = signal;
+    this.#clock = clock;
+    this.#at = clock() + totalMs;
+  }
+
+  get stopped(): boolean {
+    return this.signal.aborted;
+  }
+
+  remaining(): number {
+    return Math.max(0, this.#at - this.#clock());
+  }
+
+  /**
+   * `work`, unless the deadline passes first — then a `PreparationTimeout`
+   * naming `stage`.
+   *
+   * The work is not stopped here, because what stopping means depends on who
+   * owns it: a probe this process started is killed by its own timeout, a
+   * kernel by its transport, while a broker's preparation belongs to every
+   * session attached to it and is left to finish for them. `onLate` receives
+   * whatever the work produces after the deadline, so an owner can release it.
+   *
+   * A failure that lands once the deadline has passed is reported as the
+   * timeout too, carrying the work's own words: the handshake's own timer is
+   * set to the remaining time, and whichever of the two fires first, the
+   * caller should learn the stage. `graceMs` lets work that bounds itself fail
+   * first, so its richer error — a kernel's last words — is the one wrapped.
+   */
+  async within<T>(
+    stage: string,
+    work: Promise<T>,
+    onLate?: (late: T) => void,
+    graceMs = 0,
+  ): Promise<T> {
+    let expired = false;
+    let timer: NodeJS.Timeout | undefined;
+    let onAbort: (() => void) | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        expired = true;
+        reject(new PreparationTimeout(stage, this.totalMs));
+      }, this.remaining() + graceMs);
+      timer.unref?.();
+      // A stop counts as "after the deadline" for onLate: whatever the work
+      // produces once nobody is waiting is the owner's to release.
+      onAbort = () => {
+        expired = true;
+        reject(new PreparationStopped());
+      };
+      if (this.signal.aborted) onAbort();
+      else this.signal.addEventListener("abort", onAbort, { once: true });
+    });
+    void work.then(
+      (late) => {
+        if (expired) onLate?.(late);
+      },
+      () => {},
+    );
+    try {
+      return await Promise.race([work, timeout]);
+    } catch (err) {
+      if (this.signal.aborted) throw new PreparationStopped();
+      if (err instanceof PreparationTimeout || this.remaining() > 0) throw err;
+      throw new PreparationTimeout(stage, this.totalMs, errorText(err));
+    } finally {
+      clearTimeout(timer);
+      if (onAbort) this.signal.removeEventListener("abort", onAbort);
+    }
+  }
+
+  /** Throws the timeout for `stage` if the deadline has already passed. */
+  check(stage: string): void {
+    if (this.signal.aborted) throw new PreparationStopped();
+    if (this.remaining() <= 0) throw new PreparationTimeout(stage, this.totalMs);
+  }
+}
+
+/** What makes two attempts attempts at the same installation. */
+export interface CandidateIdentity {
+  bin: string;
+  mtimeMs: number;
+  size: number;
+}
+
+export function candidateIdentity(bin: string): CandidateIdentity | null {
+  try {
+    const stat = statSync(bin);
+    return { bin, mtimeMs: Math.round(stat.mtimeMs), size: stat.size };
+  } catch {
+    return null;
+  }
+}
+
+function sameCandidate(a: CandidateIdentity | null, b: CandidateIdentity | null): boolean {
+  return (
+    a !== null && b !== null && a.bin === b.bin && a.mtimeMs === b.mtimeMs && a.size === b.size
+  );
+}
+
+/** The state `wolfram_status` reports. */
+export interface BackoffState {
+  failedAt: number;
+  until: number;
+  remainingMs: number;
+  reason: string;
+}
+
+/** The last failed preparation, and whether it still stands. */
+export class Backoff {
+  readonly #windowMs: number;
+  readonly #clock: () => number;
+  #failure: { identity: CandidateIdentity | null; at: number; reason: string } | null = null;
+
+  constructor(windowMs = PREPARATION_BACKOFF_MS, clock: () => number = Date.now) {
+    this.#windowMs = windowMs;
+    this.#clock = clock;
+  }
+
+  record(identity: CandidateIdentity | null, err: unknown): void {
+    this.#failure = { identity, at: this.#clock(), reason: errorText(err) };
+  }
+
+  clear(): void {
+    this.#failure = null;
+  }
+
+  /**
+   * The back-off in force for `identity`, or null when a preparation may run.
+   * A changed binary ends it at once: an upgrade or a repair is exactly what
+   * the user would do about the failure, and making them wait it out would
+   * punish the fix.
+   */
+  current(identity: CandidateIdentity | null): BackoffState | null {
+    const failure = this.#failure;
+    if (!failure) return null;
+    const until = failure.at + this.#windowMs;
+    const now = this.#clock();
+    if (now >= until || !sameCandidate(failure.identity, identity)) {
+      this.#failure = null;
+      return null;
+    }
+    return { failedAt: failure.at, until, remainingMs: until - now, reason: failure.reason };
+  }
+}
+
+/** "4m 05s", for a wait a person reads. */
+export function formatWait(ms: number): string {
+  const total = Math.ceil(ms / 1000);
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return minutes > 0 ? `${minutes}m ${String(seconds).padStart(2, "0")}s` : `${seconds}s`;
+}

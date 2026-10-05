@@ -1,0 +1,43 @@
+{
+  "enabledPlugins": {
+    "typescript-lsp@claude-plugins-official": true,
+    "wolfram@wolfram": true
+  },
+  "extraKnownMarketplaces": {
+    "wolfram": {
+      "source": {
+        "source": "directory",
+        "path": "."
+      }
+    }
+  },
+  "disabledMcpjsonServers": [
+    "WolframLanguage"
+  ],
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/scripts/on-edit.mjs\"",
+            "timeout": 120,
+            "statusMessage": "format \u00b7 lint \u00b7 typecheck"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/scripts/session-check.mjs\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

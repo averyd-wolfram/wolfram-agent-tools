@@ -1,0 +1,10 @@
+#!/bin/sh
+# What the next commit would publish, checked before it exists
+# (scripts/public-content.mjs). Node is required to work in this repository,
+# so a client that cannot find it is stopped rather than let past the check.
+if ! command -v node >/dev/null 2>&1; then
+  echo "pre-commit: node is not on PATH, so the public-content check cannot run." >&2
+  echo "Install Node 22.13 or newer where your git client can find it, or commit from a terminal that has it." >&2
+  exit 1
+fi
+exec node "$(git rev-parse --show-toplevel)/scripts/public-content.mjs" --staged

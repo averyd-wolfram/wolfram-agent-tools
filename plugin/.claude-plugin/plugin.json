@@ -1,0 +1,46 @@
+{
+  "name": "wolfram",
+  "description": "Wolfram Language for Claude Code — evaluation, notebooks and Wolfram|Alpha through a seat-sharing MCP server, and code intelligence from Wolfram's own LSPServer",
+  "version": "0.1.0",
+  "author": {
+    "name": "Avery Davis",
+    "email": "averyd@wolfram.com"
+  },
+  "license": "MIT",
+  "userConfig": {
+    "lsp": {
+      "type": "boolean",
+      "title": "Wolfram Language code intelligence (uses a licence seat)",
+      "description": "Runs Wolfram's LSPServer for diagnostics, completion and hover in .wl, .wls, .wlt and .m files. From the first such file a session opens, it holds one Wolfram licence seat for the rest of the session, outside the seats the evaluation tools share. On by default; turn it off to keep that seat.",
+      "default": true
+    }
+  },
+  "mcpServers": {
+    "WolframLanguage": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/wolfram-mcp-server.mjs"
+      ],
+      "env": {
+        "WOLFRAM_MCP_DEFAULT_SERVER": "WolframLanguage"
+      }
+    }
+  },
+  "lspServers": {
+    "wolfram": {
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/wolfram-mcp-server.mjs",
+        "lsp"
+      ],
+      "extensionToLanguage": {
+        ".wl": "wolfram",
+        ".wls": "wolfram",
+        ".wlt": "wolfram",
+        ".m": "wolfram"
+      },
+      "startupTimeout": 60000
+    }
+  }
+}

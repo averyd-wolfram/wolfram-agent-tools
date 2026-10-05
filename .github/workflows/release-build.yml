@@ -1,0 +1,170 @@
+name: Release build
+
+# Builds what a release hands out, and publishes it (scripts/release-version.mjs,
+# plugin plan D25). Called by release-please.yml in the run that changed
+# something, with the ref to build:
+#
+# - release-please's release branch: a GitHub pre-release, v<x.y.z>-pre.<n>, of
+#   the version release-please computed, so every update of the release PR is
+#   a build someone can install and update from. Its tag is made here.
+# - a v<version> tag: that release. release-please opened it as a draft, so
+#   nobody meets a release without its files: the assets go up first, and only
+#   then is it published — a pre-release below 1.0.0.
+#
+# The build is named before anything else runs, so a ref that names no release
+# fails at once. Then CI runs in full on the exact commit, the Node floor and
+# validate-plugin included.
+#
+# Run by hand (workflow_dispatch on a tag, or a tag pushed by a person), it
+# builds that tag. A release that is already published is never rebuilt: its
+# assets would differ byte for byte, and an archive source pinned to the first
+# zip's digest would refuse the second.
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: the branch or tag to build
+        type: string
+        required: true
+      ref_type:
+        description: branch or tag
+        type: string
+        required: true
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# One build per ref at a time.
+concurrency:
+  group: release-build-${{ inputs.ref || github.ref }}
+  cancel-in-progress: false
+
+# Read-only by default: only the step that publishes needs to write, and the
+# naming job runs repository code with whatever token the workflow grants.
+permissions:
+  contents: read
+
+env:
+  BUILD_REF: ${{ inputs.ref || github.ref_name }}
+  BUILD_REF_TYPE: ${{ inputs.ref_type || github.ref_type }}
+
+jobs:
+  name:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+      create: ${{ steps.v.outputs.create }}
+      sha: ${{ steps.v.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BUILD_REF }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # The commit is pinned here, so every later job builds exactly this one
+      # even if the branch moves while CI runs.
+      - id: v
+        env:
+          RELEASE_REF: ${{ env.BUILD_REF }}
+          RELEASE_REF_TYPE: ${{ env.BUILD_REF_TYPE }}
+        run: |
+          node scripts/release-version.mjs
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  ci:
+    needs: name
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.name.outputs.sha }}
+
+  build:
+    needs: [name, ci]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      statuses: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.name.outputs.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      # Into this checkout only: the branch says what release is being
+      # prepared, and the stamp says which build of it this is.
+      - run: node scripts/release-version.mjs --stamp "${{ needs.name.outputs.version }}"
+      # Bundle, plugin archive, and SHA256SUMS.txt over both.
+      - run: node scripts/release-artifacts.mjs
+      # These files, not CI's: CI validated an unstamped build, and what is
+      # published carries the stamped version — so the stamped archive is what
+      # Claude Code's validator sees, at 2.1.289 and at the client floor.
+      - name: claude plugin validate, on the archive being published
+        env:
+          npm_config_update_notifier: "false"
+        run: |
+          mkdir -p "$RUNNER_TEMP/plugin"
+          unzip -q release/wolfram-plugin-*.zip -d "$RUNNER_TEMP/plugin"
+          npx -y @anthropic-ai/claude-code@2.1.289 plugin validate "$RUNNER_TEMP/plugin"
+          npx -y @anthropic-ai/claude-code@2.1.75 plugin validate "$RUNNER_TEMP/plugin"
+      # Files only: release/ also holds plugin/, the assembled tree the zip was
+      # made from, and gh refuses a directory.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.name.outputs.tag }}
+          SHA: ${{ needs.name.outputs.sha }}
+          PRERELEASE: ${{ needs.name.outputs.prerelease }}
+          CREATE: ${{ needs.name.outputs.create }}
+        run: |
+          mapfile -t assets < <(find release -maxdepth 1 -type f | sort)
+          pre=()
+          [ "$PRERELEASE" = true ] && pre=(--prerelease)
+          if [ "$CREATE" = true ]; then
+            # Asked again here, not only when the build was named: the version
+            # may have been released while CI ran, and a pre-release after its
+            # release ranks below it.
+            if git ls-remote --exit-code --tags origin "refs/tags/${TAG%-pre.*}" >/dev/null; then
+              echo "${TAG%-pre.*} was released while this build ran; publishing nothing"
+              exit 1
+            fi
+            gh release create "$TAG" "${assets[@]}" --target "$SHA" \
+              --title "$TAG" --generate-notes "${pre[@]}"
+            # The release PR was opened by GITHUB_TOKEN, so none of its
+            # pull_request checks ran. This build ran all of ci.yml on its exact
+            # commit, and runs the two title checks here on the release commit,
+            # whose subject is the PR's title; each result is posted where
+            # branch protection looks for it.
+            git fetch -q --depth=2 origin "$SHA"
+            subject=$(git log -1 --format=%s "$SHA")
+            PR_TITLE="$subject" node scripts/commit-types.mjs "$SHA^" "$SHA"
+            node -e 'import("./scripts/commit-types.mjs").then((m) => process.exit(m.commitType(process.argv[1]) ? 0 : 1))' "$subject"
+            for check in ci-ok commit-types conventional-title; do
+              gh api "repos/$GITHUB_REPOSITORY/statuses/$SHA" -f state=success -f context="$check" \
+                -f description="checked in the release build" \
+                -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" >/dev/null
+            done
+            exit 0
+          fi
+          # Only a plain "not found" means there is no release. Any other
+          # failure — an API error, a token problem — must stop the build, not
+          # create a second, published release beside release-please's draft.
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>view.err); then
+            if [ "$draft" != true ]; then
+              echo "$TAG is already published; a published release's assets never change"
+              exit 1
+            fi
+            # release-please's draft: files first, then it becomes visible.
+            gh release upload "$TAG" "${assets[@]}" --clobber
+            gh release edit "$TAG" --draft=false "--prerelease=$PRERELEASE"
+          elif grep -qi "release not found" view.err; then
+            gh release create "$TAG" "${assets[@]}" --verify-tag \
+              --title "$TAG" --generate-notes "${pre[@]}"
+          else
+            cat view.err
+            exit 1
+          fi

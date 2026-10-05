@@ -1,0 +1,202 @@
+name: CI
+
+on:
+  pull_request:
+  # release-build.yml calls this before it publishes anything, so a release is
+  # held to exactly what a pull request is — the Node floor and validate-plugin
+  # included — though a release branch takes merges no PR's CI has seen.
+  workflow_call:
+    inputs:
+      ref:
+        description: the commit to test; a pull request tests its own
+        type: string
+        required: false
+        default: ""
+
+# CI runs on pull requests, not on every branch push — a branch gets tested once
+# it has a PR, and a newer push to that PR supersedes the run in flight for it.
+# The one exception is release-build.yml, which calls it for every release
+# branch push and tag before it publishes; that caller queues its own runs, so
+# nothing it starts is superseded here.
+concurrency:
+  group: ci-${{ github.ref }}-${{ inputs.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    # Whether anything here needs testing. A pull request that changed only
+    # prose — markdown outside the trees a test reads or a user is shipped —
+    # skips test, build and validate-plugin; scripts/ci-changes.mjs holds the
+    # rule, and the suite checks it. Skipped at the job, not by the trigger's
+    # paths-ignore: a workflow that never starts leaves a required check
+    # waiting forever, where a skipped job reports success.
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.decide.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.ref }}
+      - id: decide
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # The PR's own changes, from where it left its base, both ends of
+          # any rename. A diff git cannot compute answers true, and a release
+          # build, which has no pull request, tests everything.
+          if [ -z "$BASE" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "needs tests: true (no pull request)"
+            exit 0
+          fi
+          code=$(node scripts/ci-changes.mjs "$BASE...$HEAD")
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "needs tests: $code"
+
+  test:
+    needs: changes
+    # Fails closed: skipped only on an explicit "false" from a changes job
+    # that succeeded. A job whose dependency failed is skipped, and a skipped
+    # required check passes — so a broken detector would otherwise have let a
+    # PR merge untested.
+    if: ${{ !cancelled() && !(needs.changes.result == 'success' && needs.changes.outputs.code == 'false') }}
+    # The suite is hermetic — it drives test/fake-kernel.mjs and starts no
+    # Wolfram kernel — so it runs on a hosted runner and spends no licence seat.
+    # It is matrixed over Node, and only Node, to prove the package runs across
+    # the range its `engines` promises: 22.13.0 is the floor the launchers guard,
+    # and the newest line catches a deprecation removal before a user on it does.
+    # Not matrixed over OS: the maintainer develops on macOS, so CI's job is to
+    # cover the Linux the local `npm test` never sees. The kernel-backed checks
+    # (test:wl, test:lsp, lint:wl, doctor) need a real installation no runner has
+    # and stay opt-in; see docs/releasing.md.
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22.13.0", "node"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  build:
+    needs: changes
+    # Fails closed: skipped only on an explicit "false" from a changes job
+    # that succeeded. A job whose dependency failed is skipped, and a skipped
+    # required check passes — so a broken detector would otherwise have let a
+    # PR merge untested.
+    if: ${{ !cancelled() && !(needs.changes.result == 'success' && needs.changes.outputs.code == 'false') }}
+    # One job, one runner: the artifacts are platform-independent, so building
+    # them anywhere builds them everywhere. This proves they still assemble on
+    # every PR and hands a reviewer something to download; the release workflow
+    # runs the same script to produce what it uploads.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run release:artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          # One name per commit: a release run can call this twice.
+          name: release-artifacts${{ inputs.ref && format('-{0}', inputs.ref) || '' }}
+          path: release/
+          if-no-files-found: error
+
+  validate-plugin:
+    # Claude Code's own validator, on the archive a user installs — extracted
+    # outside the checkout, so nothing in the repo can stand in for a file the
+    # archive lacks. Pinned to an exact client: 2.1.281 is the first whose
+    # validator checks MCP entries and 2.1.283 the first to check LSP paths, and
+    # an unpinned latest could change the verdict under an unchanged PR. This
+    # version is the validator's, not the plugin's supported client floor, which
+    # it neither raises nor tests (docs/plugin-plan.md §6). It needs no login.
+    needs: build
+    # Its own condition, because the default one also skips when any job
+    # upstream failed — including a failed changes job that build ran past.
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          # One name per commit: a release run can call this twice.
+          name: release-artifacts${{ inputs.ref && format('-{0}', inputs.ref) || '' }}
+          path: release
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Extract the archive outside any checkout
+        run: |
+          mkdir -p "$RUNNER_TEMP/plugin"
+          unzip -q release/wolfram-plugin-*.zip -d "$RUNNER_TEMP/plugin"
+      - name: claude plugin validate
+        env:
+          npm_config_update_notifier: "false"
+        run: npx -y @anthropic-ai/claude-code@2.1.289 plugin validate "$RUNNER_TEMP/plugin"
+      # The supported client floor too (plugin plan D22). A client rejects a
+      # manifest key newer than itself outright and loads none of the plugin:
+      # every client before 2.1.75 refused `userConfig` that way, which no check
+      # saw, because the validator above is newer than the floor.
+      - name: claude plugin validate, at the client floor
+        env:
+          npm_config_update_notifier: "false"
+        run: npx -y @anthropic-ai/claude-code@2.1.75 plugin validate "$RUNNER_TEMP/plugin"
+
+  public-content:
+    # The whole tree, on every pull request — prose-only ones above all, since
+    # that is where a home path or an internal host is most often pasted. Never
+    # skipped by the changes job. It checks the head, not each commit: a pushed
+    # branch of a public repository is already public, so the pre-commit hook
+    # (.githooks/pre-commit) is what keeps a finding out of history, and this
+    # is what keeps one out of main when that hook was not run.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: node scripts/public-content.mjs
+
+  ci-ok:
+    # The one check branch protection requires. The jobs above are skipped on a
+    # prose-only PR, and a skipped matrix job reports a single "test" rather
+    # than "test (22.13.0)" and "test (node)" — GitHub evaluates a job's `if`
+    # before expanding its matrix — so requiring the matrix checks would leave
+    # exactly those PRs waiting forever. This
+    # always runs, under one fixed name, and fails if anything it waits on
+    # failed or was cancelled; skipped is fine. A failed changes job fails it
+    # too, even though the tests then ran: a broken detector should be seen.
+    name: ci-ok
+    needs: [changes, test, build, validate-plugin, public-content]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Everything that ran passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: $RESULTS"
+          for result in $RESULTS; do
+            case "$result" in
+              success|skipped) ;;
+              *) echo "a required job ended as $result"; exit 1 ;;
+            esac
+          done

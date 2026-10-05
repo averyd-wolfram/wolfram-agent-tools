@@ -1,0 +1,63 @@
+name: PR Title
+
+# release-please derives the version bump and the changelog entirely from
+# Conventional Commit messages, and with squash-merge the PR title becomes that
+# one commit. So a title that is not a Conventional Commit does not error
+# anywhere — it silently produces no bump and no changelog line, and the change
+# ships in a release that never mentions it. This fails such a PR up front.
+#
+# The version is decided by those types (plugin plan D25), so commit-types
+# below also holds every commit the PR adds, and its title, to what it changes:
+# a docs: or test: commit that edits a skill or the server would ship in no
+# release. Both jobs are required checks.
+#
+# `edited` is in the trigger on purpose: a title fixed after opening must
+# re-run these, and the bare `pull_request` event does not fire on a title edit.
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  conventional-title:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # The Conventional Commit types release-please recognises — the same
+          # set release-please-config.json sorts into changelog sections, plus
+          # `revert`, which release-please handles natively. A title outside this
+          # set is rejected, so the two never drift into "valid title, no bump".
+          # release-please's own "chore(main): release x.y.z" PR passes: `chore`
+          # is here and an optional scope is allowed.
+          types: |
+            feat
+            fix
+            perf
+            refactor
+            docs
+            chore
+            test
+            ci
+            build
+            style
+            revert
+
+  commit-types:
+    runs-on: ubuntu-latest
+    steps:
+      # Every branch and tag: the range needs the base's history, and a commit
+      # already inside a published build (reachable from a v* tag) is skipped.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: node scripts/commit-types.mjs "$BASE" "$HEAD"

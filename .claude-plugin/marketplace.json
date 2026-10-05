@@ -1,0 +1,15 @@
+{
+  "name": "wolfram",
+  "description": "This repository serving its assembled plugin (release/plugin) to sessions in it",
+  "owner": {
+    "name": "Avery Davis",
+    "email": "averyd@wolfram.com"
+  },
+  "plugins": [
+    {
+      "name": "wolfram",
+      "source": "./release/plugin",
+      "description": "Wolfram Language for Claude Code — evaluation, notebooks and Wolfram|Alpha through a seat-sharing MCP server, and code intelligence from Wolfram's own LSPServer"
+    }
+  ]
+}

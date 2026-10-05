@@ -1,0 +1,10 @@
+{
+  "editor.formatOnSave": true,
+  "[typescript]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[wolfram]": {
+    "editor.defaultFormatter": "WolframResearch.official-wolfram-language-support"
+  },
+  "eslint.validate": ["typescript"]
+}

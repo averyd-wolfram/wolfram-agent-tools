@@ -1,0 +1,81 @@
+name: Release
+
+# The whole release, in one run per push to main (plugin plan D25).
+# release-please reads the Conventional Commits landed there and keeps one
+# release pull request whose version it computes from them, with the new
+# CHANGELOG.md section. Then, in this same run:
+#
+# - when it opened or updated that PR, the PR's branch is built and published
+#   as the next pre-release of the computed version, v<x.y.z>-pre.<n>;
+# - when merging the PR released it — a draft GitHub release and its tag
+#   (release-please-config.json: draft, force-tag-creation) — the tag is built
+#   and the draft published.
+#
+# One run, because everything here acts with GITHUB_TOKEN, and by GitHub's
+# rule against recursive runs nothing that token does — opening the PR,
+# pushing its branch, making the tag — starts another workflow. So nothing
+# waits to be started: the build is a job of this run, and no personal token
+# has to be made, stored and rotated (a deliberate choice). The one setting it
+# needs: Settings → Actions → General → "Allow GitHub Actions to create and
+# approve pull requests", or release-please cannot open its PR.
+#
+# One integration branch only: every release writes into the one
+# v<x.y.z>-pre.<n> tag namespace, so two would race for numbers and interleave
+# two code lines' builds.
+on:
+  push:
+    branches: [main]
+
+# One release run at a time, never cancelled once running. GitHub keeps only
+# the newest pending run, so pushes that land meanwhile collapse into one,
+# which sees all of them.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+      pr_branch: ${{ steps.rp.outputs.pr && fromJSON(steps.rp.outputs.pr).headBranchName }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: rp
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          # The branch that was pushed is the one being released.
+          target-branch: ${{ github.ref_name }}
+
+  # Only when release-please changed its PR: a merge that brought nothing
+  # releasable — docs alone — leaves the PR as it was and builds nothing.
+  prerelease:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.pr_branch }}
+    permissions:
+      contents: write
+      statuses: write
+    uses: ./.github/workflows/release-build.yml
+    with:
+      ref: ${{ needs.release-please.outputs.pr_branch }}
+      ref_type: branch
+
+  release:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    permissions:
+      contents: write
+      statuses: write
+    uses: ./.github/workflows/release-build.yml
+    with:
+      ref: ${{ needs.release-please.outputs.tag_name }}
+      ref_type: tag

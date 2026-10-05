@@ -1,0 +1,72 @@
+{
+  "name": "wolfram-mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP server that drives a locally installed Wolfram kernel, with lazy start and idle shutdown.",
+  "keywords": [
+    "mcp",
+    "modelcontextprotocol",
+    "wolfram",
+    "mathematica",
+    "wolfram-language",
+    "computation"
+  ],
+  "license": "MIT",
+  "author": {
+    "name": "Avery Davis",
+    "email": "averyd@wolfram.com"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "bin": {
+    "wolfram-mcp-server": "dist/index.js"
+  },
+  "main": "./dist/lib.js",
+  "types": "./dist/lib.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/lib.d.ts",
+      "import": "./dist/lib.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint src",
+    "format": "prettier --write src",
+    "format:check": "prettier --check src",
+    "lint:wl": "wolframscript -file scripts/lint-wl.wls",
+    "prepare": "npm run build && node scripts/install-hooks.mjs",
+    "test": "npm run build && npm run lint && npm run format:check && node test/smoke.mjs && node test/public-content.mjs",
+    "check:public": "node scripts/public-content.mjs",
+    "test:wl": "wolframscript -file scripts/run-contract.wls",
+    "test:custom": "npm run build && node scripts/custom-server.mjs",
+    "test:lsp": "npm run build && node scripts/lsp-contract.mjs",
+    "doctor": "npm run build && node dist/index.js doctor",
+    "metrics": "node scripts/metrics.mjs",
+    "bundle:js": "npm run build && node scripts/bundle-js.mjs",
+    "release:artifacts": "node scripts/release-artifacts.mjs",
+    "mcp": "node scripts/mcp-server.mjs",
+    "test:container": "node scripts/container-acceptance.mjs",
+    "test:client": "node scripts/client-acceptance.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.9.1",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.9.6",
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.68.0"
+  }
+}
