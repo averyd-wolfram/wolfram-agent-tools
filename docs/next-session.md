@@ -14,8 +14,8 @@ in `docs/design.md`.
 
 ## What to do next, in order
 
-1. **The first release.** release-please's first run proposes `0.1.0`, from the history's
-   opening `feat:`; check the release PR,
+1. **The first release.** release-please proposes `0.1.0` from its configured
+   `initial-version` (without it, its first run asked for `1.0.0`); check the release PR,
    its pre-release `v0.1.0-pre.1`, and that merging it publishes `v0.1.0` with the bundle, the
    plugin archive and `SHA256SUMS.txt` attached (`docs/releasing.md`).
 2. **The flaky start-timeout check.** "the library's deferredBackend runs on the configured

@@ -4887,6 +4887,19 @@ heading("Every release build is named, and the name is in every file");
   const tree = join(home, "stamp-tree");
   const rpConfig = JSON.parse(readFileSync(join(root, "release-please-config.json"), "utf8"));
   const extras = rpConfig.packages["."]["extra-files"].map((extra) => extra.path);
+
+  // Until the first release, release-please finds no tag to bump from and
+  // ignores the manifest's 0.0.0: it proposes its initial-version, 1.0.0 unless
+  // configured, which titled the first release PR "release 1.0.0" and would have
+  // published v1.0.0-pre.1 over a tree that says 0.1.0.
+  const released = JSON.parse(readFileSync(join(root, ".release-please-manifest.json"), "utf8"))["."];
+  const firstVersion = rpConfig.packages["."]["initial-version"] ?? "1.0.0";
+  const treeVersion = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
+  check(
+    "before the first release, release-please proposes the version the tree carries",
+    released !== "0.0.0" || firstVersion === treeVersion,
+    `first release ${firstVersion}, tree ${treeVersion}`,
+  );
   for (const file of ["package.json", "package-lock.json", "release-please-config.json", ...extras]) {
     mkdirSync(dirname(join(tree, file)), { recursive: true });
     writeFileSync(join(tree, file), readFileSync(join(root, file)));

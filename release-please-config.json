@@ -4,6 +4,7 @@
     ".": {
       "release-type": "node",
       "package-name": "wolfram-mcp-server",
+      "initial-version": "0.1.0",
       "changelog-path": "CHANGELOG.md",
       "include-v-in-tag": true,
       "include-component-in-tag": false,

@@ -169,10 +169,11 @@ which also covers the lockfile), so a pre-release's archive and bundle both say 
 while the branch still says `0.1.0`. The suite checks the naming and the stamp.
 
 `.release-please-manifest.json` records the last version released, which release-please bumps
-from. It starts at `0.0.0`, and the history begins with a `feat:`, so the first release PR
-computes `0.1.0` with no one pinning it; from there every release is a `0.x` minor or patch until
-1.0.0 (`bump-minor-pre-major`). A `fix:` or `chore:` as the first commit would have made it
-`0.0.1`, below the `0.1.0` the files already carry.
+from. Before the first release there is no tag to bump from, and release-please ignores the
+manifest's `0.0.0` and proposes its `initial-version` — `1.0.0` unless configured, which is what
+the first release PR asked for. So the config sets `initial-version` to the `0.1.0` the files
+carry, and the suite fails while the two differ; from there every release is a `0.x` minor or
+patch until 1.0.0 (`bump-minor-pre-major`).
 
 ## Repo settings the automation depends on
 
