@@ -115,7 +115,10 @@ jobs:
       # The release branch a release of this commit would leave, from the zip
       # just built (scripts/release-branch.mjs), for validate-plugin to check
       # as the marketplace other projects add.
+      # Only where the script exists: a release run calls this on a tag, which
+      # may predate it.
       - run: |
+          [ -f scripts/release-branch.mjs ] || exit 0
           version=$(node -p 'require("./package.json").version')
           node scripts/release-branch.mjs tree "release/wolfram-plugin-$version.zip" release/branch "$version"
       - uses: actions/upload-artifact@v7
@@ -170,6 +173,7 @@ jobs:
         env:
           npm_config_update_notifier: "false"
         run: |
+          [ -d release/branch ] || exit 0
           npx -y @anthropic-ai/claude-code@2.1.289 plugin validate release/branch
           npx -y @anthropic-ai/claude-code@2.1.75 plugin validate release/branch
 

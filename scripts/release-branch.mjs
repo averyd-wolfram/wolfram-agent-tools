@@ -28,11 +28,13 @@
  * race of its own.
  */
 import { execFileSync } from "node:child_process";
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { compareVersions, latestRelease, listReleases, tagCommits, tagVersion } from "./release-version.mjs";
 
+/** The repository a project adds as its marketplace. */
+export const REPO = "averyd-wolfram/wolfram-agent-tools";
 export const MARKETPLACE = "wolfram-agent-tools";
 export const PLUGIN = "wolfram";
 export const BRANCH = "release";
@@ -61,10 +63,13 @@ export function advancePlan({ releases, branchVersion, latestTag, tags }) {
   const version = tagVersion(newest);
   const order = branchVersion === undefined ? 1 : compareVersions(version, branchVersion);
   const result = { newest, version, move: order > 0, latest: latestTag !== newest };
+  // Latest stays put too: moving it would name a release the branch, which
+  // is what projects run, doesn't carry.
   if (order < 0) {
+    result.latest = false;
     result.ahead =
       `the ${BRANCH} branch carries ${branchVersion}, newer than any published release (${newest}): ` +
-      "it never moves back, so it stays until a release passes it";
+      "it never moves back, so it and Latest stay until a release passes it";
     return result;
   }
   const tag = versionTag(version);
@@ -81,6 +86,9 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
  * holds another.
  */
 export function branchTree(zip, dir, version) {
+  // unzip into a directory already there would merge the archive with
+  // whatever was left in it.
+  if (existsSync(dir)) throw new Error(`${dir} already exists; the branch's tree is built into a new one`);
   const plugin = join(dir, "plugin");
   mkdirSync(plugin, { recursive: true });
   execFileSync("unzip", ["-q", zip, "-d", plugin]);
@@ -93,7 +101,7 @@ export function branchTree(zip, dir, version) {
   // `claude plugin validate` reports the two disagreeing.
   // The description twice: the client floor, 2.1.75, reads it from
   // `metadata` and warns of it missing there; later clients read the top level.
-  const description = `The ${PLUGIN} plugin's latest release, from averyd-wolfram/wolfram-agent-tools`;
+  const description = `The ${PLUGIN} plugin's latest release, from ${REPO}`;
   const marketplace = {
     name: MARKETPLACE,
     description,
@@ -112,7 +120,7 @@ function readme(version) {
       {
         extraKnownMarketplaces: {
           [MARKETPLACE]: {
-            source: { source: "github", repo: "averyd-wolfram/wolfram-agent-tools", ref },
+            source: { source: "github", repo: REPO, ref },
             ...(autoUpdate ? { autoUpdate: true } : {}),
           },
         },
@@ -125,7 +133,7 @@ function readme(version) {
 
 This branch is written by the release workflow, never by hand. It holds the
 \`${PLUGIN}\` Claude Code plugin from the newest release of
-[wolfram-agent-tools](https://github.com/averyd-wolfram/wolfram-agent-tools) —
+[wolfram-agent-tools](https://github.com/${REPO}) —
 \`plugin/\` is exactly that release's \`${PLUGIN}-plugin-${version}.zip\` — as a
 marketplace named \`${MARKETPLACE}\`. It moves only after a release's assets are
 published and verified, and only forward.
@@ -152,7 +160,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       const repo = process.env.GITHUB_REPOSITORY;
       if (!repo) throw new Error("GITHUB_REPOSITORY names no repository");
       const run = (cmd, argv) => execFileSync(cmd, argv, { encoding: "utf8" });
-      const heads = run("git", ["ls-remote", "--heads", "origin", BRANCH]).trim();
+      // The full ref: a bare `release` matches any branch ending in /release.
+      const heads = run("git", ["ls-remote", "--heads", "origin", `refs/heads/${BRANCH}`]).trim();
       const branchVersion = heads
         ? JSON.parse(
             run("gh", ["api", "-H", "Accept: application/vnd.github.raw+json", `repos/${repo}/contents/plugin/.claude-plugin/plugin.json?ref=${BRANCH}`]),

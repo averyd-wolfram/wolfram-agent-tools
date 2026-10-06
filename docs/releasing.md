@@ -131,10 +131,9 @@ that fails partway — a release build that failed included — is finished by t
 (`gh workflow run release-please.yml --ref main`).
 
 A draft older than the newest release is the exception: it is left for a person to finish or
-delete, and the run warns of it. A release is published as Latest, so finishing it would take
-Latest from the newer one, and a draft whose build fails every time would otherwise fail every
-run. To finish one, dispatch `release-build.yml` on its tag, then mark the newest release Latest
-again with `gh release edit <newest> --latest`.
+delete, and the run warns of it, since a draft whose build fails every time would otherwise fail
+every run. To finish one, dispatch `release-build.yml` on its tag. It is published with Latest
+off, so Latest and the `release` branch stay on the newest release (`advance`, below).
 
 **One run, and no personal token.** Everything here acts with `GITHUB_TOKEN`, and by GitHub's
 rule against recursive runs nothing that token does — opening the PR, pushing its branch, making

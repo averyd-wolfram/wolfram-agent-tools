@@ -76,11 +76,12 @@ check(
   plan({ releases: [rel("v0.9.0"), rel("v0.10.0")], branchVersion: "0.9.0", tags: [] }).newest === "v0.10.0",
 );
 // The branch never goes back: if it carries a version no published release
-// does — one deleted, or flagged pre-release by hand — it stays and says so.
-const ahead = plan({ branchVersion: "0.1.3", tags: ["wolfram--v0.1.3"] });
+// does — one deleted, or flagged pre-release by hand — it stays and says so,
+// and Latest isn't moved to a release the branch doesn't carry.
+const ahead = plan({ branchVersion: "0.1.3", latestTag: "v0.1.1", tags: ["wolfram--v0.1.3"] });
 check(
-  "a branch ahead of every published release stays where it is, and says so",
-  !ahead.move && !ahead.tag && /0\.1\.3/.test(ahead.ahead ?? ""),
+  "a branch ahead of every published release stays where it is, says so, and leaves Latest",
+  !ahead.move && !ahead.tag && !ahead.latest && /0\.1\.3/.test(ahead.ahead ?? ""),
   show(ahead),
 );
 const none = plan({ releases: [rel("v0.1.0-pre.1", false, true)], branchVersion: undefined, latestTag: undefined, tags: [] });
@@ -121,7 +122,15 @@ try {
       existsSync(join(tree, "plugin", "wolfram-mcp-server.mjs")) &&
       existsSync(join(tree, "plugin", "skills", "doctor", "SKILL.md")),
   );
-  check("the branch says what it is and how to follow it", /"ref": "release"/.test(readFileSync(join(tree, "README.md"), "utf8")));
+  // Into a fresh directory only: unzip into one already there would merge
+  // the archive with whatever was left in it.
+  let stale = "";
+  try {
+    branchTree(zip, tree, "9.8.7");
+  } catch (err) {
+    stale = err.message;
+  }
+  check("a directory that already exists is refused, not merged into", /exists/.test(stale), stale);
   let refused = "";
   try {
     branchTree(zip, join(work, "other"), "9.8.8");
