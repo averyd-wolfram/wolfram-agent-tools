@@ -26,6 +26,8 @@
  *                   InvalidArguments, then sits in its REPL — the measured shape
  *                   of a MCP_SERVER_NAME the paclet cannot resolve, which does
  *                   not exit and so used to be ended only by the start timeout
+ *   shadowed-start  warns StartMCPServer::shdw, as a kernel does when another
+ *                   context defines a symbol of that name, then serves normally
  *   unreadable-server-file  a server whose file will not read: a cause other
  *                   than not-found, followed by the same StartMCPServer failure
  *   no-paclet-extension  a paclet-qualified name whose paclet has no AgentTools
@@ -234,6 +236,15 @@ if (mode === "no-seats") {
 } else if (mode === "mute") {
   process.stdin.resume();
   setInterval(() => {}, 1000);
+} else if (mode === "shadowed-start") {
+  // A symbol named StartMCPServer defined in another context, by an init file
+  // or a loaded package: the kernel warns, then the server starts as usual.
+  reportFacts();
+  process.stdout.write(
+    "StartMCPServer::shdw: Symbol StartMCPServer appears in multiple contexts " +
+      "{Wolfram`AgentTools`, Global`}; definitions in context Wolfram`AgentTools` may " +
+      "shadow or be shadowed by other definitions.\n");
+  run();
 } else {
   reportFacts();
   run();

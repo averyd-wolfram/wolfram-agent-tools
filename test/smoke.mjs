@@ -3111,6 +3111,20 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
   );
   await unreadable.client.close();
 
+  // But only StartMCPServer's failure, not any message tagged with its name: a
+  // symbol of that name defined elsewhere makes the kernel warn
+  // StartMCPServer::shdw and then serve normally, and watching every
+  // StartMCPServer:: line killed that working start.
+  const shadowed = await connect({ FAKE_MODE: "shadowed-start", WOLFRAM_MCP_START_TIMEOUT_SECONDS: "20" });
+  const served = await shadowed.client.callTool(
+    { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
+  check(
+    "a warning that only shares StartMCPServer's name does not end a start that serves",
+    served.isError !== true && /evaluated/.test(served?.content?.[0]?.text ?? ""),
+    (served?.content?.[0]?.text ?? "").replace(/\s+/g, " ").slice(0, 80),
+  );
+  await shadowed.client.close();
+
   // The same on the shared path, the default: the kernel starts in the broker's
   // pool and its failure crosses the socket as text, so nothing there may turn
   // it into a back-off either.
@@ -3239,44 +3253,9 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
       `${after} start(s) after it`,
     );
 
-    // Requests that arrive together — a client's connect burst — all pass the
-    // window before any failure is recorded. Each grew a kernel of its own, and
-    // past the budget retired another session's to make room. A flavour's first
-    // start now runs alone, and the rest wait for its answer.
-    const burstMarker = join(home, "marker-unresolved-burst");
-    process.env.FAKE_MARKER = burstMarker;
-    const burstPool = new lib.KernelPool({
-      bin: fakeKernel,
-      serverName: "WolframLanguage",
-      idleMs: 60_000,
-      startTimeoutMs: 20_000,
-      clientInfo: { name: "smoke", version: "1.0.0" },
-      log: () => {},
-      reserveSeats: 0,
-      licence: { maxProcesses: 2, type: null },
-      learnFromKernels: false,
-    });
-    await burstPool.run(healthy, evaluate);
-    const beforeBurst = starts(burstMarker);
-    const burst = await Promise.all(
-      [1, 2, 3].map(() => burstPool.run(broken, evaluate).then(() => "served", (e) => e.message)),
-    );
-    const burstStarts = starts(burstMarker) - beforeBurst;
-    const healthyAfter = await burstPool
-      .run(healthy, evaluate)
-      .then((r) => r.content?.[0]?.text ?? "", (e) => e.message);
-    const totalStarts = starts(burstMarker) - beforeBurst;
-    await burstPool.stop();
-    check(
-      "a burst for a server that does not resolve starts one kernel, and evicts no other session's",
-      burstStarts === 1 && burst.filter((m) => /tried again in/.test(m)).length === 2 &&
-        /evaluated/.test(healthyAfter) && totalStarts === 1,
-      `${burstStarts} start(s) for 3 requests, ${totalStarts} counting the healthy session after`,
-    );
-
-    // And a healthy flavour's cold burst is not slowed for it: with seats free
-    // its kernels start in parallel, as before. A first-start gate, tried and
-    // reverted, made each request wait for the one before to start.
+    // A healthy flavour's cold burst starts its kernels in parallel. A
+    // first-start gate, tried for #19 and reverted, made each request wait for
+    // the one before to start; whatever fixes #19 must keep this.
     process.env.FAKE_INIT_DELAY_MS = "1500";
     const coldPool = new lib.KernelPool({
       bin: fakeKernel,
@@ -3300,10 +3279,11 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
       `${coldMs}ms for three requests on kernels that take 1.5s to start`,
     );
 
-    // The queue that rule fills must be woken when the start succeeds, not
-    // when the request that made it finishes, and a waiter it holds back must
-    // not hold up another flavour's behind it. Each flavour carries its own
-    // fake timings, declared so the pool starts its kernel with them.
+    // And a request of a flavour whose first kernel is still starting is served
+    // once the start succeeds, not when the request that made it finishes: a
+    // hold for #19, tried and reverted, kept it waiting for the whole call.
+    // Each flavour carries its own fake timings, declared so the pool starts
+    // its kernel with them.
     const timed = (server, timings) =>
       lib.kernelFlavour({
         MCP_SERVER_NAME: server,
@@ -3324,8 +3304,8 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
       });
     const list = (client) => client.listTools();
 
-    // Woken on start: two idle kernels of another flavour fill the budget; F
-    // starts one (1s) for a slow call (4s), then asks for its tool list.
+    // Two idle kernels of another flavour fill the budget; F starts one (1s)
+    // for a slow call (4s), then asks for its tool list.
     const woken = queuePool();
     const other = timed("WolframAlpha", {});
     await Promise.all([woken.run(other, evaluate), woken.run(other, evaluate)]);
@@ -3343,29 +3323,6 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
       `${listedMs}ms for a tool list behind a 1s start and a 4s call`,
     );
 
-    // Not held up behind one: H's kernel is busy (3s), F's first start is under
-    // way (6s), and an F request and then a G request queue. When H's kernel
-    // frees, G can take its seat at once; the held F waiter must not stop it.
-    const fifo = queuePool();
-    const busyH = timed("WolframAlpha", { FAKE_CALL_DELAY_MS: "3000" });
-    const slowStartF = timed("WolframLanguage", { FAKE_INIT_DELAY_MS: "6000" });
-    const quickG = timed("Wolfram", {});
-    const fifoAt = Date.now();
-    const hCall = fifo.run(busyH, evaluate);
-    await new Promise((r) => setTimeout(r, 200));
-    const fFirst = fifo.run(slowStartF, list);
-    await new Promise((r) => setTimeout(r, 200));
-    const fSecond = fifo.run(slowStartF, list);
-    await new Promise((r) => setTimeout(r, 200));
-    await fifo.run(quickG, list);
-    const gMs = Date.now() - fifoAt;
-    await Promise.all([hCall, fFirst, fSecond]);
-    await fifo.stop();
-    check(
-      "a waiter held for an unproven start does not hold up another flavour's behind it",
-      gMs < 5_000,
-      `${gMs}ms for a request that could take the seat freed at about 3s`,
-    );
   } finally {
     for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key];
     Object.assign(process.env, savedEnv);

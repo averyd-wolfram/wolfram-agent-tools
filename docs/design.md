@@ -217,11 +217,15 @@ instead of the server.
   cause — that, a paclet that is missing, has no AgentTools extension or lacks the server, a
   server file that will not read — `StartMCPServer` is then handed the failure and says
   `StartMCPServer::InvalidArguments`, and the kernel drops to its REPL. `kernel.ts` watches
-  the kernel's output for any `StartMCPServer::` message (and `MCPServerNotFound`) and fails
-  immediately instead, which is what makes passing the name through safe. Such a failure
-  starts only a short back-off, on both paths: it is fixed by creating the server or
-  installing its paclet, which the full back-off, keyed on the kernel binary, cannot see,
-  but every ask starts a kernel, so a burst of calls shares one failure for a few seconds.
+  the kernel's output for that message (and `MCPServerNotFound`) and fails immediately
+  instead, which is what makes passing the name through safe — that message, not any
+  tagged `StartMCPServer::`, since a symbol of that name defined elsewhere warns
+  `StartMCPServer::shdw` on a start that then serves. Such a failure starts only a short
+  back-off, on both paths: it is fixed by creating the server or installing its paclet,
+  which the full back-off, keyed on the kernel binary, cannot see, but every ask starts a
+  kernel, so calls that follow it within a few seconds are answered from it. Calls that
+  reach a shared broker together, before any failure is recorded, each still start a
+  kernel, and past the budget may retire another session's (#19).
 - All four built-in servers advertise `prompts`; none advertise `resources`. Tool counts:
   `Wolfram` 3, `WolframLanguage` 7, `WolframAlpha` 2, `WolframPacletDevelopment` 13.
 - Sessions survive a kernel restart. The evaluator persists session state to disk and

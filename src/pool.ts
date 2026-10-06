@@ -151,11 +151,10 @@ export class KernelPool {
    * parallel for simultaneous ones, and at the budget `#swapOut` retired other
    * sessions' idle kernels to make room for a start that could not succeed
    * (issue #19). Keyed on the flavour, so sharing it changes no answer: a
-   * session of the same flavour would get the same one from a kernel.
+   * session of the same flavour would get the same one from a kernel. A burst
+   * that arrives before the first failure is recorded is not covered: #19.
    */
   readonly #unresolved = new Map<string, { at: number; reason: string }>();
-  /** Flavours whose server has started, until one of theirs fails to. */
-  readonly #proven = new Set<string>();
 
   constructor(options: KernelPoolOptions) {
     this.#options = options;
@@ -246,11 +245,6 @@ export class KernelPool {
       log: (message) => log(`kernel ${index}: ${message}`),
       onFacts: (facts, chosen) => this.#learn(facts, chosen),
       onReady: async (client: Client) => {
-        // Its server starts, so its flavour may take a seat from an idle kernel
-        // of another, and requests held back for this start are served now
-        // rather than when the request that made it finishes.
-        this.#proven.add(flavour.digest);
-        this.#drainWaiters();
         await this.#options.onKernelReady?.(client, flavour.digest);
       },
     });
@@ -328,7 +322,7 @@ export class KernelPool {
 
     // Nothing of ours is free and the budget is spent, so a seat has to come
     // from somewhere. An idle kernel of another flavour is the cheapest loss.
-    if (this.#maySwap(flavour) && this.#swapOut(flavour)) return this.#grow(flavour);
+    if (this.#swapOut(flavour)) return this.#grow(flavour);
 
     const spent = this.#idle(flavour);
     if (spent) {
@@ -434,60 +428,56 @@ export class KernelPool {
   }
 
   #drain(): void {
-    // In queue order, so a stream of one flavour cannot starve a session of
-    // another: a waiter with no seat to be had stops the drain. One held back
-    // only because its flavour's first start is unproven is passed over
-    // instead — it is woken when that start ends — so it cannot hold up a
-    // waiter of another flavour that could take a seat now. The tiers are
-    // #acquire's, including the swap, which is why a waiter for a flavour with
-    // no kernel at all still gets served rather than waiting forever.
-    let at = 0;
-    while (at < this.#waiters.length) {
-      const waiter = this.#waiters[at];
-      if (!waiter) return;
-      const outcome = this.#serve(waiter);
-      if (outcome === "served") this.#waiters.splice(at, 1);
-      else if (outcome === "held") at += 1;
-      else return;
-    }
-  }
+    // Strictly the head of the queue, so a stream of one flavour cannot starve a
+    // session of another. The tiers below are #acquire's, applied to whatever the
+    // head waiter needs — including the swap, which is why a waiter for a flavour
+    // with no kernel at all still gets served rather than waiting forever.
+    while (this.#waiters.length > 0) {
+      const head = this.#waiters[0];
+      if (!head) return;
+      const { flavour } = head;
+      // Turned away before any tier below can grow a kernel or retire another
+      // session's for it: its flavour's server stopped starting while it waited.
+      const refusal = this.#refusal(flavour);
+      if (refusal) {
+        this.#waiters.shift();
+        head.reject(refusal);
+        continue;
+      }
+      const mine = (s: Slot) => s.flavour.digest === flavour.digest;
 
-  /** One waiter's turn: served (or turned away), held for its first start, or no seat. */
-  #serve(waiter: Waiter): "served" | "held" | "blocked" {
-    const { flavour } = waiter;
-    // Turned away before any tier below can grow a kernel or retire another
-    // session's for it: its flavour's server stopped starting while it waited.
-    const refusal = this.#refusal(flavour);
-    if (refusal) {
-      waiter.reject(refusal);
-      return "served";
+      const take = (slot: Slot): void => {
+        this.#waiters.shift();
+        slot.busy = true;
+        head.resolve(slot);
+      };
+
+      const fresh = this.#slots.find((s) => !s.busy && !s.session.abandoned && mine(s));
+      if (fresh) {
+        take(fresh);
+        continue;
+      }
+      if (this.#slots.length < this.#budget) {
+        this.#waiters.shift();
+        void this.#grow(flavour).then(head.resolve);
+        continue;
+      }
+      if (this.#swapOut(flavour)) {
+        this.#waiters.shift();
+        void this.#grow(flavour).then(head.resolve);
+        continue;
+      }
+      const spent = this.#idle(flavour);
+      if (spent) {
+        this.#options.log(
+          `budget reached; a waiter is reusing a kernel that holds an abandoned ` +
+            `call, which stops it`,
+        );
+        take(spent);
+        continue;
+      }
+      return;
     }
-    const mine = (s: Slot) => s.flavour.digest === flavour.digest;
-    const take = (slot: Slot): "served" => {
-      slot.busy = true;
-      waiter.resolve(slot);
-      return "served";
-    };
-    const fresh = this.#slots.find((s) => !s.busy && !s.session.abandoned && mine(s));
-    if (fresh) return take(fresh);
-    if (this.#slots.length < this.#budget) {
-      void this.#grow(flavour).then(waiter.resolve);
-      return "served";
-    }
-    const maySwap = this.#maySwap(flavour);
-    if (maySwap && this.#swapOut(flavour)) {
-      void this.#grow(flavour).then(waiter.resolve);
-      return "served";
-    }
-    const spent = this.#idle(flavour);
-    if (spent) {
-      this.#options.log(
-        `budget reached; a waiter is reusing a kernel that holds an abandoned ` +
-          `call, which stops it`,
-      );
-      return take(spent);
-    }
-    return maySwap ? "blocked" : "held";
   }
 
   /**
@@ -516,25 +506,8 @@ export class KernelPool {
     }
   }
 
-  /**
-   * Whether `flavour` may retire another session's idle kernel to get a seat:
-   * not while its first start is still under way. Requests arriving together —
-   * a client's connect burst — each grew a kernel, and past the budget each
-   * retired another session's to make room, for starts that, when the server
-   * would not start, could not succeed (#19). They queue instead, and are
-   * served once that start succeeds or refused by its failure, so none waits
-   * forever. A flavour whose server has started — even if that kernel has
-   * since idled out and is restarting — or with none under way, may swap.
-   */
-  #maySwap(flavour: KernelFlavour): boolean {
-    return (
-      this.#proven.has(flavour.digest) ||
-      !this.#slots.some((s) => s.flavour.digest === flavour.digest)
-    );
-  }
-
-  #hasRunning(flavour: KernelFlavour): boolean {
-    return this.#slots.some((s) => s.flavour.digest === flavour.digest && s.session.running);
+  #now(): number {
+    return (this.#options.clock ?? Date.now)();
   }
 
   #recordUnresolved(digest: string, err: unknown): void {
@@ -545,20 +518,12 @@ export class KernelPool {
       if (now - known.at >= NOT_RESOLVED_BACKOFF_MS) this.#unresolved.delete(key);
     }
     this.#unresolved.set(digest, { at: now, reason: errorText(err) });
-    this.#proven.delete(digest);
   }
 
-  #now(): number {
-    return (this.#options.clock ?? Date.now)();
-  }
-
-  /** The refusal for a request while its flavour's server name recently did not resolve. */
+  /** The refusal for a request while its flavour's server recently would not start. */
   #refusal(flavour: KernelFlavour): ServerNotResolved | null {
     const known = this.#unresolved.get(flavour.digest);
     if (!known) return null;
-    // A kernel of this flavour that is serving says the server starts; one
-    // failed extra start must not shut the flavour out from it.
-    if (this.#hasRunning(flavour)) return null;
     const age = this.#now() - known.at;
     if (age >= NOT_RESOLVED_BACKOFF_MS) {
       this.#unresolved.delete(flavour.digest);
@@ -567,7 +532,9 @@ export class KernelPool {
     return new ServerNotResolved(
       `a kernel for this server could not start it ${formatWait(age)} ago, so ` +
         `none was started for this request; it is tried again in ` +
-        `${formatWait(NOT_RESOLVED_BACKOFF_MS - age)}.\n\nThe failure was: ${known.reason}`,
+        `${formatWait(NOT_RESOLVED_BACKOFF_MS - age)}; meanwhile, check the server ` +
+        `MCP_SERVER_NAME names: create it, install the paclet that provides it, or ` +
+        `repair its definition.\n\nThe failure was: ${known.reason}`,
     );
   }
 

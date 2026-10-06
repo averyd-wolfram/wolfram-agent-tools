@@ -123,11 +123,13 @@ interface AbandonedWork {
  * failure, matches no definition of its own, and says so as
  * `StartMCPServer::InvalidArguments`, quoting the cause. Measured on a 15.0
  * kernel with AgentTools 2.2.7: the cause, then that line, then the kernel's
- * REPL, which reads the client's JSON as Wolfram Language. So any
- * `StartMCPServer::` message is the one signal that no server is coming,
- * whatever the cause; `MCPServerNotFound` is kept for a kernel that printed only
- * the cause. A list of the causes' own message names missed some and named two
- * the start path never raises (issue #5).
+ * REPL, which reads the client's JSON as Wolfram Language. So
+ * `StartMCPServer::InvalidArguments` is the one signal that no server is
+ * coming, whatever the cause; `MCPServerNotFound` is kept for a kernel that
+ * printed only the cause. A list of the causes' own message names missed some
+ * and named two the start path never raises (issue #5). Not any
+ * `StartMCPServer::` message: a symbol of that name defined elsewhere makes the
+ * kernel print `StartMCPServer::shdw` and then serve normally (issue #5).
  *
  * Watched for because such a kernel does not exit, so the only thing that ever
  * ended the wait was the start timeout, for an answer the kernel gave in its
@@ -136,7 +138,8 @@ interface AbandonedWork {
  * user-defined one. Pinned by `server-not-found-message-is-what-we-watch-for`
  * and `an-unresolvable-server-says-so-from-StartMCPServer` in the `.wlt`.
  */
-const SERVER_NOT_FOUND = /StartMCPServer::|MCPServerNotFound|No MCPServerObject found for name/;
+const SERVER_NOT_FOUND =
+  /StartMCPServer::InvalidArguments|MCPServerNotFound|No MCPServerObject found for name/;
 
 /**
  * A start that ended because the kernel could not start its MCP server.
