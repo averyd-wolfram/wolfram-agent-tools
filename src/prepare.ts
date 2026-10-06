@@ -68,9 +68,9 @@ export class PreparationTimeout extends Error {
       `a Wolfram kernel was not ready within ${budgetText(totalMs)} ` +
         `(WOLFRAM_MCP_START_TIMEOUT_SECONDS): time ran out ${began ? "while" : "before"} ` +
         `${stage}` +
-        // Its own sentence: the detail is often another error's message, the
-        // handshake's among them, which begins in lower case.
-        (detail ? `. ${detail.charAt(0).toUpperCase()}${detail.slice(1)}` : ""),
+        // Verbatim: the detail is often another error's own words, which are
+        // never rewritten, so a sentence's capital is its own.
+        (detail ? `. ${detail}` : ""),
       cause === undefined ? undefined : { cause },
     );
     this.name = "PreparationTimeout";
@@ -223,7 +223,9 @@ export class Deadline {
    */
   check(stage: string): void {
     if (this.signal.aborted) throw new PreparationStopped();
-    if (this.remaining() <= 0) throw new PreparationTimeout(stage, this.totalMs);
+    if (this.remaining() <= 0) {
+      throw new PreparationTimeout(stage, this.totalMs, undefined, undefined, { began: false });
+    }
   }
 }
 

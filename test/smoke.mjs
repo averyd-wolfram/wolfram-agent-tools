@@ -4344,16 +4344,18 @@ heading("Preparation has one deadline, and names the stage it ran out in");
 heading("A start that runs out says what it had, in sentences");
 {
   wipeCache();
-  const s = await connect({ WOLFRAM_MCP_START_TIMEOUT_SECONDS: "0.4", FAKE_INIT_DELAY_MS: "20000" });
+  // 0.9s: under a second, and enough that the start is not refused for lack
+  // of time before its handshake begins (half of it must be left).
+  const s = await connect({ WOLFRAM_MCP_START_TIMEOUT_SECONDS: "0.9", FAKE_INIT_DELAY_MS: "20000" });
   const result = await s.client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } });
   const said = (result.content?.[0]?.text ?? "").split("\n")[0];
   const handshake = Number(/did not complete MCP initialization within (\d+)ms/i.exec(said)?.[1] ?? NaN);
   check(
     "a sub-second start timeout and the handshake's share of it are given in ms, never 0s",
     result.isError === true &&
-      said.includes("not ready within 400ms") &&
+      said.includes("not ready within 900ms") &&
       handshake > 0 &&
-      handshake <= 400 &&
+      handshake <= 900 &&
       !/within 0s/.test(said),
     said.slice(0, 220),
   );
@@ -4373,6 +4375,37 @@ heading("A start that runs out says what it had, in sentences");
       return err;
     }
   })();
+  // The budget, at each scale: ms below a second, tenths below ten, never
+  // rounded up; another error's words carried verbatim; and the deprecated
+  // check() refuses a stage before it, too.
+  const said2499 = new lib.PreparationTimeout("starting the kernel", 2499).message;
+  const wrapped = new lib.PreparationTimeout("starting the kernel", 120_000, "spawn wolfram ENOENT").message;
+  const checked = (() => {
+    try {
+      new lib.Deadline(0).check("starting the kernel");
+      return "";
+    } catch (err) {
+      return String(err?.message ?? err);
+    }
+  })();
+  check(
+    "budgets read as given — 2.4s, not 2s or 3s — other errors' words are kept as written, and check() says before",
+    said2499.includes("not ready within 2.4s") &&
+      new lib.PreparationTimeout("x", 120_000).message.includes("within 120s") &&
+      wrapped.endsWith("starting the kernel. spawn wolfram ENOENT") &&
+      checked.includes("time ran out before starting the kernel"),
+    `${said2499.slice(0, 50)} | ${wrapped.slice(-50)} | ${checked.slice(60, 120)}`,
+  );
+  // And a call's own deadline, which said "within 0s" of a sub-second ceiling.
+  const quick = await connect({ WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "0.4", FAKE_CALL_DELAY_MS: "2000" });
+  const late = await quick.client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } });
+  const lateText = late.content?.[0]?.text ?? "";
+  check(
+    "a call that outlasts a sub-second ceiling says it in ms",
+    late.isError === true && lateText.includes("no answer from the Wolfram kernel within 400ms"),
+    lateText.slice(0, 100),
+  );
+  await quick.client.close();
   check(
     "a start refused for lack of time says time ran out before it, not while it ran",
     refused instanceof lib.PreparationTimeout &&

@@ -59,7 +59,7 @@ export const KERNEL_ARGS: readonly string[] = [
  */
 export class DeadlineExceeded extends Error {
   constructor(deadlineMs: number) {
-    super(`no answer from the Wolfram kernel within ${Math.round(deadlineMs / 1000)}s`);
+    super(`no answer from the Wolfram kernel within ${budgetText(deadlineMs)}`);
     this.name = "DeadlineExceeded";
   }
 }
@@ -77,7 +77,7 @@ export class HandshakeTimeout extends Error {
   readonly timeoutMs: number;
   constructor(timeoutMs: number) {
     super(
-      `the Wolfram kernel did not complete MCP initialization within ` +
+      `The Wolfram kernel did not complete MCP initialization within ` +
         `${budgetText(timeoutMs)}. Common causes: the ` +
         `Wolfram/AgentTools paclet is missing or is being downloaded, the ` +
         `selected kernel predates AgentTools support, or an unactivated ` +
@@ -618,7 +618,7 @@ export class KernelSession {
     const { idleMs, log } = this.#options;
     if (idleMs <= 0) return;
     this.#idleTimer = setTimeout(() => {
-      log(`idle for ${Math.round(idleMs / 1000)}s, shutting the kernel down`);
+      log(`idle for ${budgetText(idleMs)}, shutting the kernel down`);
       void this.stop();
     }, idleMs);
     this.#idleTimer.unref?.();
