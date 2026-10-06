@@ -1,40 +1,60 @@
-# Dependabot keeps the npm tree and the workflows' actions current, and with
-# the repository's Dependabot alerts and security updates on
-# (docs/releasing.md), it opens a PR for a published advisory too (#29).
+# Dependabot keeps the direct npm dependencies and the workflows' actions
+# current, and with the repository's Dependabot alerts and security updates on
+# (docs/releasing.md), it opens a PR for a published advisory too, transitive
+# dependencies included (#29).
 #
 # Its PR titles are Conventional Commits that pr-title.yml and commit-types
 # accept, and that release-please versions correctly. A production dependency
 # ships, since the bundle inlines it, so its update is `fix(deps):` and makes a
-# release: 0.1.1 shipped fast-uri inside six advisories (#26). A development
-# dependency is `chore(deps-dev):` and an action `ci(deps):`, and neither ships
-# nor makes a release. The colon follows the prefix by itself; `include: scope`
-# adds `deps` or `deps-dev`. Security updates follow the same messages.
+# release (#26). A development dependency is `chore(deps-dev):` and an action
+# `ci(deps):`, which make none; esbuild's and TypeScript's updates still change
+# the bundle's bytes, which reach users with the next release. The colon
+# follows the prefix by itself; `include: scope` adds `deps` or `deps-dev`.
+# Security updates take the same titles.
+#
+# A dev update can move a lockfile entry the production tree shares, and then
+# commit-types says it ships: retitle that PR `fix(deps):` (docs/releasing.md).
 version: 2
 updates:
   - package-ecosystem: npm
     directory: /
     schedule:
       interval: weekly
+    # A version is proposed only once it has been public for a week, so a
+    # compromised release is likelier to be pulled before it reaches a PR, and
+    # through a fix(deps) merge, a release. Security updates don't wait.
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: fix
       prefix-development: chore
       include: scope
-    # One PR a week for each kind, rather than one per package.
+    # Dev tools in one weekly PR; a major, which can break the toolchain, in a
+    # PR of its own, so it can't hold the safe ones back. The production
+    # dependency is the SDK alone, so its PR names it.
     groups:
-      production:
-        dependency-type: production
       development:
         dependency-type: development
+        update-types: [minor, patch]
+    ignore:
+      # Node's typings follow the Node floor, engines' 22.13: newer ones would
+      # let the code compile against APIs the floor doesn't have. They move
+      # when the floor does.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
     labels: [dependencies]
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: ci
       include: scope
     groups:
       actions:
         patterns: ["*"]
+        update-types: [minor, patch]
     labels: [dependencies, ci]
