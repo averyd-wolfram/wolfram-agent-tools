@@ -139,7 +139,7 @@ interface AbandonedWork {
 const SERVER_NOT_FOUND = /StartMCPServer::|MCPServerNotFound|No MCPServerObject found for name/;
 
 /**
- * A start that ended because the kernel could not resolve its server name.
+ * A start that ended because the kernel could not start its MCP server.
  *
  * Typed because it is not a failure of the installation: it is fixed by
  * creating the server or installing its paclet, neither of which changes the
@@ -338,7 +338,7 @@ export class KernelSession {
         if (SERVER_NOT_FOUND.test(line)) {
           reportFatal(
             new ServerNotResolved(
-              `the Wolfram kernel could not resolve MCP_SERVER_NAME="${serverName}": ` +
+              `the Wolfram kernel could not start the MCP server MCP_SERVER_NAME="${serverName}": ` +
                 line.trim(),
             ),
           );

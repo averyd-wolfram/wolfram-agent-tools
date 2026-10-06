@@ -355,8 +355,10 @@ export class DeferredBackend implements KernelBackend {
       throw new Error(
         `the last attempt to prepare a Wolfram kernel failed ` +
           `${formatWait(this.#clock() - waiting.failedAt)} ago, so this one was not made. ` +
-          `It is retried in ${formatWait(waiting.remainingMs)}, or as soon as the ` +
-          `installation changes. For a full report, run ${doctorCommand()}.` +
+          `It is retried in ${formatWait(waiting.remainingMs)}` +
+          (waiting.advice
+            ? `; ${waiting.advice}.`
+            : `, or as soon as the installation changes. For a full report, run ${doctorCommand()}.`) +
           // Last, and set apart: a reason can run to several lines of kernel
           // output and end in a sentence of its own, so spliced into this one
           // it read "try again.. For a full report", burying the pointer.
@@ -378,10 +380,16 @@ export class DeferredBackend implements KernelBackend {
         // or installing its paclet, which the back-off cannot see: the full
         // window held that fix off for ten minutes (issue #5). So it gets a
         // short one, which still spares a seat on every call meanwhile.
+        const unresolved = isServerNotResolved(err);
         this.#backoff.record(
           this.#identity(),
           err,
-          isServerNotResolved(err) ? NOT_RESOLVED_BACKOFF_MS : undefined,
+          unresolved ? NOT_RESOLVED_BACKOFF_MS : undefined,
+          // Not the installation: the doctor and an install change point
+          // the user at the wrong thing.
+          unresolved
+            ? "meanwhile, create the server or install the paclet that provides it"
+            : undefined,
         );
         this.#log?.(
           `preparation failed; not retrying for ${formatWait(this.#backoffWindow())}: ${errorText(err)}`,

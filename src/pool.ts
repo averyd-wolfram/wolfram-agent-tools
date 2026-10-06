@@ -154,13 +154,6 @@ export class KernelPool {
    * session of the same flavour would get the same one from a kernel.
    */
   readonly #unresolved = new Map<string, { at: number; reason: string }>();
-  /**
-   * A flavour's first kernel start while it is under way, which later requests
-   * of that flavour wait for rather than each starting their own: requests that
-   * arrived together all passed the window before any failure was recorded, and
-   * each grew a kernel — at the budget, each retiring another session's.
-   */
-  readonly #firstStart = new Map<string, Promise<void>>();
 
   constructor(options: KernelPoolOptions) {
     this.#options = options;
@@ -328,7 +321,7 @@ export class KernelPool {
 
     // Nothing of ours is free and the budget is spent, so a seat has to come
     // from somewhere. An idle kernel of another flavour is the cheapest loss.
-    if (this.#swapOut(flavour)) return this.#grow(flavour);
+    if (this.#maySwap(flavour) && this.#swapOut(flavour)) return this.#grow(flavour);
 
     const spent = this.#idle(flavour);
     if (spent) {
@@ -468,7 +461,7 @@ export class KernelPool {
         void this.#grow(flavour).then(head.resolve);
         continue;
       }
-      if (this.#swapOut(flavour)) {
+      if (this.#maySwap(flavour) && this.#swapOut(flavour)) {
         this.#waiters.shift();
         void this.#grow(flavour).then(head.resolve);
         continue;
@@ -498,47 +491,32 @@ export class KernelPool {
     fn: (client: Client) => Promise<T>,
     options: RunOptions = {},
   ): Promise<T> {
-    const { digest } = flavour;
-    // Only the start is waited for, not the request that made it, so a long
-    // evaluation never holds up its flavour's other requests.
-    for (;;) {
-      const pending = this.#firstStart.get(digest);
-      if (!pending || this.#hasRunning(flavour)) break;
-      await pending;
-    }
     const refusal = this.#refusal(flavour);
     if (refusal) throw refusal;
-    let started: (() => void) | undefined;
-    if (!this.#hasRunning(flavour)) {
-      this.#firstStart.set(digest, new Promise<void>((resolve) => (started = resolve)));
-    }
-    const endFirstStart = () => {
-      if (!started) return;
-      this.#firstStart.delete(digest);
-      started();
-      started = undefined;
-    };
-    let slot: Slot;
+    const slot = await this.#acquire(flavour);
     try {
-      slot = await this.#acquire(flavour);
-    } catch (err) {
-      endFirstStart();
-      throw err;
-    }
-    try {
-      try {
-        await slot.session.ensure();
-      } finally {
-        endFirstStart();
-      }
       const result = await slot.session.run(fn, options);
       this.#release(slot);
       return result;
     } catch (err) {
-      if (isServerNotResolved(err)) this.#recordUnresolved(digest, err);
+      if (isServerNotResolved(err)) this.#recordUnresolved(flavour.digest, err);
       this.#quarantine(slot, errorText(err));
       throw err;
     }
+  }
+
+  /**
+   * Whether `flavour` may retire another session's idle kernel to get a seat:
+   * not while its first start is still under way. Requests arriving together —
+   * a client's connect burst — each grew a kernel, and past the budget each
+   * retired another session's to make room, for starts that, when the server
+   * would not start, could not succeed (#19). They queue instead, and are
+   * served by that first kernel or refused by its failure, so none waits
+   * forever. A flavour with a kernel serving, or none under way, may swap.
+   */
+  #maySwap(flavour: KernelFlavour): boolean {
+    const mine = this.#slots.filter((s) => s.flavour.digest === flavour.digest);
+    return mine.length === 0 || mine.some((s) => s.session.running);
   }
 
   #hasRunning(flavour: KernelFlavour): boolean {
@@ -563,13 +541,16 @@ export class KernelPool {
   #refusal(flavour: KernelFlavour): ServerNotResolved | null {
     const known = this.#unresolved.get(flavour.digest);
     if (!known) return null;
+    // A kernel of this flavour that is serving says the server starts; one
+    // failed extra start must not shut the flavour out from it.
+    if (this.#hasRunning(flavour)) return null;
     const age = this.#now() - known.at;
     if (age >= NOT_RESOLVED_BACKOFF_MS) {
       this.#unresolved.delete(flavour.digest);
       return null;
     }
     return new ServerNotResolved(
-      `a kernel for this server could not resolve its name ${formatWait(age)} ago, so ` +
+      `a kernel for this server could not start it ${formatWait(age)} ago, so ` +
         `none was started for this request; it is tried again in ` +
         `${formatWait(NOT_RESOLVED_BACKOFF_MS - age)}.\n\nThe failure was: ${known.reason}`,
     );

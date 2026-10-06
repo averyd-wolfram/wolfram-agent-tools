@@ -62,11 +62,10 @@ const suiteKey = lib.cacheKey(
 );
 
 const marker = join(home, "starts.log");
-const startCount = () =>
-  existsSync(marker) ? readFileSync(marker, "utf8").trim().split("\n").filter(Boolean).length : 0;
-/** Kernel starts recorded in a marker file of a section's own. */
+/** Kernel starts recorded in a marker file: the suite's own, or a section's. */
 const starts = (path) =>
   existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean).length : 0;
+const startCount = () => starts(marker);
 
 // Every server process this suite starts, so none outlives it.
 // StdioClientTransport does not kill its child when the parent exits, and a
@@ -3043,6 +3042,13 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
       retryIn > 0 && retryIn <= 15 && starts(badMarker) === 1,
     `retried in ${retryIn}s, ${starts(badMarker)} start(s): ${againText.replace(/\s+/g, " ").slice(0, 60)}`,
   );
+  // What ends it sooner is the server, not the installation: the doctor and
+  // an installation change were the wrong things to point at.
+  check(
+    "and it says the fix is the server or its paclet, not the installation",
+    /create the server or install the paclet/.test(againText) && !/installation changes/.test(againText),
+    `retried in ${retryIn}s, ${starts(badMarker)} start(s): ${againText.replace(/\s+/g, " ").slice(0, 60)}`,
+  );
   await bad.client.close();
 
   // A paclet-qualified name whose paclet has no AgentTools extension, as a real
@@ -3266,6 +3272,32 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
       burstStarts === 1 && burst.filter((m) => /tried again in/.test(m)).length === 2 &&
         /evaluated/.test(healthyAfter) && totalStarts === 1,
       `${burstStarts} start(s) for 3 requests, ${totalStarts} counting the healthy session after`,
+    );
+
+    // And a healthy flavour's cold burst is not slowed for it: with seats free
+    // its kernels start in parallel, as before. A first-start gate, tried and
+    // reverted, made each request wait for the one before to start.
+    process.env.FAKE_INIT_DELAY_MS = "1500";
+    const coldPool = new lib.KernelPool({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 3, type: null },
+      learnFromKernels: false,
+    });
+    const coldAt = Date.now();
+    await Promise.all([1, 2, 3].map(() => coldPool.run(healthy, evaluate)));
+    const coldMs = Date.now() - coldAt;
+    await coldPool.stop();
+    delete process.env.FAKE_INIT_DELAY_MS;
+    check(
+      "a healthy cold burst still starts its kernels in parallel",
+      coldMs < 2_800,
+      `${coldMs}ms for three requests on kernels that take 1.5s to start`,
     );
   } finally {
     for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key];

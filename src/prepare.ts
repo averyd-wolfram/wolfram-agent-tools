@@ -195,6 +195,8 @@ export interface BackoffState {
   until: number;
   remainingMs: number;
   reason: string;
+  /** What ends it sooner, when that is not the installation changing. */
+  advice?: string | undefined;
 }
 
 /** The last failed preparation, and whether it still stands. */
@@ -206,6 +208,7 @@ export class Backoff {
     at: number;
     reason: string;
     windowMs: number;
+    advice: string | undefined;
   } | null = null;
 
   constructor(windowMs = PREPARATION_BACKOFF_MS, clock: () => number = Date.now) {
@@ -213,13 +216,22 @@ export class Backoff {
     this.#clock = clock;
   }
 
-  /** `windowMs`, when a failure warrants a shorter wait than the usual window. */
-  record(identity: CandidateIdentity | null, err: unknown, windowMs = this.#windowMs): void {
+  /**
+   * `windowMs`, when a failure warrants a shorter wait than the usual window,
+   * and `advice` for what fixes it, when that is not the installation.
+   */
+  record(
+    identity: CandidateIdentity | null,
+    err: unknown,
+    windowMs = this.#windowMs,
+    advice?: string,
+  ): void {
     this.#failure = {
       identity,
       at: this.#clock(),
       reason: errorText(err),
       windowMs: Math.min(windowMs, this.#windowMs),
+      advice,
     };
   }
 
@@ -242,7 +254,13 @@ export class Backoff {
       this.#failure = null;
       return null;
     }
-    return { failedAt: failure.at, until, remainingMs: until - now, reason: failure.reason };
+    return {
+      failedAt: failure.at,
+      until,
+      remainingMs: until - now,
+      reason: failure.reason,
+      advice: failure.advice,
+    };
   }
 }
 
