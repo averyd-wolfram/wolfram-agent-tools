@@ -2138,9 +2138,12 @@ heading("Unit — when a broker may serve this session");
   const readyOutcome = toSilent
     ? await toSilent.awaitReady(spent).then(() => "ready", (e) => e)
     : "no attach";
+  // The frame is written before the deadline fails, but read by the stub a
+  // moment later: wait for it, so an empty list cannot pass for a good one.
+  for (let i = 0; i < 40 && readyTimeouts.length === 0; i++) await new Promise((r) => setTimeout(r, 25));
   check(
     "a deadline running out as it is read never asks the broker without a ceiling",
-    readyOutcome?.name === "PreparationTimeout" && readyTimeouts.every((t) => t > 0),
+    readyOutcome?.name === "PreparationTimeout" && readyTimeouts.length === 1 && readyTimeouts[0] > 0,
     `${readyOutcome?.name ?? readyOutcome}; ready sent with ${readyTimeouts.join(", ") || "nothing"}`,
   );
   await toSilent?.stop();
@@ -3201,11 +3204,10 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
 
   // A deadline that runs out between its check and the remainder it hands to
   // the start (issue #11) spawned a kernel with a 0ms handshake: a seat spent
-  // on a start that could only fail. Reads 0 at construction and at the next
-  // read, then past the deadline — the window, when the check and the
-  // remainder were two reads. Whatever reads it, a kernel is either not
-  // spawned or given time to start. Read off the session's own log of what it
-  // spawned: one killed by a 0ms timer dies before it can write a marker.
+  // on a start that could only fail — and with a millisecond or two left, the
+  // same. Here 1ms is left when the start is asked for: no kernel may be
+  // spawned. Read off the session's own log of what it spawned: one killed by
+  // a near-0ms timer dies before it can write a marker.
   const spawnLog = [];
   const unstarted = new lib.LocalBackend({
     bin: fakeKernel,
@@ -3217,13 +3219,13 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
   });
   let spentReads = 0;
   const spentOutcome = await unstarted
-    .prepare(new lib.Deadline(1_000, () => (++spentReads <= 2 ? 0 : 5_000)))
+    .prepare(new lib.Deadline(1_000, () => (++spentReads <= 1 ? 0 : 999)))
     .then(() => "prepared", (e) => e);
   await unstarted.stop();
   const spawned = spawnLog.filter((m) => /starting kernel/.test(m)).length;
   check(
-    "a deadline running out as it is read never spawns a kernel with no time to start",
-    spawned === 0 || spentOutcome === "prepared",
+    "a deadline too nearly spent for a kernel to start spawns none, and fails as the deadline",
+    spentOutcome?.name === "PreparationTimeout" && spawned === 0,
     `${spentOutcome?.name ?? spentOutcome}; ${spawned} kernel(s) spawned`,
   );
 

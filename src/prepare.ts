@@ -34,6 +34,13 @@ export const PREPARATION_BACKOFF_MS = 10 * 60_000;
  */
 export const NOT_RESOLVED_BACKOFF_MS = 15_000;
 
+/**
+ * The least a kernel start is handed: below this, the handshake could only
+ * time out, so no kernel is spawned and no seat spent on it. A real kernel
+ * takes seconds to start; the fake one a fraction of this.
+ */
+export const MIN_START_MS = 1_000;
+
 /** What ends that wait sooner, said by both paths, so they cannot drift apart. */
 export const NOT_RESOLVED_ADVICE =
   "meanwhile, check the server MCP_SERVER_NAME names: create it, install the paclet " +
@@ -167,22 +174,18 @@ export class Deadline {
 
   /**
    * What is left, for work that bounds itself to it, or the timeout for
-   * `stage` if nothing is. One read of the clock, where `check()` then
-   * `remaining()` was two: a deadline that ran out between them handed on 0,
-   * which spawned a kernel with a 0ms handshake (a seat for a start that could
-   * only fail) or sent the broker a ceiling of 0, which means none (#11).
+   * `stage` if less than `minimumMs` is. One read of the clock, where a check
+   * then `remaining()` was two: a deadline that ran out between them handed on
+   * 0, which spawned a kernel with a 0ms handshake (a seat for a start that
+   * could only fail) or sent the broker a ceiling of 0, which means none (#11).
+   * `minimumMs` is what the work needs to have any chance: a kernel cannot
+   * start in a few milliseconds either.
    */
-  handOn(stage: string): number {
+  handOn(stage: string, minimumMs = 1): number {
     if (this.signal.aborted) throw new PreparationStopped();
     const left = this.remaining();
-    if (left <= 0) throw new PreparationTimeout(stage, this.totalMs);
+    if (left < minimumMs) throw new PreparationTimeout(stage, this.totalMs);
     return left;
-  }
-
-  /** Throws the timeout for `stage` if the deadline has already passed. */
-  check(stage: string): void {
-    if (this.signal.aborted) throw new PreparationStopped();
-    if (this.remaining() <= 0) throw new PreparationTimeout(stage, this.totalMs);
   }
 }
 
