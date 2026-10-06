@@ -3256,7 +3256,9 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
     // A healthy flavour's cold burst starts its kernels in parallel. A
     // first-start gate, tried for #19 and reverted, made each request wait for
     // the one before to start; whatever fixes #19 must keep this.
-    process.env.FAKE_INIT_DELAY_MS = "1500";
+    // Kernels that take long enough to start that serial and parallel are
+    // seconds apart, so a loaded runner cannot blur the two.
+    process.env.FAKE_INIT_DELAY_MS = "3000";
     const coldPool = new lib.KernelPool({
       bin: fakeKernel,
       serverName: "WolframLanguage",
@@ -3275,8 +3277,8 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
     delete process.env.FAKE_INIT_DELAY_MS;
     check(
       "a healthy cold burst still starts its kernels in parallel",
-      coldMs < 2_800,
-      `${coldMs}ms for three requests on kernels that take 1.5s to start`,
+      coldMs < 6_000,
+      `${coldMs}ms for three requests on kernels that take 3s to start (serially, 9s)`,
     );
 
     // And a request of a flavour whose first kernel is still starting is served
@@ -3305,11 +3307,11 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
     const list = (client) => client.listTools();
 
     // Two idle kernels of another flavour fill the budget; F starts one (1s)
-    // for a slow call (4s), then asks for its tool list.
+    // for a slow call (8s), then asks for its tool list.
     const woken = queuePool();
     const other = timed("WolframAlpha", {});
     await Promise.all([woken.run(other, evaluate), woken.run(other, evaluate)]);
-    const slowF = timed("WolframLanguage", { FAKE_INIT_DELAY_MS: "1000", FAKE_CALL_DELAY_MS: "4000" });
+    const slowF = timed("WolframLanguage", { FAKE_INIT_DELAY_MS: "1000", FAKE_CALL_DELAY_MS: "8000" });
     const wokenAt = Date.now();
     const slowCall = woken.run(slowF, evaluate);
     await new Promise((r) => setTimeout(r, 200));
@@ -3319,8 +3321,8 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
     await woken.stop();
     check(
       "a request held for its flavour's first start is served when the start succeeds, not when its call ends",
-      listedMs < 3_500,
-      `${listedMs}ms for a tool list behind a 1s start and a 4s call`,
+      listedMs < 6_000,
+      `${listedMs}ms for a tool list behind a 1s start and an 8s call (held for it, 9s)`,
     );
 
   } finally {

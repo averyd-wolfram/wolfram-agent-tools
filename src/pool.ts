@@ -23,7 +23,7 @@ import {
 } from "./kernel.js";
 import { baseDirectoryEnv, type KernelFacts } from "./inspect.js";
 import { errorText, type Logger } from "./log.js";
-import { formatWait, NOT_RESOLVED_BACKOFF_MS } from "./prepare.js";
+import { formatWait, NOT_RESOLVED_ADVICE, NOT_RESOLVED_BACKOFF_MS } from "./prepare.js";
 
 /**
  * The `SHAPING_VARS` a licence can depend on: `$BaseDirectory` and
@@ -532,9 +532,8 @@ export class KernelPool {
     return new ServerNotResolved(
       `a kernel for this server could not start it ${formatWait(age)} ago, so ` +
         `none was started for this request; it is tried again in ` +
-        `${formatWait(NOT_RESOLVED_BACKOFF_MS - age)}; meanwhile, check the server ` +
-        `MCP_SERVER_NAME names: create it, install the paclet that provides it, or ` +
-        `repair its definition.\n\nThe failure was: ${known.reason}`,
+        `${formatWait(NOT_RESOLVED_BACKOFF_MS - age)}; ${NOT_RESOLVED_ADVICE}.` +
+        `\n\nThe failure was: ${known.reason}`,
     );
   }
 

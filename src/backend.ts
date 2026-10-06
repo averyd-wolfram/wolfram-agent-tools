@@ -35,6 +35,7 @@ import {
   candidateIdentity,
   Deadline,
   formatWait,
+  NOT_RESOLVED_ADVICE,
   NOT_RESOLVED_BACKOFF_MS,
   PreparationStopped,
   PreparationTimeout,
@@ -387,9 +388,7 @@ export class DeferredBackend implements KernelBackend {
           unresolved ? NOT_RESOLVED_BACKOFF_MS : undefined,
           // Not the installation: the doctor and an install change point
           // the user at the wrong thing.
-          unresolved
-            ? "meanwhile, check the server MCP_SERVER_NAME names: create it, install the paclet that provides it, or repair its definition"
-            : undefined,
+          unresolved ? NOT_RESOLVED_ADVICE : undefined,
         );
         this.#log?.(
           `preparation failed; not retrying for ${formatWait(this.#backoffWindow())}: ${errorText(err)}`,

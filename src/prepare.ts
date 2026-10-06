@@ -34,6 +34,11 @@ export const PREPARATION_BACKOFF_MS = 10 * 60_000;
  */
 export const NOT_RESOLVED_BACKOFF_MS = 15_000;
 
+/** What ends that wait sooner, said by both paths, so they cannot drift apart. */
+export const NOT_RESOLVED_ADVICE =
+  "meanwhile, check the server MCP_SERVER_NAME names: create it, install the paclet " +
+  "that provides it, or repair its definition";
+
 /** A preparation that did not finish in time, naming the stage it was in. */
 export class PreparationTimeout extends Error {
   readonly stage: string;
