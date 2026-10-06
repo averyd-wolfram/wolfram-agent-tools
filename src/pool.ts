@@ -154,6 +154,8 @@ export class KernelPool {
    * session of the same flavour would get the same one from a kernel.
    */
   readonly #unresolved = new Map<string, { at: number; reason: string }>();
+  /** Flavours whose server has started, until one of theirs fails to. */
+  readonly #proven = new Set<string>();
 
   constructor(options: KernelPoolOptions) {
     this.#options = options;
@@ -244,6 +246,11 @@ export class KernelPool {
       log: (message) => log(`kernel ${index}: ${message}`),
       onFacts: (facts, chosen) => this.#learn(facts, chosen),
       onReady: async (client: Client) => {
+        // Its server starts, so its flavour may take a seat from an idle kernel
+        // of another, and requests held back for this start are served now
+        // rather than when the request that made it finishes.
+        this.#proven.add(flavour.digest);
+        this.#drainWaiters();
         await this.#options.onKernelReady?.(client, flavour.digest);
       },
     });
@@ -427,56 +434,60 @@ export class KernelPool {
   }
 
   #drain(): void {
-    // Strictly the head of the queue, so a stream of one flavour cannot starve a
-    // session of another. The tiers below are #acquire's, applied to whatever the
-    // head waiter needs — including the swap, which is why a waiter for a flavour
-    // with no kernel at all still gets served rather than waiting forever.
-    while (this.#waiters.length > 0) {
-      const head = this.#waiters[0];
-      if (!head) return;
-      const { flavour } = head;
-      // Turned away before any tier below can grow a kernel or retire another
-      // session's for it: its flavour's name stopped resolving while it waited.
-      const refusal = this.#refusal(flavour);
-      if (refusal) {
-        this.#waiters.shift();
-        head.reject(refusal);
-        continue;
-      }
-      const mine = (s: Slot) => s.flavour.digest === flavour.digest;
-
-      const take = (slot: Slot): void => {
-        this.#waiters.shift();
-        slot.busy = true;
-        head.resolve(slot);
-      };
-
-      const fresh = this.#slots.find((s) => !s.busy && !s.session.abandoned && mine(s));
-      if (fresh) {
-        take(fresh);
-        continue;
-      }
-      if (this.#slots.length < this.#budget) {
-        this.#waiters.shift();
-        void this.#grow(flavour).then(head.resolve);
-        continue;
-      }
-      if (this.#maySwap(flavour) && this.#swapOut(flavour)) {
-        this.#waiters.shift();
-        void this.#grow(flavour).then(head.resolve);
-        continue;
-      }
-      const spent = this.#idle(flavour);
-      if (spent) {
-        this.#options.log(
-          `budget reached; a waiter is reusing a kernel that holds an abandoned ` +
-            `call, which stops it`,
-        );
-        take(spent);
-        continue;
-      }
-      return;
+    // In queue order, so a stream of one flavour cannot starve a session of
+    // another: a waiter with no seat to be had stops the drain. One held back
+    // only because its flavour's first start is unproven is passed over
+    // instead — it is woken when that start ends — so it cannot hold up a
+    // waiter of another flavour that could take a seat now. The tiers are
+    // #acquire's, including the swap, which is why a waiter for a flavour with
+    // no kernel at all still gets served rather than waiting forever.
+    let at = 0;
+    while (at < this.#waiters.length) {
+      const waiter = this.#waiters[at];
+      if (!waiter) return;
+      const outcome = this.#serve(waiter);
+      if (outcome === "served") this.#waiters.splice(at, 1);
+      else if (outcome === "held") at += 1;
+      else return;
     }
+  }
+
+  /** One waiter's turn: served (or turned away), held for its first start, or no seat. */
+  #serve(waiter: Waiter): "served" | "held" | "blocked" {
+    const { flavour } = waiter;
+    // Turned away before any tier below can grow a kernel or retire another
+    // session's for it: its flavour's server stopped starting while it waited.
+    const refusal = this.#refusal(flavour);
+    if (refusal) {
+      waiter.reject(refusal);
+      return "served";
+    }
+    const mine = (s: Slot) => s.flavour.digest === flavour.digest;
+    const take = (slot: Slot): "served" => {
+      slot.busy = true;
+      waiter.resolve(slot);
+      return "served";
+    };
+    const fresh = this.#slots.find((s) => !s.busy && !s.session.abandoned && mine(s));
+    if (fresh) return take(fresh);
+    if (this.#slots.length < this.#budget) {
+      void this.#grow(flavour).then(waiter.resolve);
+      return "served";
+    }
+    const maySwap = this.#maySwap(flavour);
+    if (maySwap && this.#swapOut(flavour)) {
+      void this.#grow(flavour).then(waiter.resolve);
+      return "served";
+    }
+    const spent = this.#idle(flavour);
+    if (spent) {
+      this.#options.log(
+        `budget reached; a waiter is reusing a kernel that holds an abandoned ` +
+          `call, which stops it`,
+      );
+      return take(spent);
+    }
+    return maySwap ? "blocked" : "held";
   }
 
   /**
@@ -511,12 +522,15 @@ export class KernelPool {
    * a client's connect burst — each grew a kernel, and past the budget each
    * retired another session's to make room, for starts that, when the server
    * would not start, could not succeed (#19). They queue instead, and are
-   * served by that first kernel or refused by its failure, so none waits
-   * forever. A flavour with a kernel serving, or none under way, may swap.
+   * served once that start succeeds or refused by its failure, so none waits
+   * forever. A flavour whose server has started — even if that kernel has
+   * since idled out and is restarting — or with none under way, may swap.
    */
   #maySwap(flavour: KernelFlavour): boolean {
-    const mine = this.#slots.filter((s) => s.flavour.digest === flavour.digest);
-    return mine.length === 0 || mine.some((s) => s.session.running);
+    return (
+      this.#proven.has(flavour.digest) ||
+      !this.#slots.some((s) => s.flavour.digest === flavour.digest)
+    );
   }
 
   #hasRunning(flavour: KernelFlavour): boolean {
@@ -531,6 +545,7 @@ export class KernelPool {
       if (now - known.at >= NOT_RESOLVED_BACKOFF_MS) this.#unresolved.delete(key);
     }
     this.#unresolved.set(digest, { at: now, reason: errorText(err) });
+    this.#proven.delete(digest);
   }
 
   #now(): number {

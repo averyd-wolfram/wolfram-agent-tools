@@ -3046,7 +3046,7 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
   // an installation change were the wrong things to point at.
   check(
     "and it says the fix is the server or its paclet, not the installation",
-    /create the server or install the paclet/.test(againText) && !/installation changes/.test(againText),
+    /create it, install the paclet that provides it/.test(againText) && !/installation changes/.test(againText),
     `retried in ${retryIn}s, ${starts(badMarker)} start(s): ${againText.replace(/\s+/g, " ").slice(0, 60)}`,
   );
   await bad.client.close();
@@ -3298,6 +3298,73 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
       "a healthy cold burst still starts its kernels in parallel",
       coldMs < 2_800,
       `${coldMs}ms for three requests on kernels that take 1.5s to start`,
+    );
+
+    // The queue that rule fills must be woken when the start succeeds, not
+    // when the request that made it finishes, and a waiter it holds back must
+    // not hold up another flavour's behind it. Each flavour carries its own
+    // fake timings, declared so the pool starts its kernel with them.
+    const timed = (server, timings) =>
+      lib.kernelFlavour({
+        MCP_SERVER_NAME: server,
+        ...timings,
+        WOLFRAM_MCP_KERNEL_ENV: Object.keys(timings).join(","),
+      });
+    const queuePool = () =>
+      new lib.KernelPool({
+        bin: fakeKernel,
+        serverName: "WolframLanguage",
+        idleMs: 60_000,
+        startTimeoutMs: 20_000,
+        clientInfo: { name: "smoke", version: "1.0.0" },
+        log: () => {},
+        reserveSeats: 0,
+        licence: { maxProcesses: 2, type: null },
+        learnFromKernels: false,
+      });
+    const list = (client) => client.listTools();
+
+    // Woken on start: two idle kernels of another flavour fill the budget; F
+    // starts one (1s) for a slow call (4s), then asks for its tool list.
+    const woken = queuePool();
+    const other = timed("WolframAlpha", {});
+    await Promise.all([woken.run(other, evaluate), woken.run(other, evaluate)]);
+    const slowF = timed("WolframLanguage", { FAKE_INIT_DELAY_MS: "1000", FAKE_CALL_DELAY_MS: "4000" });
+    const wokenAt = Date.now();
+    const slowCall = woken.run(slowF, evaluate);
+    await new Promise((r) => setTimeout(r, 200));
+    await woken.run(slowF, list);
+    const listedMs = Date.now() - wokenAt;
+    await slowCall;
+    await woken.stop();
+    check(
+      "a request held for its flavour's first start is served when the start succeeds, not when its call ends",
+      listedMs < 3_500,
+      `${listedMs}ms for a tool list behind a 1s start and a 4s call`,
+    );
+
+    // Not held up behind one: H's kernel is busy (3s), F's first start is under
+    // way (6s), and an F request and then a G request queue. When H's kernel
+    // frees, G can take its seat at once; the held F waiter must not stop it.
+    const fifo = queuePool();
+    const busyH = timed("WolframAlpha", { FAKE_CALL_DELAY_MS: "3000" });
+    const slowStartF = timed("WolframLanguage", { FAKE_INIT_DELAY_MS: "6000" });
+    const quickG = timed("Wolfram", {});
+    const fifoAt = Date.now();
+    const hCall = fifo.run(busyH, evaluate);
+    await new Promise((r) => setTimeout(r, 200));
+    const fFirst = fifo.run(slowStartF, list);
+    await new Promise((r) => setTimeout(r, 200));
+    const fSecond = fifo.run(slowStartF, list);
+    await new Promise((r) => setTimeout(r, 200));
+    await fifo.run(quickG, list);
+    const gMs = Date.now() - fifoAt;
+    await Promise.all([hCall, fFirst, fSecond]);
+    await fifo.stop();
+    check(
+      "a waiter held for an unproven start does not hold up another flavour's behind it",
+      gMs < 5_000,
+      `${gMs}ms for a request that could take the seat freed at about 3s`,
     );
   } finally {
     for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key];

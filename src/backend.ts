@@ -388,7 +388,7 @@ export class DeferredBackend implements KernelBackend {
           // Not the installation: the doctor and an install change point
           // the user at the wrong thing.
           unresolved
-            ? "meanwhile, create the server or install the paclet that provides it"
+            ? "meanwhile, check the server MCP_SERVER_NAME names: create it, install the paclet that provides it, or repair its definition"
             : undefined,
         );
         this.#log?.(
