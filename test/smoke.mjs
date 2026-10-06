@@ -973,6 +973,7 @@ heading("An unfilled WOLFRAMINIT is no entitlement to the broker either");
       spawnCommand: join(home, "definitely-not-a-binary"),
       spawnArgs: [],
       spawnEnv: {},
+      startTimeoutMs: 120_000,
       log: () => {},
     });
     const status = client ? await client.status(5_000) : null;
@@ -1710,6 +1711,7 @@ heading("A spawn that lost the bind race is not mistaken for the winner");
     spawnCommand: process.execPath,
     spawnArgs: ["-e", ""],
     spawnEnv: { ...process.env },
+    startTimeoutMs: 120_000,
     log: (m) => said.push(m),
   });
   // The winner: another session's broker, bound only after open() has looked,
@@ -2010,6 +2012,7 @@ heading("Regression — an unspawnable broker must not crash the server");
     spawnCommand: join(home, "definitely-not-a-binary"),
     spawnArgs: [],
     spawnEnv: {},
+    startTimeoutMs: 120_000,
     log: () => {},
   });
   check("an unspawnable broker gives up rather than throwing", backend === null);
@@ -2046,6 +2049,7 @@ heading("Unit — when a broker may serve this session");
       spawnCommand: join(home, "definitely-not-a-binary"),
       spawnArgs: [],
       spawnEnv: {},
+      startTimeoutMs: 120_000,
       log: (m) => noted.push(m),
     });
 
@@ -3879,16 +3883,25 @@ heading("A handshake is bounded by the start timeout, not the SDK's default");
   // SDK cut every handshake at 60s, so a cold start longer than a minute
   // outlived it and the session gave up on a broker that was only starting.
   const ceiling = lib.brokerCeilingMs;
+  const exported = typeof ceiling === "function";
   check(
     "a session waits for a broker's op long enough for the broker to start a kernel first",
-    typeof ceiling === "function" &&
-      ceiling(undefined, 120_000) > 120_000 + 60_000 &&
-      ceiling(undefined, 600_000) > 600_000 + 60_000,
-    typeof ceiling === "function" ? `${ceiling(undefined, 120_000)}ms on a 120s start timeout` : "not exported",
+    exported &&
+      ceiling("listTools", undefined, 120_000) > 120_000 + 60_000 &&
+      ceiling("capabilities", undefined, 600_000) > 600_000 + 60_000,
+    exported ? `${ceiling("listTools", undefined, 120_000)}ms on a 120s start timeout` : "not exported",
+  );
+  // But only an op that can start one. status is answered from memory, and
+  // its short ceiling is how doctor notices a wedged broker in a minute, not
+  // three.
+  check(
+    "an op the broker answers from memory keeps the short ceiling",
+    exported && ceiling("status", undefined, 120_000) === 62_000,
+    exported ? `status ${ceiling("status", undefined, 120_000)}ms` : "not exported",
   );
   check(
     "while an op with a ceiling of its own keeps it, and 0 still means none",
-    typeof ceiling === "function" && ceiling(300_000, 120_000) === 302_000 && ceiling(0, 120_000) === 0,
+    exported && ceiling("callTool", 300_000, 120_000) === 302_000 && ceiling("callTool", 0, 120_000) === 0,
   );
 }
 

@@ -74,7 +74,8 @@ and this table stop agreeing.
 | `CONNECT_RETRY_MS` | `100` | `broker-client.ts` | Gap between those attempts. |
 | `REQUEST_GRACE_MS` | `2_000` | `broker-client.ts` | How long a broker may take *beyond* the call's own ceiling before this side stops waiting. |
 | `PING_DEADLINE_MS` | `REQUEST_GRACE_MS` | `broker-client.ts` | How long a broker gets to say it is running, and to accept this session's kernel environment. |
-| `DEFAULT_OP_TIMEOUT_MS` | `60_000` | `broker-client.ts` | Ceiling for broker operations that carry no deadline of their own — `listTools`, `capabilities`, `getPrompt` — once a kernel is up. Since the broker may first have to start one, a session waits the start timeout plus this plus the grace (`brokerCeilingMs`). Nobody chose this number; it is the SDK's, and it is the one remaining wart in the timeout design. |
+| `DEFAULT_OP_TIMEOUT_MS` | `60_000` | `broker-client.ts` | Ceiling for broker operations that carry no deadline of their own — `listTools`, `capabilities`, `getPrompt` — once a kernel is up. Since the broker may first have to start one, a session waits the start timeout plus this plus the grace for those (`brokerCeilingMs`); `status`, answered from memory, gets only this plus the grace. Nobody chose this number; it is the SDK's, and it is the one remaining wart in the timeout design. |
+| `HANDSHAKE_SDK_GRACE_MS` | `1_000` | `kernel.ts` | How far past a start's own handshake timer the MCP SDK's `initialize` timeout is set, so the handshake's timer, which names the cause, is the one that fires. |
 | `EMPTY_GRACE_MS` | `60_000` | `broker-server.ts` | How long a broker keeps running, and keeps its kernels, after its last session detaches. |
 | `BIND_ATTEMPTS` | `4` | `broker-server.ts` | Attempts to claim the socket when several brokers start at once. |
 | `HARD_KERNEL_CAP` | `8` | `pool.ts` | Kernels one broker will run, whatever the licence says. |
