@@ -14,7 +14,8 @@ in `docs/design.md`.
   `0.1.2` milestone shows the release: #9 (a kernel's handshake bounded by the start timeout,
   not the MCP SDK's default), #5 (a server that will not start fails at once, with a short
   back-off — on the shared path only for requests after the first failure; a simultaneous burst
-  is #19), #11 (a start deadline handed on from one read, so a spent one starts nothing), #26
+  is #19), #11 (a start deadline handed on from one read, so a spent one starts nothing — not
+  yet in #17's changelog, see the next point), #26
   (`fast-uri` past its advisory, PR #27). Still in it: #15 (PR #28) and #10. How to hear of the
   next advisory is #29 (`needs design`): an audit gate tried in #27 was reverted.
 - **#21's fix returns to #17 with the next merge to `main`.** release-please could not parse
@@ -22,8 +23,8 @@ in `docs/design.md`.
   pre-release with it was built. #21's description now carries a `BEGIN_COMMIT_OVERRIDE` block
   (added 2026-10-06, with the maintainer's approval), which release-please reads in the commit's
   place; it runs only on a push to `main`. After that merge, check #17 lists #21.
-- **Squash commits are the PR title alone**, since 2026-10-06 (`squash_merge_commit_message:
-  BLANK`), as D16 and `docs/releasing.md` always said. The setting had been title and
+- **Squash commits no longer carry the PR description**, since 2026-10-06
+  (`squash_merge_commit_message: BLANK`), as D16 and `docs/releasing.md` always said. The setting had been title and
   description from the first merge, so every description was release-please input — how #21
   was dropped (#24). #25 tried to check descriptions instead, imitating how GitHub builds the
   commit; two review rounds kept finding more of GitHub to imitate, and it was closed unmerged.
@@ -89,9 +90,9 @@ in `docs/design.md`.
   to the draft, then publishes it. A docs-only merge builds nothing.
 - **No personal token.** Nothing `GITHUB_TOKEN` does starts another workflow, so it is all one
   run; "Allow GitHub Actions to create and approve pull requests" must be on.
-- **Only the PR title reaches `main`.** A squash commit is the title alone, which
-  `conventional-title` and `commit-types` check, so it is all release-please reads; the
-  description is for reviewers. Keep it that way: release-please reads commit bodies by design —
+- **Only the PR title reaches `main`.** A squash commit is the title, which `conventional-title`
+  and `commit-types` check, plus any `Co-authored-by:` trailers GitHub adds, which release-please
+  reads as footers that change nothing; the description is for reviewers. Keep it that way: release-please reads commit bodies by design —
   a footer-shaped line becomes a commit, `BREAKING-CHANGE:` makes one breaking, a body it cannot
   parse is skipped without failing anything (#24, #25). To correct a commit already on `main`,
   put a `BEGIN_COMMIT_OVERRIDE` block in its PR's description; the next run on `main` reads it.
