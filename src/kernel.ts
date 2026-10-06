@@ -71,14 +71,19 @@ export class DeadlineExceeded extends Error {
  * expiry as that budget's: `LocalBackend.prepare` hands the handshake what its
  * preparation deadline has left, but the two timers read different clocks, and
  * the handshake's could fire first by a millisecond, escaping as a bare error
- * that named neither the stage nor the setting to raise. `timeoutMs` is how the
- * caller tells its own timer from a start it merely joined, which runs on the
- * configured timeout instead.
+ * that named neither the stage nor the setting to raise.
  */
 export class HandshakeTimeout extends Error {
   readonly timeoutMs: number;
-  constructor(message: string, timeoutMs: number) {
-    super(message);
+  constructor(timeoutMs: number) {
+    super(
+      `the Wolfram kernel did not complete MCP initialization within ` +
+        `${Math.round(timeoutMs / 1000)}s. Common causes: the ` +
+        `Wolfram/AgentTools paclet is missing or is being downloaded, the ` +
+        `selected kernel predates AgentTools support, or an unactivated ` +
+        `Wolfram Engine is waiting for credentials on stdin, which cannot ` +
+        `be answered here.`,
+    );
     this.name = "HandshakeTimeout";
     this.timeoutMs = timeoutMs;
   }
@@ -324,21 +329,7 @@ export class KernelSession {
 
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () =>
-          reject(
-            new HandshakeTimeout(
-              `the Wolfram kernel did not complete MCP initialization within ` +
-                `${Math.round(startTimeoutMs / 1000)}s. Common causes: the ` +
-                `Wolfram/AgentTools paclet is missing or is being downloaded, the ` +
-                `selected kernel predates AgentTools support, or an unactivated ` +
-                `Wolfram Engine is waiting for credentials on stdin, which cannot ` +
-                `be answered here.`,
-              startTimeoutMs,
-            ),
-          ),
-        startTimeoutMs,
-      );
+      timer = setTimeout(() => reject(new HandshakeTimeout(startTimeoutMs)), startTimeoutMs);
       timer.unref?.();
     });
     void timeout.catch(() => {});
@@ -392,6 +383,14 @@ export class KernelSession {
    * one: a preparation passes what its deadline has left, so a slow inspection
    * before the handshake shortens the handshake rather than adding to it.
    */
+  /**
+   * Whether a start is under way, which an `ensure()` now would join rather
+   * than begin — and so would wait on that start's timeout, not its own.
+   */
+  get starting(): boolean {
+    return this.#starting !== null;
+  }
+
   async ensure(startTimeoutMs?: number): Promise<Client> {
     if (this.#client) return this.#client;
     this.#starting ??= this.#spawn(startTimeoutMs).finally(() => {

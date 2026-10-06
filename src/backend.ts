@@ -185,19 +185,18 @@ export class LocalBackend implements KernelBackend {
     deadline.check("starting the kernel");
     // A beat of grace, so the handshake's own timer fires first: its error
     // carries the kernel's last output, which names the actual cause. Only a
-    // timeout on this very remainder is the deadline's: ensure() may instead
-    // join a start already under way, which runs on the configured timeout and
-    // must be reported as itself.
+    // start this call begins runs on the remainder, so only its timeout is the
+    // deadline's: ensure() may instead join a start already under way, which
+    // runs on the configured timeout and must be reported as itself. Read
+    // before ensure(), which begins a start synchronously.
+    const joining = this.#session.starting;
     const remainder = deadline.remaining();
     await deadline.within(
       "starting the kernel",
       this.#session.ensure(remainder),
       undefined,
       1_000,
-      (err) =>
-        err instanceof Error &&
-        err.cause instanceof HandshakeTimeout &&
-        err.cause.timeoutMs === remainder,
+      (err) => !joining && err instanceof Error && err.cause instanceof HandshakeTimeout,
     );
   }
 

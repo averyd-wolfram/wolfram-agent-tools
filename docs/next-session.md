@@ -17,11 +17,11 @@ in `docs/design.md`.
 
 ## What to do next, in order
 
-1. **The flaky start-timeout check.** "the library's deferredBackend runs on the configured
-   start timeout" races two 2 s timers — the preparation deadline and the kernel's own handshake
-   timeout — and accepts only the first's wording; seen once, passed on rerun. Reproduce it
-   deterministically, test, then fix. It is a `fix:`, so it releases 0.1.1: the first automatic
-   bump, worth watching end to end.
+1. **The SDK's 60 s handshake cap.** `KernelSession.#spawn` calls `client.connect(transport)`
+   with no request timeout, so the MCP SDK bounds `initialize` at its own 60 s default, below
+   the 120 s `WOLFRAM_MCP_START_TIMEOUT_SECONDS` default. A first start that downloads the
+   paclet for longer fails at 60 s with the SDK's bare "Request timed out", naming neither the
+   stage nor the setting. Found reviewing #8; test, then fix, as a `fix:` of its own.
 2. **MA's experiments**, each a ledger row (plan §5 MA, *Order of work*): Codex installing a
    Claude Code marketplace entry and trusting our hook; Cursor importing an installed Claude Code
    plugin, and whether its `sessionStart` injects context; Copilot honouring `userConfig`; the
