@@ -1,0 +1,50 @@
+# Dependabot: weekly updates for the npm dependencies and the workflows'
+# actions, and, with the repository's Dependabot alerts and security updates
+# on (docs/releasing.md), a PR for each published advisory (#29).
+#
+# The titles are what fit it to the release pipeline. A production dependency
+# is inlined in the bundle, so it ships: `fix(deps):`, which makes a release
+# and which commit-types requires (#26). A development dependency is
+# `chore(deps-dev):` and an action `ci(deps):`, and neither makes a release.
+# `include: scope` adds the scope, and Dependabot adds the colon. Security
+# updates take the same titles.
+#
+# When commit-types rejects a dev update as shipping, because it moved a
+# lockfile entry the production tree shares, leave the PR open and make the
+# same update in a `fix(deps):` PR of your own: Dependabot closes its PR once
+# the update is on main. Closing it first would make Dependabot skip that
+# version, and retitling can't help, since commit-types reads the commit too.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    # A version is proposed after a week in public, so a compromised release
+    # is likelier to be pulled first. Security updates don't wait.
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: fix
+      prefix-development: chore
+      include: scope
+    # Dev tools' minor and patch updates in one weekly PR. Any major comes on
+    # its own, and so does esbuild, which builds the bundle and, while it is
+    # 0.x, can break on a minor.
+    groups:
+      development:
+        dependency-type: development
+        update-types: [minor, patch]
+        exclude-patterns: [esbuild]
+    labels: [dependencies]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: ci
+      include: scope
+    labels: [dependencies, ci]
