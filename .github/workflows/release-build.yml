@@ -9,7 +9,9 @@ name: Release build
 #   a build someone can install and update from. Its tag is made here.
 # - a v<version> tag: that release. release-please opened it as a draft, so
 #   nobody meets a release without its files: the assets go up first, and only
-#   then is it published — a pre-release below 1.0.0.
+#   then is it published — a normal release, 0.x included, and a pre-release
+#   only when its version has a suffix — and marked Latest. A release run never
+#   finishes a draft older than the newest release (scripts/pending-release.mjs).
 #
 # The build is named before anything else runs, so a ref that names no release
 # fails at once. Then CI runs in full on the exact commit, the Node floor and
@@ -35,8 +37,10 @@ on:
   workflow_dispatch:
 
 # One build per ref at a time.
+# By name: called, the ref is `v0.1.2`; dispatched or pushed, github.ref is
+# `refs/tags/v0.1.2`. Two groups would let two builds upload to one draft.
 concurrency:
-  group: release-build-${{ inputs.ref || github.ref }}
+  group: release-build-${{ inputs.ref || github.ref_name }}
   cancel-in-progress: false
 
 # Read-only by default: only the step that publishes needs to write, and the
@@ -124,6 +128,9 @@ jobs:
           mapfile -t assets < <(find release -maxdepth 1 -type f | sort)
           pre=()
           [ "$PRERELEASE" = true ] && pre=(--prerelease)
+          # Said, not left to GitHub's default. A pre-release is never Latest.
+          latest=()
+          [ "$PRERELEASE" = true ] || latest=(--latest)
           if [ "$CREATE" = true ]; then
             # Asked again here, not only when the build was named: the version
             # may have been released while CI ran, and a pre-release after its
@@ -160,10 +167,10 @@ jobs:
             fi
             # release-please's draft: files first, then it becomes visible.
             gh release upload "$TAG" "${assets[@]}" --clobber
-            gh release edit "$TAG" --draft=false "--prerelease=$PRERELEASE"
+            gh release edit "$TAG" --draft=false "--prerelease=$PRERELEASE" "${latest[@]}"
           elif grep -qi "release not found" view.err; then
             gh release create "$TAG" "${assets[@]}" --verify-tag \
-              --title "$TAG" --generate-notes "${pre[@]}"
+              --title "$TAG" --generate-notes "${pre[@]}" "${latest[@]}"
           else
             cat view.err
             exit 1

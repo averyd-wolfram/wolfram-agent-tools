@@ -5572,11 +5572,11 @@ heading("CI runs the tests for anything but prose");
 // A release is built from release-please's release branch, as a numbered
 // pre-release of the version it computed, or from a v<version> tag. Claude Code
 // updates an installed plugin when its manifest's version string changes, so
-// two builds of one branch must never carry the same version, and nothing
-// before 1.0.0 may be published as a supported release.
+// two builds of one branch must never carry the same version, and only those
+// builds are GitHub pre-releases: a v<x.y.z> release is a release, 0.x included.
 heading("Every release build is named, and the name is in every file");
 {
-  const { releaseVersion, stamp } = await import(join(root, "scripts", "release-version.mjs"));
+  const { releaseVersion, stamp, compareVersions, latestRelease } = await import(join(root, "scripts", "release-version.mjs"));
   const tags = ["v0.2.0-pre.1", "v0.2.0-pre.3", "v0.3.0-pre.9", "v0.2.0-pre.x", "v0.1.0"];
   const rpBranch = "release-please--branches--main";
   const branch = releaseVersion({ ref: rpBranch, refType: "branch", tags, packageVersion: "0.2.0" });
@@ -5597,11 +5597,32 @@ heading("Every release build is named, and the name is in every file");
     }
   };
   check(
-    "a tag builds that release, a pre-release below 1.0.0 or with a suffix",
-    named("v0.2.0", "tag").prerelease === true &&
+    "a tag builds that release, a pre-release only with a suffix, 0.x included",
+    named("v0.2.0", "tag").prerelease === false &&
       named("v1.0.0", "tag").prerelease === false &&
       named("v1.1.0-rc.1", "tag").prerelease === true &&
       named("v1.0.0", "tag").create === false,
+    JSON.stringify(named("v0.2.0", "tag")),
+  );
+  const ranked = ["0.10.0", "0.9.0-pre.10", "0.9.0", "0.9.0-pre.9", "0.9.0-pre.1", "0.9.0-rc.1"].sort(compareVersions);
+  check(
+    "versions rank as semver ranks them: numerically, and a release above its own pre-releases",
+    ranked.join(" ") === "0.9.0-pre.1 0.9.0-pre.9 0.9.0-pre.10 0.9.0-rc.1 0.9.0 0.10.0",
+    ranked.join(" "),
+  );
+  // A release is published as Latest, so a release run finishes no draft older
+  // than the newest release (test/pending-release.mjs): one finished late would
+  // take Latest from a newer one, and releases/latest/download/… would serve
+  // the older build. A tag alone, or a draft, is not a release.
+  const rel = (tag, draft = false, prerelease = false) => ({ tag, draft, prerelease });
+  const published = [rel("v0.1.1"), rel("v0.1.2"), rel("v0.1.10"), rel("v0.2.0-pre.1", false, true)];
+  check(
+    "the newest release is the highest version published, never a draft or a pre-release",
+    latestRelease(published) === "v0.1.10" &&
+      latestRelease([...published, rel("v0.2.0", true), rel("v1.0.0-rc.1", false, true)]) === "v0.1.10" &&
+      latestRelease([rel("v0.1.1"), rel("v0.1.2", true)]) === "v0.1.1" &&
+      latestRelease([rel("v0.1.0-pre.1", false, true)]) === undefined,
+    String(latestRelease(published)),
   );
   check(
     "a release branch whose version is already released builds nothing",

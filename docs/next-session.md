@@ -7,18 +7,31 @@ in `docs/design.md`.
 ## Where things stand
 
 - **M0 and M1 are built**, and M1's acceptance is nearly done (plan §5 M1).
-- **`v0.1.1` is released**, with the bundle, the plugin archive and `SHA256SUMS.txt`. Below
-  1.0.0 every release is marked a GitHub pre-release, which `releases/latest` skips, so link a
-  release by its tag (`releases/download/v0.1.1/...`), never by `latest`.
-- **0.1.2 is ready to release.** release-please's PR #17 holds every fix in the `0.1.2`
-  milestone: #9 (a kernel's handshake bounded by the start timeout, not the MCP SDK's default),
-  #5 (a server that will not start fails at once, with a short back-off — on the shared path
-  only for requests after the first failure; a simultaneous burst is #19), #11 (a start deadline
-  handed on from one read, so a spent one starts nothing), #26 (five advised production
-  dependencies updated, `fast-uri` among them, the one the bundle inlines; PR #27), #15 (each
-  time setting held to 24 days, so one too long for a timer no longer fires at once; PR #28),
-  #10 (a start's budgets said truthfully, in sentences; PR #30) and #34 (a kernel tool call no
-  longer cut at the MCP SDK's 60 s default; PR #37).
+- **`v0.1.2` is released** (2026-10-06), with the bundle, the plugin archive and
+  `SHA256SUMS.txt`, verified after download. v0.1.0–v0.1.2 are still flagged GitHub
+  pre-releases, which `releases/latest` skips, until they are unflagged (*What to do next*, 1);
+  until then link a release by its tag (`releases/download/v0.1.2/...`).
+- **A release finishes itself, and is a release** (#41, PR #42). After release-please, failed or
+  not, the `pending` job (`scripts/pending-release.mjs`) reads from GitHub what is left: every
+  draft whose `v<x.y.z>` tag exists is built and published, oldest first, and every merged PR
+  still `autorelease: pending` whose tag has a release is relabelled, in a job beside the build.
+  A draft older than the newest release is left to a person. `workflow_dispatch` retries a
+  failed run. And, as the maintainer decided on 2026-10-06 (D24 changed), a release is a normal
+  GitHub release from 0.x on, published with `--latest`; only `-pre.N` builds are flagged. The
+  action is `release-please-action@v5` (Node 24). #42's second review round showed the first
+  round's answer — marking Latest in a later step — was itself the fault, and it was reverted;
+  the third round's Latest-ordering edges were filed as #43 rather than chased (the maintainer's
+  call, 2026-10-06).
+- **#7's shape is agreed** (2026-10-06): a `release` branch that the release workflow moves after
+  each verified release, as the marketplace downstream projects follow with auto-update.
+- **What 0.1.2 holds:** #9 (a kernel's handshake bounded by the start timeout, not the MCP SDK's
+  default), #5 (a server that will not start fails at once, with a short back-off — on the
+  shared path only for requests after the first failure; a simultaneous burst is #19), #11 (a
+  start deadline handed on from one read, so a spent one starts nothing), #26 (five advised
+  production dependencies updated, `fast-uri` among them, the one the bundle inlines; PR #27),
+  #15 (each time setting held to 24 days; PR #28), #10 (a start's budgets said truthfully, in
+  sentences; PR #30) and #34 (a kernel tool call no longer cut at the MCP SDK's 60 s default; PR
+  #37).
 - **#21 is in #17 by its override.** release-please could not parse #21's squash commit, whose
   body was its PR description; the `BEGIN_COMMIT_OVERRIDE` block added to #21's description
   (2026-10-06, with the maintainer's approval) restored it on the next run, as confirmed after
@@ -39,11 +52,29 @@ in `docs/design.md`.
 
 ## What to do next, in order
 
-1. **Release 0.1.2** (milestone `0.1.2`), with the maintainer's go-ahead: check #17's
-   changelog lists every fix above, merge it, and the same run tags and publishes `v0.1.2`.
-   Download the assets and check `SHA256SUMS.txt` and the bundle's `--version`, as for 0.1.1.
-   Close the milestone.
-2. **Design the kernel-start cluster before code** (`needs design`, `area: startup` and
+1. **Finish #41's rollout.** Once PR #42 is merged, unflag the published releases and mark the
+   newest Latest — `--latest=false` on the older two, since GitHub may otherwise make an edited
+   release Latest:
+   `gh release edit v0.1.0 --prerelease=false --latest=false`,
+   `gh release edit v0.1.1 --prerelease=false --latest=false`,
+   `gh release edit v0.1.2 --prerelease=false --latest`. Then check
+   `GITHUB_REPOSITORY=<owner>/<repo> node scripts/pending-release.mjs` says nothing is left, and
+   that `gh release view --json tagName` (Latest) names v0.1.2. This session's auto mode refused
+   writes that publish, so the maintainer may need to run these. Some of #42's review threads
+   are left open on purpose, each answered with evidence and changing nothing: the relabel's
+   token scopes, the release listing's paging, scripts run from the built tag's checkout, and the
+   test harness's copies (the suite's split is `docs/plan.md` §12).
+2. **Downstream projects follow releases** (#7, the agreed shape in its last comment): the
+   release workflow commits the assembled plugin and a `wolfram-agent-tools` marketplace to a
+   `release` branch after each verified release, and only then (the §5 M1 publication order);
+   prime the branch from v0.1.2. The README gives the downstream snippet (`"ref": "release"`,
+   `"autoUpdate": true`) with its first-install and workspace-trust notes, and `test:client`
+   proves #7's acceptance: install at project scope from the snippet alone, then a later release
+   arriving with no downstream edit. Move the branch in the build that publishes the release
+   with `--latest` (#42), so GitHub's Latest, `releases/latest/download/…` and the branch always
+   agree; a release the `pending` job finishes runs the same build. Design it with #43 (a
+   release published out of order can take Latest: four edges #42's reviews found and left).
+3. **Design the kernel-start cluster before code** (`needs design`, `area: startup` and
    `area: broker`): #22 (back off by what failed — a start refused for lack of time is not a
    broken installation), #20 (any failed start in the pool, and a private restart after idling),
    #19 (a burst for a server that will not start, at a shared broker), #16 (the session guessing
@@ -60,26 +91,28 @@ in `docs/design.md`.
    from 0.1.2's reviews: #33 (timers fed by library-built options can still overflow; clamp at
    each timer), #35 (a numeric setting with a unit suffix is misread silently) and #38
    (durations read three ways across the private path, the broker client and
-   `wolfram_status`).
-3. **Restructure the agent instructions** (#36, `needs design`): a trimmed `AGENTS.md`, the
+   `wolfram_status`). From #37's review: #39 (`prompts/get` and `resources/read` still cut at
+   the SDK's 60 s default, and the busy kernel not reclaimed — a bug, wants a deadline for
+   those ops) and #40 (tighten #37's long-call check).
+4. **Restructure the agent instructions** (#36, `needs design`): a trimmed `AGENTS.md`, the
    handoff's durable rules moved out of it, and the project rules now in the maintainer's
    private Claude Code memory moved into the repository. Agree the design first.
-4. **MA's experiments**, each a ledger row (plan §5 MA, *Order of work*): Codex installing a
+5. **MA's experiments**, each a ledger row (plan §5 MA, *Order of work*): Codex installing a
    Claude Code marketplace entry and trusting our hook; Cursor importing an installed Claude Code
    plugin, and whether its `sessionStart` injects context; Copilot honouring `userConfig`; the
    Agent Plugins precedence in VS Code; Codex's filtered environment against our broker.
-5. **The restructure** (MA). M1's `archive` install, update and bad-digest rows need only public
+6. **The restructure** (MA). M1's `archive` install, update and bad-digest rows need only public
    releases (`v0.1.0` then `v0.1.1` is an update), as does a Claude run of the plugin installed
-   from the archive. #7 (installing at project scope from this repository) belongs here.
-6. **MD, downstream packages** (plan §5 MD, D33), after the restructure: another project's
+   from the archive.
+7. **MD, downstream packages** (plan §5 MD, D33), after the restructure: another project's
    plugin built on the release bundle. Item 3's defect for today's users — a server not found
    held off by the long back-off — is fixed for 0.1.2 (#5), not yet released; its
    `test:custom` counterpart remains.
-7. **The rest of M1**: the chat checklist and M1b's client version, `SessionStart` and file
+8. **The rest of M1**: the chat checklist and M1b's client version, `SessionStart` and file
    workflow (run by a maintainer); entitlement leases outliving clean kernel exits by about an hour
    (measured, cause not found, matters only to entitlement users); a resumed Claude Desktop
    session after a re-upload may lose the LSP (a new session works).
-8. **M2's design checkpoint**, which starts with the stable-2.2.0 union experiment and needs
+9. **M2's design checkpoint**, which starts with the stable-2.2.0 union experiment and needs
    AgentTools 2.2.7 disabled — agree it with the maintainers first.
 
 ## How releases work

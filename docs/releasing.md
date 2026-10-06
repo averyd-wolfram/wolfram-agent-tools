@@ -5,9 +5,12 @@ tag into a GitHub Release that carries the built artifacts. It lives in
 `.github/workflows/` and runs on the project's GitHub repository. Every piece is still exercisable locally first: the workflows are thin wrappers over
 commands you can run by hand.
 
-**Until 1.0.0, every release is a pre-release.** The pipeline is the one a 1.0.0 release will
-use, exercised now so it is proven before anything is supported. release-please runs on `main`,
-the integration branch.
+**A release is a release from 0.x on.** Merging the release PR publishes a normal GitHub
+release, marked Latest, so `releases/latest/download/…` serves its files; only the release PR's
+`v<x.y.z>-pre.<n>` builds are flagged Pre-release (plugin plan D24, changed 2026-10-06 — until
+then every release below 1.0.0 was a pre-release, which `releases/latest` skips). The pipeline is
+the one a 1.0.0 release will use, exercised now so it is proven before then. release-please runs
+on `main`, the integration branch.
 
 **Nobody types a version** (plugin plan D25). From `0.1.0`, a `fix:` makes `0.1.1` — as do
 `perf:`, `refactor:` and `revert:`, the other visible changelog sections — a `feat:` makes
@@ -106,8 +109,30 @@ changelog grows. Then, **in the same run**:
 - when release-please opened or updated its PR, the PR's branch is built and published as the
   next pre-release, `v<x.y.z>-pre.<n>` — a merge that brought nothing releasable (docs alone)
   leaves the PR as it was and builds nothing;
-- when merging the PR released it — a **draft** GitHub release and its tag, made at once
-  (`draft` with `force-tag-creation`) — the tag is built and the draft published.
+- when a **draft** GitHub release's tag exists — the state merging the PR leaves, since
+  release-please makes both at once (`draft` with `force-tag-creation`) — the tag is built and
+  the draft published.
+
+**What is finished is read from GitHub, not from the action.** release-please makes the tag,
+then the draft, then relabels its PR from `autorelease: pending` to `autorelease: tagged`, and
+only a run that gets through all three reports a release. For 0.1.2 the relabel failed, so the
+action reported nothing, the build never ran, and the PR stayed pending — which stops
+release-please opening the next release PR, and makes its next run try to create the release
+again. So after release-please, failed or not, the `pending` job runs
+`scripts/pending-release.mjs`: every draft whose `v<x.y.z>` tag exists is built and published,
+one at a time, oldest first, and every merged PR still pending whose tag has a release is
+relabelled as release-please would have — in a job beside the build, so a label that will not
+change fails the run without holding back the release. A tag with no release yet keeps its PR
+pending, so that release-please's next run makes the release. Every step is idempotent, so a run
+that fails partway — a release build that failed included — is finished by the next push to
+`main`, or at once by dispatching the workflow from the Actions tab
+(`gh workflow run release-please.yml --ref main`).
+
+A draft older than the newest release is the exception: it is left for a person to finish or
+delete, and the run warns of it. A release is published as Latest, so finishing it would take
+Latest from the newer one, and a draft whose build fails every time would otherwise fail every
+run. To finish one, dispatch `release-build.yml` on its tag, then mark the newest release Latest
+again with `gh release edit <newest> --latest`.
 
 **One run, and no personal token.** Everything here acts with `GITHUB_TOKEN`, and by GitHub's
 rule against recursive runs nothing that token does — opening the PR, pushing its branch, making
@@ -131,8 +156,9 @@ stamped archive with Claude Code at 2.1.289 and at the 2.1.75 floor, and publish
   manifest's version, so two builds that both said `0.1.0` would be one version to it.
 - **A `v<version>` tag** — the one merging the release PR makes — finishes that release: the
   build uploads the assets to release-please's draft before publishing it, so nobody meets a
-  release without its files, and a build that fails leaves only an invisible draft. Below
-  1.0.0, or with a `-` suffix, it is published as a pre-release.
+  release without its files, and a build that fails leaves only an invisible draft, which the
+  next release run builds again. It is published as a normal release, marked Latest, and a
+  pre-release only when its version has a `-` suffix.
 - **Run by hand** — dispatched on a tag, or a tag pushed by a person — it builds that tag. A
   release already published is refused, never rebuilt: the new assets would differ byte for
   byte, and an `archive` source pinned to the first zip's digest would then refuse every
@@ -285,6 +311,7 @@ a build's name and stamp:
 GITHUB_REF_NAME=release-please--branches--main GITHUB_REF_TYPE=branch \
   node scripts/release-version.mjs        # the version comes from package.json
 node scripts/commit-types.mjs origin/main HEAD   # what CI asks of a PR's commits
+GITHUB_REPOSITORY=<owner>/<repo> node scripts/pending-release.mjs   # what a release run would finish; reads only
 node scripts/release-version.mjs --stamp 0.1.0-pre.99   # then restore what it changed (git status)
 ```
 

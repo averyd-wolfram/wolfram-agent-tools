@@ -19,8 +19,10 @@
  *   version to it. Once `v<x.y.z>` itself exists the branch builds nothing: a
  *   pre-release of a version already released ranks below it, and an installed
  *   plugin would still take the changed string as an update.
- * - a `v<version>` tag: that release. Below 1.0.0, or with a `-` suffix, it is
- *   marked a pre-release on GitHub: nothing before 1.0.0 is a supported release.
+ * - a `v<version>` tag: that release, a normal GitHub release from 0.x on, and
+ *   a pre-release only when its version has a `-` suffix, and marked Latest
+ *   when published. A release run never finishes a draft older than the
+ *   newest release (scripts/pending-release.mjs), so Latest is the newest.
  *
  * The version is stamped into the CI checkout only, never committed: the
  * branch says what is being prepared, and the build says which build it is.
@@ -51,12 +53,7 @@ export function releaseVersion({ ref, refType, tags, packageVersion }) {
     if (!ref.startsWith("v") || !SEMVER.test(version)) {
       throw new Error(`tag ${ref} is not v<semver>, so it names no release`);
     }
-    return {
-      version,
-      tag: ref,
-      prerelease: version.startsWith("0.") || version.includes("-"),
-      create: false,
-    };
+    return { version, tag: ref, prerelease: version.includes("-"), create: false };
   }
   if (!RELEASE_BRANCH.test(ref)) {
     throw new Error(`branch ${ref} is not release-please's release branch, so it names no release`);
@@ -79,6 +76,98 @@ export function releaseVersion({ ref, refType, tags, packageVersion }) {
   const n = Math.max(0, ...built) + 1;
   const version = `${target}-pre.${n}`;
   return { version, tag: `v${version}`, prerelease: true, create: true };
+}
+
+/**
+ * The version a release tag names — `v0.2.0` → `0.2.0`, `v0.2.0-pre.1` →
+ * `0.2.0-pre.1` — or undefined for any other tag. With `{ core: true }`, only
+ * a plain `v<x.y.z>`, the only kind release-please makes.
+ */
+export function tagVersion(tag, { core = false } = {}) {
+  const version = tag.startsWith("v") ? tag.slice(1) : "";
+  return (core ? CORE : SEMVER).test(version) ? version : undefined;
+}
+
+/**
+ * Semver precedence, for sort: negative when `a` ranks below `b`. Numerically,
+ * so 0.10.0 follows 0.9.0 and pre.10 follows pre.9, and a release ranks above
+ * its own pre-releases.
+ */
+export function compareVersions(a, b) {
+  const parse = (version) => {
+    const [core = "", ...suffix] = version.split("-");
+    return { core: core.split(".").map(Number), pre: suffix.length ? suffix.join("-").split(".") : [] };
+  };
+  const [x, y] = [parse(a), parse(b)];
+  const i = x.core.findIndex((part, k) => part !== y.core[k]);
+  if (i >= 0) return x.core[i] - y.core[i];
+  if (!x.pre.length || !y.pre.length) return y.pre.length - x.pre.length;
+  for (let k = 0; k < Math.max(x.pre.length, y.pre.length); k++) {
+    const [p, q] = [x.pre[k], y.pre[k]];
+    if (p === q) continue;
+    if (p === undefined) return -1;
+    if (q === undefined) return 1;
+    const [pn, qn] = [/^\d+$/.test(p), /^\d+$/.test(q)];
+    if (pn && qn) return Number(p) - Number(q);
+    if (pn !== qn) return pn ? -1 : 1;
+    return p < q ? -1 : 1;
+  }
+  return 0;
+}
+
+/** `compareVersions` for release tags: `v0.9.0` before `v0.10.0`. */
+export function compareTags(a, b) {
+  return compareVersions(a.replace(/^v/, ""), b.replace(/^v/, ""));
+}
+
+/**
+ * The newest release: the highest `v<x.y.z>` among the published releases
+ * that are not pre-releases — what GitHub marks Latest. A tag alone, or a
+ * draft, is not a release.
+ *
+ * @param {{ tag: string, draft: boolean, prerelease: boolean }[]} releases
+ * @returns {string | undefined}
+ */
+export function latestRelease(releases) {
+  return releases
+    .filter(({ tag, draft, prerelease }) => !draft && !prerelease && tagVersion(tag, { core: true }))
+    .map(({ tag }) => tag)
+    .sort(compareTags)
+    .at(-1);
+}
+
+/**
+ * Each tag's commit from `git ls-remote --tags`. An annotated tag is listed
+ * twice, as the tag object and peeled (`^{}`) as the commit it points at; the
+ * commit is what a merge commit is matched against.
+ */
+export function tagCommits(lsRemote) {
+  const commits = new Map();
+  for (const line of lsRemote.split("\n")) {
+    const [sha, ref] = line.split("\t");
+    if (!sha || !ref?.startsWith("refs/tags/")) continue;
+    const name = ref.slice("refs/tags/".length);
+    if (name.endsWith("^{}")) commits.set(name.slice(0, -3), sha);
+    else if (!commits.has(name)) commits.set(name, sha);
+  }
+  return commits;
+}
+
+/**
+ * Every release of `repo`, drafts included — GitHub lists a draft only to a
+ * token that can push. Through `gh`, so GH_TOKEN or a signed-in `gh` is needed.
+ *
+ * @returns {{ tag: string, draft: boolean, prerelease: boolean }[]}
+ */
+export function listReleases(repo) {
+  return execFileSync(
+    "gh",
+    ["api", "--paginate", `repos/${repo}/releases?per_page=100`, "--jq", ".[] | {tag: .tag_name, draft, prerelease}"],
+    { encoding: "utf8" },
+  )
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
 }
 
 /**
@@ -121,13 +210,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     } else {
       // From the remote, not the checkout: a build that waited behind another
       // on the same branch must see the tag that one just made.
-      const tags = execFileSync("git", ["ls-remote", "--tags", "--refs", "origin"], {
-        cwd: root,
-        encoding: "utf8",
-      })
-        .split("\n")
-        .map((line) => line.split("\trefs/tags/")[1])
-        .filter(Boolean);
+      const tags = [...tagCommits(execFileSync("git", ["ls-remote", "--tags", "origin"], { cwd: root, encoding: "utf8" })).keys()];
       // RELEASE_REF first: a called workflow is handed the ref to build, and
       // GitHub does not let a step overwrite its own GITHUB_* variables, which
       // keep naming the caller's branch.
