@@ -377,13 +377,6 @@ export class KernelSession {
   }
 
   /**
-   * Start the kernel if it is not already up, collapsing concurrent starts.
-   *
-   * `startTimeoutMs` bounds this start's handshake in place of the configured
-   * one: a preparation passes what its deadline has left, so a slow inspection
-   * before the handshake shortens the handshake rather than adding to it.
-   */
-  /**
    * Whether a start is under way, which an `ensure()` now would join rather
    * than begin — and so would wait on that start's timeout, not its own.
    */
@@ -391,6 +384,13 @@ export class KernelSession {
     return this.#starting !== null;
   }
 
+  /**
+   * Start the kernel if it is not already up, collapsing concurrent starts.
+   *
+   * `startTimeoutMs` bounds this start's handshake in place of the configured
+   * one: a preparation passes what its deadline has left, so a slow inspection
+   * before the handshake shortens the handshake rather than adding to it.
+   */
   async ensure(startTimeoutMs?: number): Promise<Client> {
     if (this.#client) return this.#client;
     this.#starting ??= this.#spawn(startTimeoutMs).finally(() => {
