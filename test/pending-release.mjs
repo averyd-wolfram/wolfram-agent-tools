@@ -77,6 +77,12 @@ check(
   untagged === 'finish=["v0.1.2"] relabel=[]',
   untagged,
 );
+// A draft is published as Latest, so one older than a release already out
+// would take Latest from it; and one whose build fails every time would be
+// rebuilt by every run. Once a newer release is out, an older draft is a
+// person's to finish or delete.
+const late = decide([...published, { tag: "v0.1.2", draft: true }, { tag: "v0.1.3", draft: false }], [], new Map([...tags, ["v0.1.3", "d".repeat(40)]]));
+check("a draft older than the newest release published is left to a person", late === "finish=[] relabel=[]", late);
 // release-please makes only v<x.y.z>. A pre-release is published as it is
 // made, so a draft on a -pre tag is a person's, and building it would publish
 // a pre-release of a version that may already be released.

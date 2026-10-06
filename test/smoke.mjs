@@ -5610,15 +5610,14 @@ heading("Every release build is named, and the name is in every file");
     ranked.join(" ") === "0.9.0-pre.1 0.9.0-pre.9 0.9.0-pre.10 0.9.0-rc.1 0.9.0 0.10.0",
     ranked.join(" "),
   );
-  // GitHub makes a newly published release Latest unless told otherwise, so a
-  // release finished late — a stuck draft completed after the next release —
-  // would take Latest from a newer one, and releases/latest/download/… would
-  // serve the older build. So every build publishes with Latest off, then marks
-  // the highest version published: a tag alone, or a draft, is not a release.
+  // A release is published as Latest, so a release run finishes no draft older
+  // than the newest release (test/pending-release.mjs): one finished late would
+  // take Latest from a newer one, and releases/latest/download/… would serve
+  // the older build. A tag alone, or a draft, is not a release.
   const rel = (tag, draft = false, prerelease = false) => ({ tag, draft, prerelease });
   const published = [rel("v0.1.1"), rel("v0.1.2"), rel("v0.1.10"), rel("v0.2.0-pre.1", false, true)];
   check(
-    "Latest is the highest version published, never a draft or a pre-release",
+    "the newest release is the highest version published, never a draft or a pre-release",
     latestRelease(published) === "v0.1.10" &&
       latestRelease([...published, rel("v0.2.0", true), rel("v1.0.0-rc.1", false, true)]) === "v0.1.10" &&
       latestRelease([rel("v0.1.1"), rel("v0.1.2", true)]) === "v0.1.1" &&

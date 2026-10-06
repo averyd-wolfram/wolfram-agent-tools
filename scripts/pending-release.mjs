@@ -15,12 +15,15 @@
  * release again. So every release run asks what exists, whatever the action
  * did (release-please.yml):
  *
- * - `finish`: every draft whose `v<x.y.z>` tag exists and that has no
- *   published release beside it, for release-build.yml to publish. A draft
- *   without its tag is someone's notes for a version not yet released, and one
- *   on a suffixed tag is not release-please's: it makes only `v<x.y.z>`, and a
- *   pre-release is published as it is made. The same rule rebuilds a release
- *   whose build failed, on the next run.
+ * - `finish`: every draft whose `v<x.y.z>` tag exists, with no published
+ *   release beside it and no newer release published, for release-build.yml
+ *   to publish as Latest. A draft without its tag is someone's notes for a
+ *   version not yet released, and one on a suffixed tag is not
+ *   release-please's: it makes only `v<x.y.z>`, and a pre-release is published
+ *   as it is made. The same rule rebuilds a release whose build failed, on the
+ *   next run — until a newer release is out: then finishing it would take
+ *   Latest from that one, and a build that fails every time would fail every
+ *   run, so it is a person's to finish or delete.
  * - `relabel`: every merged PR still labelled pending whose merge commit
  *   carries such a tag with a release, draft or published — the state in which
  *   release-please would have relabelled it. A tag with no release yet keeps
@@ -32,11 +35,11 @@
 import { execFileSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { compareVersions, listReleases, tagCommits, tagVersion } from "./release-version.mjs";
+import { compareVersions, latestRelease, listReleases, tagCommits, tagVersion } from "./release-version.mjs";
 
 /**
  * @param {{
- *   releases: { tag: string, draft: boolean }[],
+ *   releases: { tag: string, draft: boolean, prerelease?: boolean }[],
  *   tags: Map<string, string>,
  *   pulls: { number: number, sha: string }[],
  * }} input every release, drafts included; every tag and the commit it is on;
@@ -46,8 +49,11 @@ import { compareVersions, listReleases, tagCommits, tagVersion } from "./release
 export function pendingRelease({ releases, tags, pulls }) {
   const ours = releases.filter(({ tag }) => tagVersion(tag, { core: true }) && tags.has(tag));
   const published = new Set(ours.filter((release) => !release.draft).map((release) => release.tag));
-  const finish = [...new Set(ours.filter((release) => release.draft && !published.has(release.tag)).map(({ tag }) => tag))]
-    .sort((a, b) => compareVersions(a.slice(1), b.slice(1)));
+  const latest = latestRelease(releases);
+  const newer = (tag) => !latest || compareVersions(tag.slice(1), latest.slice(1)) > 0;
+  const finish = [
+    ...new Set(ours.filter(({ tag, draft }) => draft && !published.has(tag) && newer(tag)).map(({ tag }) => tag)),
+  ].sort((a, b) => compareVersions(a.slice(1), b.slice(1)));
   const released = new Set(ours.map(({ tag }) => tags.get(tag)));
   const relabel = pulls.filter((pull) => released.has(pull.sha)).map((pull) => pull.number);
   return { finish, relabel };

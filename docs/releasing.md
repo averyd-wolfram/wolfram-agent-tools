@@ -6,8 +6,7 @@ tag into a GitHub Release that carries the built artifacts. It lives in
 commands you can run by hand.
 
 **A release is a release from 0.x on.** Merging the release PR publishes a normal GitHub
-release, and the highest version published is Latest, so `releases/latest/download/…` serves
-its files; only the release PR's
+release, marked Latest, so `releases/latest/download/…` serves its files; only the release PR's
 `v<x.y.z>-pre.<n>` builds are flagged Pre-release (plugin plan D24, changed 2026-10-06 — until
 then every release below 1.0.0 was a pre-release, which `releases/latest` skips). The pipeline is
 the one a 1.0.0 release will use, exercised now so it is proven before then. release-please runs
@@ -121,12 +120,17 @@ action reported nothing, the build never ran, and the PR stayed pending — whic
 release-please opening the next release PR, and makes its next run try to create the release
 again. So after release-please, failed or not, the `pending` job runs
 `scripts/pending-release.mjs`: every draft whose `v<x.y.z>` tag exists is built and published,
-and every merged PR still pending whose tag has a release is relabelled as release-please would
-have — in a job beside the build, so a label that will not change fails the run without holding
-back the release. A tag with no release yet keeps its PR pending, so that release-please's next
-run makes the release. Every step is idempotent, so a run that fails partway — a release build
-that failed included — is finished by the next push to `main`, or at once by dispatching the
-workflow from the Actions tab (`gh workflow run release-please.yml --ref main`).
+one at a time, oldest first, and every merged PR still pending whose tag has a release is
+relabelled as release-please would have — in a job beside the build, so a label that will not
+change fails the run without holding back the release. A tag with no release yet keeps its PR
+pending, so that release-please's next run makes the release. Every step is idempotent, so a run
+that fails partway — a release build that failed included — is finished by the next push to
+`main`, or at once by dispatching the workflow from the Actions tab
+(`gh workflow run release-please.yml --ref main`).
+
+A draft older than the newest release is the exception: it is left for a person to finish or
+delete. A release is published as Latest, so finishing it would take Latest from the newer one,
+and a draft whose build fails every time would otherwise fail every run.
 
 **One run, and no personal token.** Everything here acts with `GITHUB_TOKEN`, and by GitHub's
 rule against recursive runs nothing that token does — opening the PR, pushing its branch, making
@@ -151,11 +155,8 @@ stamped archive with Claude Code at 2.1.289 and at the 2.1.75 floor, and publish
 - **A `v<version>` tag** — the one merging the release PR makes — finishes that release: the
   build uploads the assets to release-please's draft before publishing it, so nobody meets a
   release without its files, and a build that fails leaves only an invisible draft, which the
-  next release run builds again. It is published as a normal release, a pre-release only when
-  its version has a `-` suffix, with Latest off; then the highest version published is marked
-  Latest (`release-version.mjs --latest`). GitHub makes a newly published release Latest unless
-  told otherwise, so a draft finished late would take Latest from a newer one, and a version
-  only tagged is not released. Read after the publish, so of two builds the last sees both.
+  next release run builds again. It is published as a normal release, marked Latest, and a
+  pre-release only when its version has a `-` suffix.
 - **Run by hand** — dispatched on a tag, or a tag pushed by a person — it builds that tag. A
   release already published is refused, never rebuilt: the new assets would differ byte for
   byte, and an `archive` source pinned to the first zip's digest would then refuse every
@@ -309,7 +310,6 @@ GITHUB_REF_NAME=release-please--branches--main GITHUB_REF_TYPE=branch \
   node scripts/release-version.mjs        # the version comes from package.json
 node scripts/commit-types.mjs origin/main HEAD   # what CI asks of a PR's commits
 GITHUB_REPOSITORY=<owner>/<repo> node scripts/pending-release.mjs   # what a release run would finish; reads only
-GITHUB_REPOSITORY=<owner>/<repo> node scripts/release-version.mjs --latest   # the release that should be Latest
 node scripts/release-version.mjs --stamp 0.1.0-pre.99   # then restore what it changed (git status)
 ```
 

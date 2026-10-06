@@ -4,7 +4,6 @@
  *
  *   node scripts/release-version.mjs                 version=… tag=… prerelease=… for $GITHUB_OUTPUT
  *   node scripts/release-version.mjs --stamp 0.2.0-pre.3   write it into every file that carries one
- *   node scripts/release-version.mjs --latest        the release GitHub should mark Latest
  *
  * The release workflow builds two kinds of ref, and the same two will build it
  * after 1.0.0 (plugin plan D25):
@@ -21,15 +20,9 @@
  *   pre-release of a version already released ranks below it, and an installed
  *   plugin would still take the changed string as an update.
  * - a `v<version>` tag: that release, a normal GitHub release from 0.x on, and
- *   a pre-release only when its version has a `-` suffix.
- *
- * Latest is not decided per build. GitHub makes a newly published release
- * Latest unless told otherwise, so a release finished late — a stuck draft
- * completed after the next release — would take Latest, and
- * `releases/latest/download/…`, from a newer one. So a build publishes with
- * Latest off and then marks `latestRelease`, the highest version published,
- * read after its own publish: of two builds, the one that publishes last sees
- * both.
+ *   a pre-release only when its version has a `-` suffix, and marked Latest
+ *   when published. A release run never finishes a draft older than the
+ *   newest release (scripts/pending-release.mjs), so Latest is the newest.
  *
  * The version is stamped into the CI checkout only, never committed: the
  * branch says what is being prepared, and the build says which build it is.
@@ -123,10 +116,9 @@ export function compareVersions(a, b) {
 }
 
 /**
- * The release GitHub should mark Latest: the highest `v<x.y.z>` among the
- * published releases that are not pre-releases. A tag alone, or a draft, is
- * not a release, so a version release-please tagged but never finished cannot
- * hold Latest from one that was.
+ * The newest release: the highest `v<x.y.z>` among the published releases
+ * that are not pre-releases — what GitHub marks Latest. A tag alone, or a
+ * draft, is not a release.
  *
  * @param {{ tag: string, draft: boolean, prerelease: boolean }[]} releases
  * @returns {string | undefined}
@@ -210,11 +202,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   try {
     if (process.argv[2] === "--stamp") {
       stamp(process.argv[3] ?? "", root);
-    } else if (process.argv[2] === "--latest") {
-      if (!process.env.GITHUB_REPOSITORY) throw new Error("GITHUB_REPOSITORY names no repository");
-      const latest = latestRelease(listReleases(process.env.GITHUB_REPOSITORY));
-      if (!latest) throw new Error("no release is published that is not a pre-release");
-      process.stdout.write(`${latest}\n`);
     } else {
       // From the remote, not the checkout: a build that waited behind another
       // on the same branch must see the tag that one just made.
