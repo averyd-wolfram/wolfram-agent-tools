@@ -23,7 +23,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 import { cacheKey, readCache, writeCache } from "./cache.js";
-import type { Config, UpstreamCapabilities } from "./config.js";
+import { MAX_TIME_MS, type Config, type UpstreamCapabilities } from "./config.js";
 import type { DirectOps, KernelBackend } from "./backend.js";
 import type { BrokerBackend } from "./broker-client.js";
 import { doctorCommand } from "./doctor.js";
@@ -120,11 +120,18 @@ const TIME_CONSTRAINT_HEADROOM_MS = 30_000;
  * the user's `MCP_TOOL_OPTIONS`, and the tools most likely to run for a quarter
  * of an hour — a paclet build, a submission — declare nothing. Any table would
  * be this server asserting facts about someone else's configuration.
+ *
+ * A requested constraint is held to `MAX_TIME_MS`, as the configured ceiling
+ * is: past it the timer fires at once, and a model asking for "as long as it
+ * takes" was told at once that there was no answer (#15).
  */
 export function evaluationCeilingMs(configuredMs: number, args: unknown): number {
   const requested = Number((args as Record<string, unknown> | null)?.["timeConstraint"]);
   if (!Number.isFinite(requested) || requested <= 0) return configuredMs;
-  return Math.max(configuredMs, requested * 1000 + TIME_CONSTRAINT_HEADROOM_MS);
+  return Math.min(
+    MAX_TIME_MS,
+    Math.max(configuredMs, requested * 1000 + TIME_CONSTRAINT_HEADROOM_MS),
+  );
 }
 
 /**

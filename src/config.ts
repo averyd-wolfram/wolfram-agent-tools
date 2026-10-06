@@ -56,6 +56,17 @@ export const DEFAULT_MIN_VERSION = "14.3";
  */
 export const DEFAULT_START_TIMEOUT_MS = 120_000;
 
+/**
+ * The longest any time setting is held to, in ms: 24 days. Node keeps a
+ * timer's delay in a signed 32-bit integer and fires one longer than 2^31-1 ms,
+ * about 24.8 days, after 1 ms instead, with a TimeoutOverflowWarning. So a
+ * start timeout made huge to mean "never" failed every start at once, a call
+ * timeout every call, and an idle timeout shut the kernel down after each call
+ * (#15). The margin below the limit is for what is added to a setting on its
+ * way to a timer — a grace, an op's own ceiling — which is seconds.
+ */
+export const MAX_TIME_MS = 24 * 24 * 60 * 60 * 1000;
+
 export interface Config {
   /** Explicit kernel path, unresolved. `undefined` means auto-detect. */
   kernelPath: string | undefined;
@@ -104,13 +115,18 @@ export interface Config {
  * kernel as a serverName name costs a full start timeout to diagnose.
  */
 function readEnv(...names: string[]): string | undefined {
+  return readEnvEntry(...names)?.[1];
+}
+
+/** `readEnv`, with the name of the variable that carried the value. */
+function readEnvEntry(...names: string[]): [name: string, value: string] | undefined {
   for (const name of names) {
     const raw = process.env[name];
     if (raw === undefined) continue;
     const value = raw.trim();
     if (!value) continue;
     if (/^\$\{.*\}$/.test(value)) continue;
-    return value;
+    return [name, value];
   }
   return undefined;
 }
@@ -120,6 +136,22 @@ function readNumber(fallback: number, ...names: string[]): number {
   if (raw === undefined) return fallback;
   const parsed = Number.parseFloat(raw);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+/**
+ * A time setting, given in units of `unitMs`, as ms held to `MAX_TIME_MS`.
+ * Held rather than refused: a value that long means "as long as it can be",
+ * and the held value is what doctor and the startup line then show.
+ */
+function readTime(fallback: number, unitMs: number, log: Logger, ...names: string[]): number {
+  const ms = readNumber(fallback, ...names) * unitMs;
+  if (ms <= MAX_TIME_MS) return ms;
+  const [name, raw] = readEnvEntry(...names) ?? [names[0], ""];
+  log(
+    `${name}=${raw} is longer than Node's timers can hold; using ${MAX_TIME_MS / unitMs}, ` +
+      "which is 24 days",
+  );
+  return MAX_TIME_MS;
 }
 
 function readBoolean(fallback: boolean, ...names: string[]): boolean {
@@ -191,15 +223,21 @@ export function loadConfig(log: Logger): Config {
     serverName,
     version: readEnv("WOLFRAM_MCP_VERSION"),
     minVersion: readEnv("WOLFRAM_MCP_MIN_VERSION", "WOLFRAM_MIN_VERSION") ?? DEFAULT_MIN_VERSION,
-    idleMs: readNumber(10, "WOLFRAM_MCP_IDLE_MINUTES", "WOLFRAM_IDLE_MINUTES") * 60_000,
-    startTimeoutMs:
-      readNumber(
-        DEFAULT_START_TIMEOUT_MS / 1000,
-        "WOLFRAM_MCP_START_TIMEOUT_SECONDS",
-        "WOLFRAM_START_TIMEOUT_SECONDS",
-      ) * 1000,
-    callTimeoutMs:
-      readNumber(300, "WOLFRAM_MCP_CALL_TIMEOUT_SECONDS", "WOLFRAM_CALL_TIMEOUT_SECONDS") * 1000,
+    idleMs: readTime(10, 60_000, log, "WOLFRAM_MCP_IDLE_MINUTES", "WOLFRAM_IDLE_MINUTES"),
+    startTimeoutMs: readTime(
+      DEFAULT_START_TIMEOUT_MS / 1000,
+      1000,
+      log,
+      "WOLFRAM_MCP_START_TIMEOUT_SECONDS",
+      "WOLFRAM_START_TIMEOUT_SECONDS",
+    ),
+    callTimeoutMs: readTime(
+      300,
+      1000,
+      log,
+      "WOLFRAM_MCP_CALL_TIMEOUT_SECONDS",
+      "WOLFRAM_CALL_TIMEOUT_SECONDS",
+    ),
     cacheEnabled: readBoolean(true, "WOLFRAM_MCP_CACHE"),
     share: readBoolean(true, "WOLFRAM_MCP_SHARE"),
     maxKernels: (() => {

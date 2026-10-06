@@ -194,6 +194,12 @@ the canonical `wolfram` is reported, matching Wolfram's own generated configurat
 | `WOLFRAM_MCP_CALL_TIMEOUT_SECONDS` | `300` | Answer the caller with an error after this long. The kernel is left running — see below. |
 | `WOLFRAM_IDLE_MINUTES`, `WOLFRAM_START_TIMEOUT_SECONDS`, `WOLFRAM_CALL_TIMEOUT_SECONDS` | — | Aliases for the above. |
 
+Each of the three is held to 24 days (`MAX_TIME_MS`), as is a call's own `timeConstraint`, and
+the log says so when one is. Node fires a timer longer than about 24.8 days after 1 ms instead, so
+a value set huge to mean "never" used to do the opposite — every start or call failed at once,
+or the kernel was shut down after each call (#15). The margin covers the seconds of grace added
+on the way to a timer. To keep a kernel resident, use `0`, not a large idle time.
+
 The 10-minute default is not arbitrary. With Poisson arrivals at rate λ and a kernel that
 dies `T` after the last request, `P(cold start) = e^(−λT)` and `P(resident) = 1 − e^(−λT)`,
 which sum to exactly 1 — so fixing your cold-start rate fixes residency, at any traffic
