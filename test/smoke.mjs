@@ -3835,6 +3835,73 @@ heading("Preparation has one deadline, and names the stage it ran out in");
 }
 
 // ---------------------------------------------------------------------------
+// The start timeout is the only bound on a handshake. client.connect() sends
+// initialize as an ordinary SDK request, and with no timeout of its own the SDK
+// cut it off at 60s, half the 120s default: a first start that downloaded the
+// paclet for longer failed at a minute with a bare "Request timed out", and
+// raising WOLFRAM_MCP_START_TIMEOUT_SECONDS changed nothing. Read off the
+// request itself, since a check that waited a minute would not be run.
+heading("A handshake is bounded by the start timeout, not the SDK's default");
+{
+  const sent = [];
+  const original = Client.prototype.request;
+  Client.prototype.request = function (request, schema, options) {
+    if (request.method === "initialize") sent.push(options?.timeout);
+    return original.call(this, request, schema, options);
+  };
+  // The remainder a preparation hands ensure(), not the configured timeout,
+  // is what bounds this start, so that is what the request must carry: a
+  // second past it, exactly. Matched by value, since the wrapper sees every
+  // client in this process.
+  const session = new lib.KernelSession({
+    bin: fakeKernel,
+    serverName: "WolframLanguage",
+    idleMs: 60_000,
+    startTimeoutMs: 120_000,
+    clientInfo: { name: "smoke", version: "0" },
+    log: () => {},
+  });
+  try {
+    await session.ensure(90_000);
+  } finally {
+    Client.prototype.request = original;
+    await session.stop();
+  }
+  check(
+    "initialize is sent with a timeout a beat past the start's own, so the handshake's own timer is what fires",
+    sent.includes(91_000),
+    `initialize timeout ${sent.map(String).join(", ") || "none sent"}`,
+  );
+
+  // And a session waiting on a broker gives it as long: an op with no deadline
+  // of its own may first wait for the broker to start a kernel, bounded by the
+  // start timeout. The ceiling covered only the op, and fitted only while the
+  // SDK cut every handshake at 60s, so a cold start longer than a minute
+  // outlived it and the session gave up on a broker that was only starting.
+  const ceiling = lib.brokerCeilingMs;
+  const exported = typeof ceiling === "function";
+  check(
+    "a session waits for a broker's op long enough for the broker to start a kernel first",
+    exported &&
+      ceiling("listTools", undefined, 120_000) > 120_000 + 60_000 &&
+      ceiling("capabilities", undefined, 600_000) > 600_000 + 60_000,
+    exported ? `${ceiling("listTools", undefined, 120_000)}ms on a 120s start timeout` : "not exported",
+  );
+  // But only an op that can start one. status is answered from memory, and
+  // its short ceiling is how doctor notices a wedged broker in a minute, not
+  // three.
+  check(
+    "an op the broker answers from memory keeps the short ceiling",
+    exported && ceiling("status", undefined, 120_000) === 62_000,
+    exported ? `status ${ceiling("status", undefined, 120_000)}ms` : "not exported",
+  );
+  check(
+    "while an op with a ceiling of its own keeps it, and 0 still means none",
+    exported && ceiling("callTool", 300_000, 120_000) === 302_000 && ceiling("callTool", 0, 120_000) === 0,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // A stop has to reach a preparation wherever it is. Each stage used to be
 // reachable only once it had produced something: a handshake's transport was
 // recorded only after it succeeded, and the factory's probe and broker wait

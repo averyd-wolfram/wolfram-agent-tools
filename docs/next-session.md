@@ -7,9 +7,9 @@ in `docs/design.md`.
 ## Where things stand
 
 - **M0 and M1 are built**, and M1's acceptance is nearly done (plan §5 M1).
-- **`v0.1.0` is released**, with the bundle, the plugin archive and `SHA256SUMS.txt`. Below
+- **`v0.1.1` is released**, with the bundle, the plugin archive and `SHA256SUMS.txt`. Below
   1.0.0 every release is marked a GitHub pre-release, which `releases/latest` skips, so link a
-  release by its tag (`releases/download/v0.1.0/...`), never by `latest`.
+  release by its tag (`releases/download/v0.1.1/...`), never by `latest`.
 - **The release pipeline versions itself** from the commit types on `main`. `docs/releasing.md`
   has the whole of it; the short form is under *How releases work* below.
 - **The direction is client-neutral agent tools with a package per client** (plan §5 MA,
@@ -17,11 +17,12 @@ in `docs/design.md`.
 
 ## What to do next, in order
 
-1. **The SDK's 60 s handshake cap.** `KernelSession.#spawn` calls `client.connect(transport)`
-   with no request timeout, so the MCP SDK bounds `initialize` at its own 60 s default, below
-   the 120 s `WOLFRAM_MCP_START_TIMEOUT_SECONDS` default. A first start that downloads the
-   paclet for longer fails at 60 s with the SDK's bare "Request timed out", naming neither the
-   stage nor the setting. Found reviewing #8; test, then fix, as a `fix:` of its own.
+1. **The open bugs, filed as GitHub issues** (`gh issue list`), in this order: #5, a paclet
+   server that cannot be resolved costs a timeout and then a ten-minute back-off, though the
+   kernel names the cause in its first second; #11, a start whose deadline runs out between
+   `check()` and `ensure()` still spends a seat; #3, warm kernels serve a paclet's old server
+   after an upgrade, which wants a short design note before code. #10 (a message's wording) and
+   #12 (one timer for a start, weighed with #11) after those. Each is its own `fix:` PR.
 2. **MA's experiments**, each a ledger row (plan §5 MA, *Order of work*): Codex installing a
    Claude Code marketplace entry and trusting our hook; Cursor importing an installed Claude Code
    plugin, and whether its `sessionStart` injects context; Copilot honouring `userConfig`; the
