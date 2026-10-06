@@ -62,8 +62,10 @@ const suiteKey = lib.cacheKey(
 );
 
 const marker = join(home, "starts.log");
-const startCount = () =>
-  existsSync(marker) ? readFileSync(marker, "utf8").trim().split("\n").filter(Boolean).length : 0;
+/** Kernel starts recorded in a marker file: the suite's own, or a section's. */
+const starts = (path) =>
+  existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean).length : 0;
+const startCount = () => starts(marker);
 
 // Every server process this suite starts, so none outlives it.
 // StdioClientTransport does not kill its child when the parent exits, and a
@@ -3004,10 +3006,12 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
   // thing that ended the wait was the start timeout — set high here on purpose,
   // so the clock tells the two apart.
   const startedAt = Date.now();
+  const badMarker = join(home, "marker-unresolved-name");
   const bad = await connect({
     MCP_SERVER_NAME: "Wolframm",
     FAKE_MODE: "no-such-server",
     WOLFRAM_MCP_START_TIMEOUT_SECONDS: "20",
+    FAKE_MARKER: badMarker,
   });
   const failed = await bad.client.callTool(
     { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
@@ -3023,7 +3027,308 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
     /No MCPServerObject found for name/.test(reason) && /Wolframm/.test(reason),
     reason.replace(/\s+/g, " ").slice(0, 95),
   );
+  // A name that does not resolve is fixed by creating the server or installing
+  // its paclet, neither of which changes the kernel binary the back-off is keyed
+  // on, so the ten-minute back-off kept the fix from working (issue #5). It
+  // gets a short one instead: the next call, straight after, answers from the
+  // failure without starting a kernel, and says how soon it is asked again.
+  const again = await bad.client.callTool(
+    { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
+  const againText = again?.content?.[0]?.text ?? "";
+  const retryIn = Number(/retried in (\d+)s\b/.exec(againText)?.[1] ?? NaN);
+  check(
+    "and its back-off is seconds, not ten minutes, with no kernel started meanwhile",
+    again.isError === true && /No MCPServerObject found for name/.test(againText) &&
+      retryIn > 0 && retryIn <= 15 && starts(badMarker) === 1,
+    `retried in ${retryIn}s, ${starts(badMarker)} start(s): ${againText.replace(/\s+/g, " ").slice(0, 60)}`,
+  );
+  // What ends it sooner is the server, not the installation: the doctor and
+  // an installation change were the wrong things to point at.
+  check(
+    "and it says the fix is the server or its paclet, not the installation",
+    /create it, install the paclet that provides it/.test(againText) && !/installation changes/.test(againText),
+    `retried in ${retryIn}s, ${starts(badMarker)} start(s): ${againText.replace(/\s+/g, " ").slice(0, 60)}`,
+  );
   await bad.client.close();
+
+  // A paclet-qualified name whose paclet has no AgentTools extension, as a real
+  // kernel answered it (issue #5): StartMCPServer fails and the kernel drops to
+  // its REPL, which reads the client's JSON as Wolfram Language. Only
+  // MCPServerNotFound was watched for, so this waited out the whole start
+  // timeout, then the back-off, for an answer the kernel gave in its first
+  // second.
+  const pacletStartedAt = Date.now();
+  const noExtensionMarker = join(home, "marker-no-extension");
+  const noExtension = await connect({
+    MCP_SERVER_NAME: "WolframVerifier/Verifier",
+    FAKE_MODE: "no-paclet-extension",
+    WOLFRAM_MCP_START_TIMEOUT_SECONDS: "20",
+    FAKE_MARKER: noExtensionMarker,
+  });
+  const unresolved = await noExtension.client.callTool(
+    { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
+  const pacletElapsed = Date.now() - pacletStartedAt;
+  const unresolvedText = unresolved?.content?.[0]?.text ?? "";
+  check(
+    "a paclet server the paclet cannot provide fails in seconds, not at the start timeout",
+    unresolved.isError === true && pacletElapsed < 8000,
+    `${unresolved.isError ? "isError" : "ok"} after ${pacletElapsed}ms, timeout was 20000ms`,
+  );
+  check(
+    "and says why in the kernel's own words",
+    /No AgentTools extension found in paclet "WolframVerifier"/.test(unresolvedText),
+    unresolvedText.replace(/\s+/g, " ").slice(0, 95),
+  );
+  const retried = await noExtension.client.callTool(
+    { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
+  const retriedText = retried?.content?.[0]?.text ?? "";
+  const retriedIn = Number(/retried in (\d+)s\b/.exec(retriedText)?.[1] ?? NaN);
+  check(
+    "and only a short back-off, so installing the paclet works within seconds",
+    /No AgentTools extension found/.test(retriedText) && retriedIn > 0 && retriedIn <= 15 &&
+      starts(noExtensionMarker) === 1,
+    `retried in ${retriedIn}s, ${starts(noExtensionMarker)} start(s)`,
+  );
+  await noExtension.client.close();
+
+  // Whatever the cause, StartMCPServer says it failed, so that is what is
+  // watched: a list of the causes' own message names missed this one, a server
+  // whose file will not read, and waited out the start timeout again.
+  const unreadableAt = Date.now();
+  const unreadable = await connect({
+    MCP_SERVER_NAME: "My Server",
+    FAKE_MODE: "unreadable-server-file",
+    WOLFRAM_MCP_START_TIMEOUT_SECONDS: "20",
+  });
+  const unread = await unreadable.client.callTool(
+    { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
+  const unreadableElapsed = Date.now() - unreadableAt;
+  check(
+    "a server that will not start fails in seconds whatever the cause, on StartMCPServer's own failure",
+    unread.isError === true && unreadableElapsed < 8000 &&
+      /Invalid MCPServerObject file/.test(unread?.content?.[0]?.text ?? ""),
+    `${unread.isError ? "isError" : "ok"} after ${unreadableElapsed}ms`,
+  );
+  await unreadable.client.close();
+
+  // But only StartMCPServer's failure, not any message tagged with its name: a
+  // symbol of that name defined elsewhere makes the kernel warn
+  // StartMCPServer::shdw and then serve normally, and watching every
+  // StartMCPServer:: line killed that working start.
+  const shadowed = await connect({ FAKE_MODE: "shadowed-start", WOLFRAM_MCP_START_TIMEOUT_SECONDS: "20" });
+  const served = await shadowed.client.callTool(
+    { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
+  check(
+    "a warning that only shares StartMCPServer's name does not end a start that serves",
+    served.isError !== true && /evaluated/.test(served?.content?.[0]?.text ?? ""),
+    (served?.content?.[0]?.text ?? "").replace(/\s+/g, " ").slice(0, 80),
+  );
+  await shadowed.client.close();
+
+  // The same on the shared path, the default: the kernel starts in the broker's
+  // pool and its failure crosses the socket as text, so nothing there may turn
+  // it into a back-off either.
+  const sharedRuntime = join(home, "run-unresolved");
+  privateDir(sharedRuntime);
+  const sharedMarker = join(home, "marker-shared-unresolved");
+  const sharedAt = Date.now();
+  const sharedBad = await connect({
+    MCP_SERVER_NAME: "WolframVerifier/Verifier",
+    FAKE_MODE: "no-paclet-extension",
+    WOLFRAM_MCP_START_TIMEOUT_SECONDS: "20",
+    WOLFRAM_MCP_SHARE: "1",
+    XDG_RUNTIME_DIR: sharedRuntime,
+    WOLFRAM_MCP_LICENSE_LIMIT: "2",
+    FAKE_MARKER: sharedMarker,
+  });
+  const sharedFirst = await sharedBad.client.callTool(
+    { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
+  const sharedElapsed = Date.now() - sharedAt;
+  const sharedSecond = await sharedBad.client.callTool(
+    { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
+  const sharedSecondText = sharedSecond?.content?.[0]?.text ?? "";
+  // A session's preparation only attaches to the broker, so the start fails
+  // inside the broker's pool, where nothing remembered it: every request grew a
+  // kernel to fail the same way (issue #19). The pool remembers it per flavour.
+  check(
+    "through a shared broker too, it fails in seconds, and the next call starts no kernel",
+    sharedFirst.isError === true && sharedElapsed < 8000 &&
+      /No AgentTools extension found/.test(sharedSecondText) && /tried again in \d+s/.test(sharedSecondText) &&
+      starts(sharedMarker) === 1,
+    `${sharedElapsed}ms, ${starts(sharedMarker)} start(s); then: ${sharedSecondText.replace(/\s+/g, " ").slice(0, 70)}`,
+  );
+  await sharedBad.client.close();
+
+  // And when the not-found lands just as the start deadline runs out, the
+  // deadline's timeout wraps it — and used to drop it, so the back-off saw a
+  // timeout and was recorded after all.
+  const late = lib.ServerNotResolved
+    ? await new lib.Deadline(0)
+        .within("starting the kernel", Promise.reject(new lib.ServerNotResolved("no such server")))
+        .then(() => null, (e) => e)
+    : null;
+  check(
+    "a not-found the deadline wraps is still known as one, so it starts no back-off",
+    late?.name === "PreparationTimeout" && lib.isServerNotResolved?.(late) === true,
+    `${late?.name}: ${String(late?.message).slice(0, 60)}`,
+  );
+
+  // The window's other end, on a clock the suite controls: once it has passed,
+  // the next call asks a kernel again, which is what lets a fix take effect.
+  const savedEnv = { ...process.env };
+  const windowMarker = join(home, "marker-unresolved-window");
+  Object.assign(process.env, {
+    WOLFRAM_MCP_KERNEL: fakeKernel,
+    WOLFRAM_MCP_SHARE: "0",
+    WOLFRAM_MCP_INSPECT: "0",
+    WOLFRAM_MCP_CACHE: "0",
+    MCP_SERVER_NAME: "WolframVerifier/Verifier",
+    FAKE_MODE: "no-paclet-extension",
+    FAKE_MARKER: windowMarker,
+  });
+  let now = Date.now();
+  try {
+    const install = { bin: fakeKernel, version: null, source: "suite" };
+    const backend = lib.deferredBackend(lib.loadConfig(() => {}), install, () => {}, { clock: () => now });
+    const ask = () => backend.listTools().then(() => "served", (e) => e.message);
+    await ask();
+    const inside = await ask();
+    const startsInside = starts(windowMarker);
+    now += 16_000;
+    await ask();
+    await backend.stop();
+    check(
+      "a private session asks again once the short window has passed, and not before",
+      startsInside === 1 && /retried in/.test(inside) && starts(windowMarker) === 2,
+      `${startsInside} start(s) inside the window, ${starts(windowMarker)} after it`,
+    );
+
+    // On the shared path the window is the pool's, per flavour: within it a
+    // misconfigured flavour neither starts a kernel nor, at the budget, retires
+    // another session's idle one to make room for a start that cannot succeed.
+    let poolNow = Date.now();
+    const poolMarker = join(home, "marker-unresolved-pool");
+    process.env.FAKE_MARKER = poolMarker;
+    delete process.env.FAKE_MODE;
+    const pool = new lib.KernelPool({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 1, type: null },
+      learnFromKernels: false,
+      clock: () => poolNow,
+    });
+    const healthy = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" });
+    const broken = lib.kernelFlavour({
+      MCP_SERVER_NAME: "WolframVerifier/Verifier",
+      FAKE_MODE: "no-paclet-extension",
+      WOLFRAM_MCP_KERNEL_ENV: "FAKE_MODE",
+    });
+    const evaluate = (client) =>
+      client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } });
+    const tryBroken = () => pool.run(broken, evaluate).then(() => "served", (e) => e.message);
+    await pool.run(healthy, evaluate);
+    await tryBroken(); // takes the one seat from the healthy kernel, and fails
+    await pool.run(healthy, evaluate); // a fresh healthy kernel
+    const before = starts(poolMarker);
+    const refused = await tryBroken();
+    const second = await pool.run(healthy, evaluate).then((r) => r.content?.[0]?.text ?? "", (e) => e.message);
+    const within = starts(poolMarker) - before;
+    poolNow += 16_000;
+    await tryBroken();
+    const after = starts(poolMarker) - before;
+    await pool.stop();
+    check(
+      "within the window a misconfigured flavour starts no kernel and evicts no other session's",
+      /tried again in/.test(refused) && /evaluated/.test(second) && within === 0,
+      `${within} start(s) within the window: ${refused.replace(/\s+/g, " ").slice(0, 60)}`,
+    );
+    check(
+      "and the pool asks a kernel again once the window has passed",
+      after === 1,
+      `${after} start(s) after it`,
+    );
+
+    // A healthy flavour's cold burst starts its kernels in parallel. A
+    // first-start gate, tried for #19 and reverted, made each request wait for
+    // the one before to start; whatever fixes #19 must keep this.
+    // Kernels that take long enough to start that serial and parallel are
+    // seconds apart, so a loaded runner cannot blur the two.
+    process.env.FAKE_INIT_DELAY_MS = "3000";
+    const coldPool = new lib.KernelPool({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 3, type: null },
+      learnFromKernels: false,
+    });
+    const coldAt = Date.now();
+    await Promise.all([1, 2, 3].map(() => coldPool.run(healthy, evaluate)));
+    const coldMs = Date.now() - coldAt;
+    await coldPool.stop();
+    delete process.env.FAKE_INIT_DELAY_MS;
+    check(
+      "a healthy cold burst still starts its kernels in parallel",
+      coldMs < 6_000,
+      `${coldMs}ms for three requests on kernels that take 3s to start (serially, 9s)`,
+    );
+
+    // And a request of a flavour whose first kernel is still starting is served
+    // once the start succeeds, not when the request that made it finishes: a
+    // hold for #19, tried and reverted, kept it waiting for the whole call.
+    // Each flavour carries its own fake timings, declared so the pool starts
+    // its kernel with them.
+    const timed = (server, timings) =>
+      lib.kernelFlavour({
+        MCP_SERVER_NAME: server,
+        ...timings,
+        WOLFRAM_MCP_KERNEL_ENV: Object.keys(timings).join(","),
+      });
+    const queuePool = () =>
+      new lib.KernelPool({
+        bin: fakeKernel,
+        serverName: "WolframLanguage",
+        idleMs: 60_000,
+        startTimeoutMs: 20_000,
+        clientInfo: { name: "smoke", version: "1.0.0" },
+        log: () => {},
+        reserveSeats: 0,
+        licence: { maxProcesses: 2, type: null },
+        learnFromKernels: false,
+      });
+    const list = (client) => client.listTools();
+
+    // Two idle kernels of another flavour fill the budget; F starts one (1s)
+    // for a slow call (8s), then asks for its tool list.
+    const woken = queuePool();
+    const other = timed("WolframAlpha", {});
+    await Promise.all([woken.run(other, evaluate), woken.run(other, evaluate)]);
+    const slowF = timed("WolframLanguage", { FAKE_INIT_DELAY_MS: "1000", FAKE_CALL_DELAY_MS: "8000" });
+    const wokenAt = Date.now();
+    const slowCall = woken.run(slowF, evaluate);
+    await new Promise((r) => setTimeout(r, 200));
+    await woken.run(slowF, list);
+    const listedMs = Date.now() - wokenAt;
+    await slowCall;
+    await woken.stop();
+    check(
+      "a request held for its flavour's first start is served when the start succeeds, not when its call ends",
+      listedMs < 6_000,
+      `${listedMs}ms for a tool list behind a 1s start and an 8s call (held for it, 9s)`,
+    );
+
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key];
+    Object.assign(process.env, savedEnv);
+  }
 }
 
 // ---------------------------------------------------------------------------

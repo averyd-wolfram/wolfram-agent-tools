@@ -115,19 +115,53 @@ interface AbandonedWork {
 }
 
 /**
- * The paclet's own words for a `MCP_SERVER_NAME` it cannot resolve —
- * `AgentTools::MCPServerNotFound = "No MCPServerObject found for name \`1\`."`,
- * from its `Messages.wl`.
+ * The kernel's own words for a `MCP_SERVER_NAME` it cannot serve.
  *
- * Watched for because such a kernel does not fail: it loads, prints this, and
- * runs on as a non-server, so the only thing that ever ended the wait was the
- * start timeout — two minutes by default, for an answer the kernel gave in the
+ * Whatever the cause — no server of that name, a paclet that is not installed,
+ * has no AgentTools extension or lacks the server, a server file that will not
+ * read — `MCPServerObject[name]` fails, `StartMCPServer` is then handed that
+ * failure, matches no definition of its own, and says so as
+ * `StartMCPServer::InvalidArguments`, quoting the cause. Measured on a 15.0
+ * kernel with AgentTools 2.2.7: the cause, then that line, then the kernel's
+ * REPL, which reads the client's JSON as Wolfram Language. So
+ * `StartMCPServer::InvalidArguments` is the one signal that no server is
+ * coming, whatever the cause; `MCPServerNotFound` is kept for a kernel that
+ * printed only the cause. A list of the causes' own message names missed some
+ * and named two the start path never raises (issue #5). Not any
+ * `StartMCPServer::` message: a symbol of that name defined elsewhere makes the
+ * kernel print `StartMCPServer::shdw` and then serve normally (issue #5).
+ *
+ * Watched for because such a kernel does not exit, so the only thing that ever
+ * ended the wait was the start timeout, for an answer the kernel gave in its
  * first second. `resolveServerName` used to avoid the wait by refusing any name
  * it did not recognise, which silently substituted a different server for every
  * user-defined one. Pinned by `server-not-found-message-is-what-we-watch-for`
- * in the `.wlt`.
+ * and `an-unresolvable-server-says-so-from-StartMCPServer` in the `.wlt`.
  */
-const SERVER_NOT_FOUND = /MCPServerNotFound|No MCPServerObject found for name/;
+const SERVER_NOT_FOUND =
+  /StartMCPServer::InvalidArguments|MCPServerNotFound|No MCPServerObject found for name/;
+
+/**
+ * A start that ended because the kernel could not start its MCP server.
+ *
+ * Typed because it is not a failure of the installation: it is fixed by
+ * creating the server or installing its paclet, neither of which changes the
+ * kernel binary a preparation's back-off is keyed on, so it must start none.
+ */
+export class ServerNotResolved extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ServerNotResolved";
+  }
+}
+
+/** Whether `err`, or anything it was wrapped around, is a `ServerNotResolved`. */
+export function isServerNotResolved(err: unknown): boolean {
+  for (let e: unknown = err; e instanceof Error; e = e.cause) {
+    if (e instanceof ServerNotResolved) return true;
+  }
+  return false;
+}
 
 /** How far past a start's own handshake timer the SDK's request timeout is set. */
 const HANDSHAKE_SDK_GRACE_MS = 1_000;
@@ -306,8 +340,8 @@ export class KernelSession {
         // waiting out a timeout for something already answered.
         if (SERVER_NOT_FOUND.test(line)) {
           reportFatal(
-            new Error(
-              `the Wolfram kernel could not resolve MCP_SERVER_NAME="${serverName}": ` +
+            new ServerNotResolved(
+              `the Wolfram kernel could not start the MCP server MCP_SERVER_NAME="${serverName}": ` +
                 line.trim(),
             ),
           );

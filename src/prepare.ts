@@ -22,14 +22,37 @@ import { errorText } from "./log.js";
 /** How long a failed preparation is not retried, unless the binary changes. */
 export const PREPARATION_BACKOFF_MS = 10 * 60_000;
 
+/**
+ * How long a server name that did not resolve is not asked again.
+ *
+ * Not the full back-off: that is fixed by creating the server or installing its
+ * paclet, which the back-off, keyed on the kernel binary, cannot see, so ten
+ * minutes held the fix off (issue #5). Not none either: every ask starts a
+ * kernel and spends a seat for the second it takes to fail, and a client asks
+ * several things on connect and may retry in a loop. Long enough that a burst
+ * shares one failure; short enough that whoever fixes it rarely waits.
+ */
+export const NOT_RESOLVED_BACKOFF_MS = 15_000;
+
+/** What ends that wait sooner, said by both paths, so they cannot drift apart. */
+export const NOT_RESOLVED_ADVICE =
+  "meanwhile, check the server MCP_SERVER_NAME names: create it, install the paclet " +
+  "that provides it, or repair its definition";
+
 /** A preparation that did not finish in time, naming the stage it was in. */
 export class PreparationTimeout extends Error {
   readonly stage: string;
-  constructor(stage: string, totalMs: number, detail?: string) {
+  /**
+   * `cause` is the work's own failure when one landed as time ran out, kept so
+   * a caller can still tell what it was: a server name that did not resolve
+   * starts no back-off even when the deadline wrapped it.
+   */
+  constructor(stage: string, totalMs: number, detail?: string, cause?: unknown) {
     super(
       `a Wolfram kernel was not ready within ${Math.round(totalMs / 1000)}s ` +
         `(WOLFRAM_MCP_START_TIMEOUT_SECONDS): time ran out while ${stage}` +
         (detail ? `. ${detail}` : ""),
+      cause === undefined ? undefined : { cause },
     );
     this.name = "PreparationTimeout";
     this.stage = stage;
@@ -135,7 +158,7 @@ export class Deadline {
       if (this.signal.aborted) throw new PreparationStopped();
       if (err instanceof PreparationTimeout) throw err;
       if (this.remaining() > 0 && !ranOut?.(err)) throw err;
-      throw new PreparationTimeout(stage, this.totalMs, errorText(err));
+      throw new PreparationTimeout(stage, this.totalMs, errorText(err), err);
     } finally {
       clearTimeout(timer);
       if (onAbort) this.signal.removeEventListener("abort", onAbort);
@@ -177,21 +200,44 @@ export interface BackoffState {
   until: number;
   remainingMs: number;
   reason: string;
+  /** What ends it sooner, when that is not the installation changing. */
+  advice?: string | undefined;
 }
 
 /** The last failed preparation, and whether it still stands. */
 export class Backoff {
   readonly #windowMs: number;
   readonly #clock: () => number;
-  #failure: { identity: CandidateIdentity | null; at: number; reason: string } | null = null;
+  #failure: {
+    identity: CandidateIdentity | null;
+    at: number;
+    reason: string;
+    windowMs: number;
+    advice: string | undefined;
+  } | null = null;
 
   constructor(windowMs = PREPARATION_BACKOFF_MS, clock: () => number = Date.now) {
     this.#windowMs = windowMs;
     this.#clock = clock;
   }
 
-  record(identity: CandidateIdentity | null, err: unknown): void {
-    this.#failure = { identity, at: this.#clock(), reason: errorText(err) };
+  /**
+   * `windowMs`, when a failure warrants a shorter wait than the usual window,
+   * and `advice` for what fixes it, when that is not the installation.
+   */
+  record(
+    identity: CandidateIdentity | null,
+    err: unknown,
+    windowMs = this.#windowMs,
+    advice?: string,
+  ): void {
+    this.#failure = {
+      identity,
+      at: this.#clock(),
+      reason: errorText(err),
+      windowMs: Math.min(windowMs, this.#windowMs),
+      advice,
+    };
   }
 
   clear(): void {
@@ -207,13 +253,19 @@ export class Backoff {
   current(identity: CandidateIdentity | null): BackoffState | null {
     const failure = this.#failure;
     if (!failure) return null;
-    const until = failure.at + this.#windowMs;
+    const until = failure.at + failure.windowMs;
     const now = this.#clock();
     if (now >= until || !sameCandidate(failure.identity, identity)) {
       this.#failure = null;
       return null;
     }
-    return { failedAt: failure.at, until, remainingMs: until - now, reason: failure.reason };
+    return {
+      failedAt: failure.at,
+      until,
+      remainingMs: until - now,
+      reason: failure.reason,
+      advice: failure.advice,
+    };
   }
 }
 

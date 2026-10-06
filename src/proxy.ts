@@ -298,8 +298,10 @@ function describeStatus(
   // and this is the line that says why and for how long.
   if (backoff) {
     lines.push(
-      `preparing   the last attempt failed; retried in ${formatWait(backoff.remainingMs)}, or ` +
-        `as soon as the installation changes`,
+      `preparing   the last attempt failed; retried in ${formatWait(backoff.remainingMs)}` +
+        // The same pointer the failed call gave: for a server that would not
+        // start, the server, not the installation.
+        (backoff.advice ? `; ${backoff.advice}` : `, or as soon as the installation changes`),
       `            ${backoff.reason}`,
     );
   }

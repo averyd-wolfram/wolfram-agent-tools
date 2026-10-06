@@ -256,6 +256,24 @@ VerificationTest[
 ]
 
 VerificationTest[
+    (* src/kernel.ts SERVER_NOT_FOUND also matches StartMCPServer::InvalidArguments
+       - that message, not any tagged StartMCPServer::, since a symbol of that
+       name defined elsewhere warns StartMCPServer::shdw on a start that then
+       serves. Whatever stops a name resolving - no such server, a paclet missing or
+       without an AgentTools extension, a server file that will not read -
+       MCPServerObject[name] fails, StartMCPServer is handed that failure and
+       says InvalidArguments, and the kernel drops to its REPL (issue #5). That
+       one line is what ends the wait at once for every cause, so it is pinned
+       by asking StartMCPServer for a name nothing can provide - unqualified, so
+       no paclet is looked up and the run needs no network. *)
+    FailureQ @ Wolfram`AgentTools`StartMCPServer["NoSuchServer-contract"],
+    True,
+    {Wolfram`AgentTools`MCPServerObject::MCPServerNotFound,
+     Wolfram`AgentTools`StartMCPServer::InvalidArguments},
+    TestID -> "an-unresolvable-server-says-so-from-StartMCPServer"
+]
+
+VerificationTest[
     (* Why the server name travels as an environment variable rather than an argument:
        the no-argument overload reads it itself. StartMCPServer is ReadProtected,
        so Definition[] shows only attributes; read the shipped source instead. *)

@@ -17,12 +17,14 @@ in `docs/design.md`.
 
 ## What to do next, in order
 
-1. **The open bugs, filed as GitHub issues** (`gh issue list`), in this order: #5, a paclet
-   server that cannot be resolved costs a timeout and then a ten-minute back-off, though the
-   kernel names the cause in its first second; #11, a start whose deadline runs out between
-   `check()` and `ensure()` still spends a seat; #3, warm kernels serve a paclet's old server
-   after an upgrade, which wants a short design note before code. #10 (a message's wording) and
-   #12 (one timer for a start, weighed with #11) after those. Each is its own `fix:` PR.
+1. **The open bugs, filed as GitHub issues** (`gh issue list`), in this order: #11, a start
+   whose deadline runs out between `check()` and `ensure()` still spends a seat (and its shared
+   counterpart, a `ready` sent with no time left); #3, warm kernels serve a paclet's old server
+   after an upgrade, which wants a short design note before code. Then #15 (a start timeout too
+   large for a timer), #16 (the session guessing how long a broker spends starting a kernel),
+   #10 (a message's wording) and #12 (one timer for a start, weighed with #11 and #16). Each is
+   its own `fix:` PR. release-please's 0.1.2 PR is held open to collect them; merge it when the
+   batch is in.
 2. **MA's experiments**, each a ledger row (plan §5 MA, *Order of work*): Codex installing a
    Claude Code marketplace entry and trusting our hook; Cursor importing an installed Claude Code
    plugin, and whether its `sessionStart` injects context; Copilot honouring `userConfig`; the

@@ -22,10 +22,20 @@
  *                   15.0.0 started with a user base holding no mathpass. It does
  *                   not wait for credentials, so it fails fast, and the words
  *                   alone did not tell a user what to do
- *   no-such-server  prints the paclet's MCPServerNotFound, then sits there as a
- *                   non-server — the measured shape of a MCP_SERVER_NAME the
- *                   paclet cannot resolve, which does not exit and so used to be
- *                   ended only by the start timeout
+ *   no-such-server  prints the paclet's MCPServerNotFound and StartMCPServer's
+ *                   InvalidArguments, then sits in its REPL — the measured shape
+ *                   of a MCP_SERVER_NAME the paclet cannot resolve, which does
+ *                   not exit and so used to be ended only by the start timeout
+ *   shadowed-start  warns StartMCPServer::shdw, as a kernel does when another
+ *                   context defines a symbol of that name, then serves normally
+ *   unreadable-server-file  a server whose file will not read: a cause other
+ *                   than not-found, followed by the same StartMCPServer failure
+ *   no-paclet-extension  a paclet-qualified name whose paclet has no AgentTools
+ *                   extension, as a real 15.0 kernel with AgentTools 2.2.7 printed
+ *                   it (issue #5): MCPServerObject::PacletExtensionNotFound, then
+ *                   StartMCPServer::InvalidArguments, then the kernel's REPL,
+ *                   which reads the client's JSON as Wolfram Language and answers
+ *                   it with a syntax error rather than MCP
  * FAKE_MARKER   append a line per process start, to count kernel starts
  * FAKE_STATE    file used to remember that the first process has run
  *
@@ -190,16 +200,51 @@ if (mode === "no-seats") {
   process.exit(1);
 } else if (mode === "no-such-server") {
   reportFacts();
-  // AgentTools::MCPServerNotFound, verbatim from the paclet's Messages.wl, with
-  // the name it was actually given. The paclet throws this and carries on
-  // running, so the process stays up and silent.
+  // What a 15.0 kernel with AgentTools 2.2.7 printed for a name it could not
+  // resolve: the cause, verbatim from the paclet's Messages.wl with the name it
+  // was given, then StartMCPServer's failure, then its REPL, which answers the
+  // client's JSON with a syntax error rather than MCP.
   process.stdout.write(
-    `AgentTools::MCPServerNotFound: No MCPServerObject found for name "${serverName}".\n`);
-  process.stdin.resume();
+    `Wolfram\`AgentTools\`MCPServerObject::MCPServerNotFound: No MCPServerObject found for name "${serverName}".\n` +
+    `Wolfram\`AgentTools\`StartMCPServer::InvalidArguments: Invalid arguments given for Wolfram\`AgentTools\`StartMCPServer in Wolfram\`AgentTools\`StartMCPServer[No MCPServerObject found for name "${serverName}".].\n`);
+  process.stdin.on("data", () => {
+    process.stdout.write(`Syntax::sntxf: "{"jsonrpc"" cannot be followed by ":"2.0",…}".\n`);
+  });
+  setInterval(() => {}, 1000);
+} else if (mode === "no-paclet-extension") {
+  reportFacts();
+  const paclet = serverName.split("/")[0];
+  process.stdout.write(
+    `Wolfram\`AgentTools\`MCPServerObject::PacletExtensionNotFound: No AgentTools extension found in paclet "${paclet}".\n` +
+    `Wolfram\`AgentTools\`StartMCPServer::InvalidArguments: Invalid arguments given for Wolfram\`AgentTools\`StartMCPServer in Wolfram\`AgentTools\`StartMCPServer[No AgentTools extension found in paclet "${paclet}".].\n`);
+  process.stdin.on("data", () => {
+    process.stdout.write(`Syntax::sntxf: "{"method"" cannot be followed by ":"initialize",…}".\n`);
+  });
+  setInterval(() => {}, 1000);
+} else if (mode === "unreadable-server-file") {
+  reportFacts();
+  // A cause no list of the paclet's not-found messages named: the user's
+  // server exists but its Metadata.wxf will not read. StartMCPServer fails the
+  // same way whatever the cause, which is the line worth watching.
+  process.stdout.write(
+    `Wolfram\`AgentTools\`MCPServerObject::InvalidMCPServerFile: Invalid MCPServerObject file for "${serverName}".\n` +
+    `Wolfram\`AgentTools\`StartMCPServer::InvalidArguments: Invalid arguments given for Wolfram\`AgentTools\`StartMCPServer in Wolfram\`AgentTools\`StartMCPServer[Invalid MCPServerObject file for "${serverName}".].\n`);
+  process.stdin.on("data", () => {
+    process.stdout.write(`Syntax::sntxf: "{"jsonrpc"" cannot be followed by ":"2.0",…}".\n`);
+  });
   setInterval(() => {}, 1000);
 } else if (mode === "mute") {
   process.stdin.resume();
   setInterval(() => {}, 1000);
+} else if (mode === "shadowed-start") {
+  // A symbol named StartMCPServer defined in another context, by an init file
+  // or a loaded package: the kernel warns, then the server starts as usual.
+  reportFacts();
+  process.stdout.write(
+    "StartMCPServer::shdw: Symbol StartMCPServer appears in multiple contexts " +
+      "{Wolfram`AgentTools`, Global`}; definitions in context Wolfram`AgentTools` may " +
+      "shadow or be shadowed by other definitions.\n");
+  run();
 } else {
   reportFacts();
   run();
