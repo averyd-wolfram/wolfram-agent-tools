@@ -129,6 +129,9 @@ interface AbandonedWork {
  */
 const SERVER_NOT_FOUND = /MCPServerNotFound|No MCPServerObject found for name/;
 
+/** How far past a start's own handshake timer the SDK's request timeout is set. */
+const HANDSHAKE_SDK_GRACE_MS = 1_000;
+
 export interface KernelSessionOptions {
   bin: string;
   serverName: string;
@@ -335,7 +338,16 @@ export class KernelSession {
     void timeout.catch(() => {});
 
     try {
-      await Promise.race([client.connect(transport), fatal, timeout]);
+      // connect() sends initialize as an ordinary request, which the SDK
+      // otherwise bounds at its own 60s default: below the 120s default start
+      // timeout, so a first start downloading the paclet for longer failed at a
+      // minute with a bare "Request timed out", whatever the setting said. A
+      // beat past our own timer, so that timer, which names the cause, fires.
+      await Promise.race([
+        client.connect(transport, { timeout: startTimeoutMs + HANDSHAKE_SDK_GRACE_MS }),
+        fatal,
+        timeout,
+      ]);
     } catch (err) {
       await transport.close().catch(() => {});
       throw withKernelOutput(err, transport.recentOutput());

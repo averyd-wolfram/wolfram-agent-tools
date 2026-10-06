@@ -3835,6 +3835,42 @@ heading("Preparation has one deadline, and names the stage it ran out in");
 }
 
 // ---------------------------------------------------------------------------
+// The start timeout is the only bound on a handshake. client.connect() sends
+// initialize as an ordinary SDK request, and with no timeout of its own the SDK
+// cut it off at 60s, half the 120s default: a first start that downloaded the
+// paclet for longer failed at a minute with a bare "Request timed out", and
+// raising WOLFRAM_MCP_START_TIMEOUT_SECONDS changed nothing. Read off the
+// request itself, since a check that waited a minute would not be run.
+heading("A handshake is bounded by the start timeout, not the SDK's default");
+{
+  const sent = [];
+  const original = Client.prototype.request;
+  Client.prototype.request = function (request, schema, options) {
+    if (request.method === "initialize") sent.push(options?.timeout);
+    return original.call(this, request, schema, options);
+  };
+  const session = new lib.KernelSession({
+    bin: fakeKernel,
+    serverName: "WolframLanguage",
+    idleMs: 60_000,
+    startTimeoutMs: 120_000,
+    clientInfo: { name: "smoke", version: "0" },
+    log: () => {},
+  });
+  try {
+    await session.ensure();
+  } finally {
+    Client.prototype.request = original;
+    await session.stop();
+  }
+  check(
+    "initialize is sent with a timeout past the start timeout, so the handshake's own timer is what fires",
+    sent.length === 1 && typeof sent[0] === "number" && sent[0] > 120_000,
+    `initialize timeout ${sent.map(String).join(", ") || "none sent"}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // A stop has to reach a preparation wherever it is. Each stage used to be
 // reachable only once it had produced something: a handshake's transport was
 // recorded only after it succeeded, and the factory's probe and broker wait
