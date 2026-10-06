@@ -184,22 +184,21 @@ export class LocalBackend implements KernelBackend {
   async prepare(deadline: Deadline): Promise<void> {
     deadline.check("starting the kernel");
     // A beat of grace, so the handshake's own timer fires first: its error
-    // carries the kernel's last output, which names the actual cause.
-    try {
-      await deadline.within(
-        "starting the kernel",
-        this.#session.ensure(deadline.remaining()),
-        undefined,
-        1_000,
-      );
-    } catch (err) {
-      // That timer was the deadline's remainder, so its expiry is the
-      // deadline's, even when it fires before the deadline's own clock says so.
-      if (err instanceof HandshakeTimeout) {
-        throw new PreparationTimeout("starting the kernel", deadline.totalMs, errorText(err));
-      }
-      throw err;
-    }
+    // carries the kernel's last output, which names the actual cause. Only a
+    // timeout on this very remainder is the deadline's: ensure() may instead
+    // join a start already under way, which runs on the configured timeout and
+    // must be reported as itself.
+    const remainder = deadline.remaining();
+    await deadline.within(
+      "starting the kernel",
+      this.#session.ensure(remainder),
+      undefined,
+      1_000,
+      (err) =>
+        err instanceof Error &&
+        err.cause instanceof HandshakeTimeout &&
+        err.cause.timeoutMs === remainder,
+    );
   }
 
   async capabilities(): Promise<ServerCapabilities> {
@@ -481,8 +480,13 @@ export function deferredBackend(
   config: Config,
   install: KernelInstall,
   log: Logger,
+  // The clock and back-off window, for a suite that must not hand-build the
+  // wiring this function exists to own. The budget and binary always come from
+  // the configuration and the installation.
+  overrides: Pick<DeferredOptions, "clock" | "backoffMs"> = {},
 ): DeferredBackend {
   return new DeferredBackend((deadline) => createBackend(config, install, log, deadline), log, {
+    ...overrides,
     startTimeoutMs: config.startTimeoutMs,
     bin: install.bin,
   });

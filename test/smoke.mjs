@@ -3941,11 +3941,9 @@ heading("Stopping reaches a preparation wherever it is");
       // skew certain rather than occasional.
       const start = Date.now();
       const slow = () => start + (Date.now() - start) / 2;
-      const skewed = new lib.DeferredBackend(
-        (deadline) => lib.createBackend(config, { bin: fakeKernel, version: null, source: "suite" }, () => {}, deadline),
-        () => {},
-        { startTimeoutMs: config.startTimeoutMs, bin: fakeKernel, clock: slow },
-      );
+      const skewed = lib.deferredBackend(config, { bin: fakeKernel, version: null, source: "suite" }, () => {}, {
+        clock: slow,
+      });
       const skewedOutcome = await skewed.listTools().then(() => "served", (e) => e.message);
       await skewed.stop();
       check(
@@ -3954,6 +3952,32 @@ heading("Stopping reaches a preparation wherever it is");
           /did not complete MCP initialization/.test(skewedOutcome) &&
           skewed.backoff() !== null,
         skewedOutcome.slice(0, 90),
+      );
+
+      // But only that timer is the deadline's. A prepare() that joins a start
+      // already under way waits on that start's configured timeout, and its
+      // expiry, with most of the deadline left, is the handshake's own: blaming
+      // the deadline named the wrong budget and the wrong setting.
+      const local = new lib.LocalBackend({
+        bin: fakeKernel,
+        serverName: "WolframLanguage",
+        idleMs: 60_000,
+        startTimeoutMs: 1_000,
+        clientInfo: { name: "smoke", version: "0" },
+        log: () => {},
+      });
+      // Queued work reaches ensure() a beat later, so wait for its kernel:
+      // only then is there a start for prepare() to join.
+      const beforeJoin = fakePids("-run PacletSymbol");
+      const joinedStart = local.capabilities().catch(() => {});
+      await settle(() => appeared(beforeJoin, "-run PacletSymbol").length > 0);
+      const joined = await local.prepare(new lib.Deadline(10_000)).then(() => "ready", (e) => e.message);
+      await joinedStart;
+      await local.stop();
+      check(
+        "a start prepare() merely joined is reported as itself, not as the deadline",
+        /did not complete MCP initialization within 1s/.test(joined) && !/not ready within/.test(joined),
+        joined.slice(0, 90),
       );
     },
   );
