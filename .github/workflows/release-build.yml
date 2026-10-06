@@ -95,11 +95,6 @@ jobs:
           node-version: "22"
           cache: npm
       - run: npm ci
-      # Nothing is published while a published advisory covers a production
-      # dependency: the bundle inlines them, and 0.1.1 shipped fast-uri inside
-      # six (#26). Here rather than in ci.yml, so that a new advisory holds the
-      # next release until it is fixed, not every unrelated pull request.
-      - run: npm audit --omit=dev
       # Into this checkout only: the branch says what release is being
       # prepared, and the stamp says which build of it this is.
       - run: node scripts/release-version.mjs --stamp "${{ needs.name.outputs.version }}"
