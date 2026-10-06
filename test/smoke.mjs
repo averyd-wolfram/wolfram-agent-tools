@@ -3982,6 +3982,104 @@ heading("Timeouts layer the right way round");
 }
 
 // ---------------------------------------------------------------------------
+// Node keeps a timer's delay in a signed 32-bit integer, and fires one longer
+// than 2^31-1 ms, about 24.8 days, after 1 ms instead. So a time setting made
+// huge to mean "never" did the opposite: every start failed at once, every
+// call, and the kernel was shut down as idle after each call (#15). A model's
+// own timeConstraint reached the same timer. Each is held to what a timer can
+// hold, and the calls here are slow enough that a 1 ms timer fires first.
+heading("A time too long for a timer is held to the longest one can hold");
+{
+  const TIMER_LIMIT_MS = 2 ** 31 - 1;
+  // The call timeout by its alias, so the log is seen to name the variable set.
+  // Each value really overflowed a timer before the hold.
+  const huge = {
+    WOLFRAM_MCP_START_TIMEOUT_SECONDS: "3000000",
+    WOLFRAM_CALL_TIMEOUT_SECONDS: "3000000",
+    WOLFRAM_MCP_IDLE_MINUTES: "100000",
+  };
+  const names = [...Object.keys(huge), "WOLFRAM_MCP_CALL_TIMEOUT_SECONDS"];
+  const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  const said = [];
+  const loadWith = (env) => {
+    try {
+      for (const name of names) delete process.env[name];
+      Object.assign(process.env, env);
+      return lib.loadConfig((message) => said.push(message));
+    } finally {
+      for (const name of names) {
+        if (saved[name] === undefined) delete process.env[name];
+        else process.env[name] = saved[name];
+      }
+    }
+  };
+  const config = loadWith(huge);
+  // And Infinity, which a plain number read dropped for the default.
+  const infinite = loadWith({ WOLFRAM_MCP_IDLE_MINUTES: "Infinity" });
+  const held = [config.startTimeoutMs, config.callTimeoutMs, config.idleMs, infinite.idleMs];
+  const noted = said.filter((message) => /is longer than the 24 days a time setting is held to/.test(message));
+  check(
+    "each setting is held below the timer limit, with room for the grace added to it, and the log says so",
+    held.every((ms) => ms === lib.MAX_TIME_MS) &&
+      lib.MAX_TIME_MS + 3_600_000 < TIMER_LIMIT_MS &&
+      noted.length === 4 &&
+      noted.some((message) => message.startsWith("WOLFRAM_CALL_TIMEOUT_SECONDS=3000000")) &&
+      noted.some((message) => /^WOLFRAM_MCP_IDLE_MINUTES=Infinity .*using 34560 minutes$/.test(message)),
+    `${held.join(", ")} | ${said.join(" | ").slice(0, 200)}`,
+  );
+  check(
+    "as is the call ceiling, requested by a model or configured, and a configured 0 stays none",
+    lib.evaluationCeilingMs(300_000, { timeConstraint: 3_000_000 }) === lib.MAX_TIME_MS &&
+      lib.evaluationCeilingMs(300_000, { timeConstraint: "Infinity" }) === lib.MAX_TIME_MS &&
+      lib.evaluationCeilingMs(3_000_000_000, { code: "1+1" }) === lib.MAX_TIME_MS &&
+      lib.evaluationCeilingMs(0, { code: "1+1" }) === 0,
+    `${lib.evaluationCeilingMs(300_000, { timeConstraint: 3_000_000 })}, ${lib.evaluationCeilingMs(3_000_000_000, {})}`,
+  );
+
+  const before = startCount();
+  const s = await connect({ ...huge, FAKE_CALL_DELAY_MS: "200" });
+  const answer = (result) => `${result.isError ? "error: " : ""}${result.content?.[0]?.text ?? ""}`.slice(0, 90);
+  const first = await s.client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } });
+  const asked = await s.client.callTool({
+    name: "WolframLanguageEvaluator",
+    arguments: { code: "1+1", timeConstraint: 3_000_000 },
+  });
+  await new Promise((r) => setTimeout(r, 300));
+  check("a session with each set huge starts its kernel and answers", !first.isError, answer(first));
+  check("a call asking for a huge timeConstraint is answered", !asked.isError, answer(asked));
+  check(
+    "and the kernel is not shut down as idle after each call, nor any timer overflowed",
+    startCount() - before === 1 && !/idle for|TimeoutOverflowWarning/.test(s.stderr()),
+    `${startCount() - before} start(s); ${s.stderr().split("\n").filter((l) => /idle for|Overflow/.test(l)).join(" | ").slice(0, 120)}`,
+  );
+  await s.client.close();
+  await new Promise((r) => setTimeout(r, 300));
+
+  // Sharing is the default, and the broker reads the same settings for its own
+  // kernels: its start and idle timers, and its wait on each call.
+  wipeCache();
+  const runtime = join(home, "run-huge-times");
+  privateDir(runtime);
+  const sharedBefore = startCount();
+  const shared = await connect({ ...huge, WOLFRAM_MCP_SHARE: "1", XDG_RUNTIME_DIR: runtime, FAKE_CALL_DELAY_MS: "200" });
+  const calls = [];
+  for (const args of [{ code: "1+1" }, { code: "2+2", timeConstraint: 3_000_000 }]) {
+    calls.push(
+      await shared.client.callTool({ name: "WolframLanguageEvaluator", arguments: args }, undefined, { timeout: 30_000 }),
+    );
+  }
+  await new Promise((r) => setTimeout(r, 300));
+  check(
+    "and through the broker, both calls are answered by the one kernel it started",
+    calls.every((result) => !result.isError) && startCount() - sharedBefore === 1,
+    `${calls.map(answer).join(" | ")}; ${startCount() - sharedBefore} start(s)`,
+  );
+  await shared.client.close();
+  signalOwnBrokers("SIGTERM", runtime);
+  await new Promise((r) => setTimeout(r, 300));
+}
+
+// ---------------------------------------------------------------------------
 // Everything before a kernel receives its first request — the broker's
 // preparation, the handshake, and once an installation probe kernel — used to
 // carry its own bound: the probe 120s, the handshake
