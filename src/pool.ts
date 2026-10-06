@@ -108,6 +108,7 @@ interface Slot {
 interface Waiter {
   flavour: KernelFlavour;
   resolve: (slot: Slot) => void;
+  reject: (err: Error) => void;
 }
 
 /**
@@ -153,6 +154,13 @@ export class KernelPool {
    * session of the same flavour would get the same one from a kernel.
    */
   readonly #unresolved = new Map<string, { at: number; reason: string }>();
+  /**
+   * A flavour's first kernel start while it is under way, which later requests
+   * of that flavour wait for rather than each starting their own: requests that
+   * arrived together all passed the window before any failure was recorded, and
+   * each grew a kernel — at the budget, each retiring another session's.
+   */
+  readonly #firstStart = new Map<string, Promise<void>>();
 
   constructor(options: KernelPoolOptions) {
     this.#options = options;
@@ -336,7 +344,7 @@ export class KernelPool {
       `all ${this.#slots.length} kernel(s) busy and budget reached; queueing ` +
         `(${this.#waiters.length + 1} waiting)`,
     );
-    return new Promise<Slot>((resolve) => this.#waiters.push({ flavour, resolve }));
+    return new Promise<Slot>((resolve, reject) => this.#waiters.push({ flavour, resolve, reject }));
   }
 
   #release(slot: Slot): void {
@@ -434,6 +442,14 @@ export class KernelPool {
       const head = this.#waiters[0];
       if (!head) return;
       const { flavour } = head;
+      // Turned away before any tier below can grow a kernel or retire another
+      // session's for it: its flavour's name stopped resolving while it waited.
+      const refusal = this.#refusal(flavour);
+      if (refusal) {
+        this.#waiters.shift();
+        head.reject(refusal);
+        continue;
+      }
       const mine = (s: Slot) => s.flavour.digest === flavour.digest;
 
       const take = (slot: Slot): void => {
@@ -482,35 +498,77 @@ export class KernelPool {
     fn: (client: Client) => Promise<T>,
     options: RunOptions = {},
   ): Promise<T> {
-    this.#refuseUnresolved(flavour);
-    const slot = await this.#acquire(flavour);
+    const { digest } = flavour;
+    // Only the start is waited for, not the request that made it, so a long
+    // evaluation never holds up its flavour's other requests.
+    for (;;) {
+      const pending = this.#firstStart.get(digest);
+      if (!pending || this.#hasRunning(flavour)) break;
+      await pending;
+    }
+    const refusal = this.#refusal(flavour);
+    if (refusal) throw refusal;
+    let started: (() => void) | undefined;
+    if (!this.#hasRunning(flavour)) {
+      this.#firstStart.set(digest, new Promise<void>((resolve) => (started = resolve)));
+    }
+    const endFirstStart = () => {
+      if (!started) return;
+      this.#firstStart.delete(digest);
+      started();
+      started = undefined;
+    };
+    let slot: Slot;
     try {
+      slot = await this.#acquire(flavour);
+    } catch (err) {
+      endFirstStart();
+      throw err;
+    }
+    try {
+      try {
+        await slot.session.ensure();
+      } finally {
+        endFirstStart();
+      }
       const result = await slot.session.run(fn, options);
       this.#release(slot);
       return result;
     } catch (err) {
-      if (isServerNotResolved(err)) {
-        this.#unresolved.set(flavour.digest, { at: this.#now(), reason: errorText(err) });
-      }
+      if (isServerNotResolved(err)) this.#recordUnresolved(digest, err);
       this.#quarantine(slot, errorText(err));
       throw err;
     }
+  }
+
+  #hasRunning(flavour: KernelFlavour): boolean {
+    return this.#slots.some((s) => s.flavour.digest === flavour.digest && s.session.running);
+  }
+
+  #recordUnresolved(digest: string, err: unknown): void {
+    const now = this.#now();
+    // Pruned here, so a long-lived broker does not keep every name that ever
+    // failed, kernel output and all.
+    for (const [key, known] of this.#unresolved) {
+      if (now - known.at >= NOT_RESOLVED_BACKOFF_MS) this.#unresolved.delete(key);
+    }
+    this.#unresolved.set(digest, { at: now, reason: errorText(err) });
   }
 
   #now(): number {
     return (this.#options.clock ?? Date.now)();
   }
 
-  /** Fails a request at once while its flavour's server name recently did not resolve. */
-  #refuseUnresolved(flavour: KernelFlavour): void {
+  /** The refusal for a request while its flavour's server name recently did not resolve. */
+  #refusal(flavour: KernelFlavour): ServerNotResolved | null {
     const known = this.#unresolved.get(flavour.digest);
-    if (!known) return;
+    if (!known) return null;
     const age = this.#now() - known.at;
     if (age >= NOT_RESOLVED_BACKOFF_MS) {
       this.#unresolved.delete(flavour.digest);
-      return;
+      return null;
     }
-    throw new ServerNotResolved(
+    return new ServerNotResolved(
       `a kernel for this server could not resolve its name ${formatWait(age)} ago, so ` +
         `none was started for this request; it is tried again in ` +
         `${formatWait(NOT_RESOLVED_BACKOFF_MS - age)}.\n\nThe failure was: ${known.reason}`,

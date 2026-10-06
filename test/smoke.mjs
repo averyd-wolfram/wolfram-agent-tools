@@ -3232,6 +3232,41 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
       after === 1,
       `${after} start(s) after it`,
     );
+
+    // Requests that arrive together — a client's connect burst — all pass the
+    // window before any failure is recorded. Each grew a kernel of its own, and
+    // past the budget retired another session's to make room. A flavour's first
+    // start now runs alone, and the rest wait for its answer.
+    const burstMarker = join(home, "marker-unresolved-burst");
+    process.env.FAKE_MARKER = burstMarker;
+    const burstPool = new lib.KernelPool({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 2, type: null },
+      learnFromKernels: false,
+    });
+    await burstPool.run(healthy, evaluate);
+    const beforeBurst = starts(burstMarker);
+    const burst = await Promise.all(
+      [1, 2, 3].map(() => burstPool.run(broken, evaluate).then(() => "served", (e) => e.message)),
+    );
+    const burstStarts = starts(burstMarker) - beforeBurst;
+    const healthyAfter = await burstPool
+      .run(healthy, evaluate)
+      .then((r) => r.content?.[0]?.text ?? "", (e) => e.message);
+    const totalStarts = starts(burstMarker) - beforeBurst;
+    await burstPool.stop();
+    check(
+      "a burst for a server that does not resolve starts one kernel, and evicts no other session's",
+      burstStarts === 1 && burst.filter((m) => /tried again in/.test(m)).length === 2 &&
+        /evaluated/.test(healthyAfter) && totalStarts === 1,
+      `${burstStarts} start(s) for 3 requests, ${totalStarts} counting the healthy session after`,
+    );
   } finally {
     for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key];
     Object.assign(process.env, savedEnv);

@@ -262,8 +262,9 @@ VerificationTest[
        MCPServerObject[name] fails, StartMCPServer is handed that failure and
        says InvalidArguments, and the kernel drops to its REPL (issue #5). That
        one line is what ends the wait at once for every cause, so it is pinned
-       by asking StartMCPServer for a name nothing can provide. *)
-    FailureQ @ Wolfram`AgentTools`StartMCPServer["NoSuchPublisher/NoSuchServer-contract"],
+       by asking StartMCPServer for a name nothing can provide - unqualified, so
+       no paclet is looked up and the run needs no network. *)
+    FailureQ @ Wolfram`AgentTools`StartMCPServer["NoSuchServer-contract"],
     True,
     {Wolfram`AgentTools`MCPServerObject::MCPServerNotFound,
      Wolfram`AgentTools`StartMCPServer::InvalidArguments},
