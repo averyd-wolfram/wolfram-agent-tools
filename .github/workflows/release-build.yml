@@ -138,7 +138,7 @@ jobs:
             # pull_request checks ran. This build ran all of ci.yml on its exact
             # commit, and runs the two title checks here on the release commit,
             # whose subject is the PR's title; each result is posted where
-            # branch protection looks for it. conventional-title's parse of the
+            # branch protection looks for it. conventional-title's read of the
             # description (scripts/squash-message.mjs) is not run: the merged
             # release commit is where release-please stops reading, so no
             # release is ever made from its message.

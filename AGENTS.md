@@ -185,9 +185,11 @@ built-ins, which is the bug it exists for.
   `release-version.mjs` names a release build from its ref and stamps the version into the tree;
   `ci-changes.mjs` decides whether a pull request needs CI's test and build jobs — not when
   it changed only markdown outside `plugin/`, `test/`, `src/`, `scripts/` and `examples/`;
-  `squash-message.mjs` parses the commit a pull request squashes into — title, then the
+  `squash-message.mjs` reads the commit a pull request squashes into — title, then the
   description as written and as GitHub rewraps it to 72 columns — with release-please's own
-  parser, since one it cannot parse drops out of the release without failing anything
+  code, at the version the release workflow's pinned action bundles, and fails unless it reads
+  as the one commit the title says: a description can drop the commit, add one or make it
+  breaking without failing anything
 - `examples/`: `weather.wl`, a worked example against a public API — sessions here lint it
   live through the plugin's LSP, and `npm run test:lsp` fails if it stops being lint-clean
 - `docs/`: developer documentation
@@ -228,9 +230,9 @@ built-ins, which is the bug it exists for.
   `scripts/release-version.mjs` names the build and stamps its version into the checkout, and
   `pr-title.yml`'s `commit-types` job (`scripts/commit-types.mjs`) refuses a commit that changes what
   ships under a type that bumps nothing; `pr-title.yml`'s `conventional-title` job fails a PR
-  whose title is not a Conventional Commit, or whose squash commit release-please cannot parse
-  (`scripts/squash-message.mjs`), because under squash-merge the title and description become
-  the commit release-please reads, so a bad one silently skips a bump. `release-please-config.json` and `.release-please-manifest.json` drive the bump — the
+  whose title is not a Conventional Commit, or whose squash commit release-please would not read
+  as that title says (`scripts/squash-message.mjs`), because under squash-merge the title and
+  description become the commit release-please reads, so a bad one silently skips a bump. `release-please-config.json` and `.release-please-manifest.json` drive the bump — the
   config's `extra-files` keep `plugin.json` in step with `package.json`.
   Nothing publishes to npm, and no personal token is used: release-please and the build run as
   jobs of one workflow run, because nothing `GITHUB_TOKEN` does starts another workflow, so the

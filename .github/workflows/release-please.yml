@@ -47,7 +47,12 @@ jobs:
       tag_name: ${{ steps.rp.outputs.tag_name }}
       pr_branch: ${{ steps.rp.outputs.pr && fromJSON(steps.rp.outputs.pr).headBranchName }}
     steps:
-      - uses: googleapis/release-please-action@v4
+      # Pinned to v4.4.1, which bundles release-please 17.3.0: the
+      # conventional-title check reads each pull request's squash commit with
+      # that same version (package.json's exact release-please), so it answers
+      # for what this step will read. A floating @v4 could move the release to
+      # another version's reading unseen. Move both together.
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
         id: rp
         with:
           token: ${{ secrets.GITHUB_TOKEN }}

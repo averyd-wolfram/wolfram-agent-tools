@@ -5535,12 +5535,14 @@ heading("A commit that changes what ships carries a type that bumps the version"
 }
 
 // ---------------------------------------------------------------------------
-// release-please parses each squash commit, title and description together,
-// and skips one it cannot parse without failing anything. #21's fix went
-// missing from 0.1.2's release PR that way, with every check green, since they
-// read only the title (#24). The line the parser rejected exists only in the
-// commit: GitHub rewraps the description to 72 columns when it squashes.
-heading("release-please can read the commit a pull request squashes into");
+// release-please reads each squash commit whole, title and description, and
+// what the description says can change what it reads without failing
+// anything. #21's fix went missing from 0.1.2's release PR that way, with
+// every check green, since they read only the title (#24): the line the parser
+// rejected exists only in the commit, where GitHub rewraps the description to
+// 72 columns. The script asks release-please's own code, so these pin what it
+// reads, not a copy of its rules.
+heading("release-please reads the commit a pull request squashes into as its title says");
 {
   const { unreadable, wrap } = await import(join(root, "scripts", "squash-message.mjs"));
   const { commitType } = await import(join(root, "scripts", "commit-types.mjs"));
@@ -5579,7 +5581,8 @@ heading("release-please can read the commit a pull request squashes into");
       found[0].includes('"`ensure(deadline.remaining())`. A deadline'),
     found.join(" | "),
   );
-  const ok = (body) => unreadable({ title: "fix: guard the LSP", number: 9, body }).length === 0;
+  const read = (body, prTitle = "fix: guard the LSP") => unreadable({ title: prTitle, number: 9, body });
+  const ok = (body, prTitle) => read(body, prTitle).length === 0;
   check(
     "a plain description passes, a call's parentheses included, as do an empty one and none",
     ok("Fixes #3.\n\n**What happened.** `Deadline.handOn(stage)` returned `f(x)`.\n\n🤖 Generated") &&
@@ -5594,34 +5597,59 @@ heading("release-please can read the commit a pull request squashes into");
     override(`${title} (#21)`).length === 0 &&
       override(`${title} (#21)\n\nfix: and a second fix`).length === 0 &&
       badOverride.length === 1 &&
-      badOverride[0].startsWith("the BEGIN_COMMIT_OVERRIDE block"),
+      badOverride[0].startsWith("the BEGIN_COMMIT_OVERRIDE block") &&
+      badOverride[0].includes('"`f(g())` again"'),
     badOverride.join(" | "),
   );
   // release-please splits on the marker wherever it is: this check's own PR
   // described it in a code span, and that sentence's tail became the override.
-  const named = unreadable({
-    title: "ci: check the squash commit",
-    body: "**Fix.** A `BEGIN_COMMIT_OVERRIDE` block replaces the message.",
-  });
+  const named = read("**Fix.** A `BEGIN_COMMIT_OVERRIDE` block replaces the message.");
   check(
     "and a description that only names the marker is read as using it, as release-please reads it",
     named.length === 1 && named[0].startsWith("the BEGIN_COMMIT_OVERRIDE block"),
     named.join(" | "),
   );
-  const extra = unreadable({ title: "fix: guard the LSP", body: "Fixes #3.\n\nfeat: an option this does not add" });
+  const paragraph = read("Fixes #3.\n\nfeat: an option this does not add");
+  const nested = read("Fixes #3.\n\nBEGIN_NESTED_COMMIT\nfeat: an option this adds\nEND_NESTED_COMMIT");
   check(
-    "a paragraph that begins like a commit is a commit of its own to release-please, and fails; marked nested, it passes",
-    extra.length === 1 &&
-      extra[0].includes('"feat: an option this does not add"') &&
-      ok("Fixes #3.\n\nBEGIN_NESTED_COMMIT\nfeat: an option this adds\nEND_NESTED_COMMIT"),
-    extra.join(" | "),
+    "a paragraph that begins like a commit is a second commit to release-please, and fails, marked nested or not",
+    paragraph.length === 1 && paragraph[0].includes('"feat: an option this does not add"') && nested.length === 1,
+    [...paragraph, ...nested].join(" | "),
   );
-  // 64 columns of prose and an 8-column call: 72 in all, so it stays on its
-  // line, unless a CR is counted and wraps the call to the start of the next.
-  const atWidth = `${"x".repeat(63)} \`f(g())\``;
+  // As written the sentence is one line; wrapped, its last line begins with
+  // the type, and release-please reads a last line shaped like a footer as a
+  // commit of its own.
+  const footer = read(
+    "Fixes #3.\n\nThis is a long sentence that explains the type, which was chosen to be a feat: it adds an option nobody had before now.",
+  );
   check(
-    "a description with CRLF line ends is wrapped as its LF form is",
-    atWidth.length === 72 && ok(`${atWidth}\r\nnext`) && !ok(`${atWidth}x\nnext`),
+    "and so does a last line GitHub's wrap starts with a type, which release-please reads as a footer commit",
+    footer.length === 1 && footer[0].includes("72 columns") && footer[0].includes('"feat: it adds an option'),
+    footer.join(" | "),
+  );
+  const breaking = read("The parser reads `BREAKING-CHANGE: x` anywhere in the text.");
+  check(
+    "a breaking change release-please finds in the description fails, unless the title marks it",
+    breaking.length === 1 &&
+      breaking[0].includes("breaking change") &&
+      ok("The parser reads `BREAKING-CHANGE: x` anywhere in the text.", "fix!: guard the LSP"),
+    breaking.join(" | "),
+  );
+  // Each of these lines, wrapped wrongly, would put `f(g())` at a line's
+  // start. 64 columns of prose and an 8-column call is 72 in all, so the line
+  // stays whole unless a CR or an emoji's second UTF-16 unit is counted.
+  const atWidth = `${"x".repeat(63)} \`f(g())\``;
+  const emoji = `🤖🤖 ${"x".repeat(60)} \`f(g())\``;
+  const indented = "    ensure(deadline.remaining()) is in this indented code block line that is long enough to wrap";
+  check(
+    "a CR, an emoji and a long line's indentation are wrapped as columns, as GitHub would",
+    atWidth.length === 72 &&
+      ok(`${atWidth}\r\nnext`) &&
+      !ok(`${atWidth}x\nnext`) &&
+      ok(`${emoji}\nnext`) &&
+      wrap(indented).startsWith("    ensure(") &&
+      ok(`Intro.\n\n${indented}`),
+    read(`${emoji}\nnext`).join(" | ") || JSON.stringify(wrap(indented).split("\n")[0]),
   );
   const cli = (env) =>
     spawnSync(process.execPath, [join(root, "scripts", "squash-message.mjs")], {

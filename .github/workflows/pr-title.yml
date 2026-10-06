@@ -51,19 +51,22 @@ jobs:
             build
             style
             revert
-      # The title is not all release-please reads. It parses the squash
-      # commit whole, with @conventional-commits/parser, and skips one it
-      # cannot parse: #21's description, rewrapped by GitHub, put a line
-      # starting `ensure(deadline.remaining())` in the commit, and its fix
-      # missed the release PR with every check green. So the description is
-      # parsed too, with the parser release-please depends on, as written and
-      # as GitHub wraps it (scripts/squash-message.mjs).
+      # The title is not all release-please reads. It reads the squash commit
+      # whole, and the description can drop the commit, add one, or make it
+      # breaking, with nothing failing: #21's description, rewrapped by
+      # GitHub, began a line with a call holding a call, which the parser
+      # rejects, and its fix missed the release PR with every check green. So
+      # the commit is read by release-please's own code, the version the
+      # release workflow's pinned action bundles, as written and as GitHub
+      # wraps it, and must read as the one commit the title says
+      # (scripts/squash-message.mjs).
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
-      # The parser only: no build, and no git hooks on a runner.
+      # From the lockfile, so the release-please read is the pinned one; no
+      # build, and no git hooks on a runner.
       - run: npm ci --ignore-scripts
       - env:
           PR_TITLE: ${{ github.event.pull_request.title }}
