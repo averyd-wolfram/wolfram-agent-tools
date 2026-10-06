@@ -40,6 +40,14 @@ export function createLogger(prefix: string, options: LoggerOptions = {}): Logge
 /** A logger that discards everything, for tests and programmatic embedding. */
 export const silentLogger: Logger = () => {};
 
+/**
+ * A time budget as a person reads it: whole seconds, or milliseconds below
+ * one. Rounded to seconds, a budget of 400ms read "within 0s" (#10).
+ */
+export function budgetText(ms: number): string {
+  return ms < 1000 ? `${Math.floor(ms)}ms` : `${Math.round(ms / 1000)}s`;
+}
+
 /** Best-effort human-readable text for a thrown value. */
 export function errorText(err: unknown): string {
   if (err instanceof Error) return err.message;

@@ -4230,6 +4230,54 @@ heading("Preparation has one deadline, and names the stage it ran out in");
 }
 
 // ---------------------------------------------------------------------------
+// A start that runs out reports two budgets: the deadline's, in the headline,
+// and the handshake's, in the detail. Both were whole seconds, rounded, so a
+// sub-second budget read "within 0s" — and the detail, the handshake's own
+// message, followed a full stop in lower case (#10). And a start refused
+// because too little time was left read "time ran out while starting the
+// kernel", though the detail said it never began.
+heading("A start that runs out says what it had, in sentences");
+{
+  wipeCache();
+  const s = await connect({ WOLFRAM_MCP_START_TIMEOUT_SECONDS: "0.4", FAKE_INIT_DELAY_MS: "20000" });
+  const result = await s.client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } });
+  const said = (result.content?.[0]?.text ?? "").split("\n")[0];
+  const handshake = Number(/did not complete MCP initialization within (\d+)ms/i.exec(said)?.[1] ?? NaN);
+  check(
+    "a sub-second start timeout and the handshake's share of it are given in ms, never 0s",
+    result.isError === true &&
+      said.includes("not ready within 400ms") &&
+      handshake > 0 &&
+      handshake <= 400 &&
+      !/within 0s/.test(said),
+    said.slice(0, 220),
+  );
+  check(
+    "and the handshake's detail begins its own sentence",
+    said.includes("time ran out while starting the kernel. The Wolfram kernel did not complete"),
+    said.slice(60, 200),
+  );
+  await s.client.close();
+
+  let reads = 0;
+  const refused = (() => {
+    try {
+      new lib.Deadline(1_000, () => (++reads <= 1 ? 0 : 999)).handOn("starting the kernel", 1_000);
+      return null;
+    } catch (err) {
+      return err;
+    }
+  })();
+  check(
+    "a start refused for lack of time says time ran out before it, not while it ran",
+    refused instanceof lib.PreparationTimeout &&
+      /time ran out before starting the kernel\. 1ms were left, too little for this to begin/.test(refused.message) &&
+      refused.stage === "starting the kernel",
+    refused?.message ?? String(refused),
+  );
+}
+
+// ---------------------------------------------------------------------------
 // The start timeout is the only bound on a handshake. client.connect() sends
 // initialize as an ordinary SDK request, and with no timeout of its own the SDK
 // cut it off at 60s, half the 120s default: a first start that downloaded the

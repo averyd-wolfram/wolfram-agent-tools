@@ -18,7 +18,7 @@ import {
 import { FilteringStdioTransport } from "./transport.js";
 import { applyFlavour, type KernelFlavour } from "./flavour.js";
 import { FACTS_EXPRESSION, isFactsLine, parseFacts, type KernelFacts } from "./inspect.js";
-import { errorText, type Logger } from "./log.js";
+import { budgetText, errorText, type Logger } from "./log.js";
 
 /**
  * Wolfram/AgentTools' own `$defaultCommandLineArguments`, verbatim — pinned by
@@ -78,7 +78,7 @@ export class HandshakeTimeout extends Error {
   constructor(timeoutMs: number) {
     super(
       `the Wolfram kernel did not complete MCP initialization within ` +
-        `${Math.round(timeoutMs / 1000)}s. Common causes: the ` +
+        `${budgetText(timeoutMs)}. Common causes: the ` +
         `Wolfram/AgentTools paclet is missing or is being downloaded, the ` +
         `selected kernel predates AgentTools support, or an unactivated ` +
         `Wolfram Engine is waiting for credentials on stdin, which cannot ` +
