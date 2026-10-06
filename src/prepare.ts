@@ -22,6 +22,18 @@ import { errorText } from "./log.js";
 /** How long a failed preparation is not retried, unless the binary changes. */
 export const PREPARATION_BACKOFF_MS = 10 * 60_000;
 
+/**
+ * How long a server name that did not resolve is not asked again.
+ *
+ * Not the full back-off: that is fixed by creating the server or installing its
+ * paclet, which the back-off, keyed on the kernel binary, cannot see, so ten
+ * minutes held the fix off (issue #5). Not none either: every ask starts a
+ * kernel and spends a seat for the second it takes to fail, and a client asks
+ * several things on connect and may retry in a loop. Long enough that a burst
+ * shares one failure; short enough that whoever fixes it rarely waits.
+ */
+export const NOT_RESOLVED_BACKOFF_MS = 15_000;
+
 /** A preparation that did not finish in time, naming the stage it was in. */
 export class PreparationTimeout extends Error {
   readonly stage: string;
@@ -189,15 +201,26 @@ export interface BackoffState {
 export class Backoff {
   readonly #windowMs: number;
   readonly #clock: () => number;
-  #failure: { identity: CandidateIdentity | null; at: number; reason: string } | null = null;
+  #failure: {
+    identity: CandidateIdentity | null;
+    at: number;
+    reason: string;
+    windowMs: number;
+  } | null = null;
 
   constructor(windowMs = PREPARATION_BACKOFF_MS, clock: () => number = Date.now) {
     this.#windowMs = windowMs;
     this.#clock = clock;
   }
 
-  record(identity: CandidateIdentity | null, err: unknown): void {
-    this.#failure = { identity, at: this.#clock(), reason: errorText(err) };
+  /** `windowMs`, when a failure warrants a shorter wait than the usual window. */
+  record(identity: CandidateIdentity | null, err: unknown, windowMs = this.#windowMs): void {
+    this.#failure = {
+      identity,
+      at: this.#clock(),
+      reason: errorText(err),
+      windowMs: Math.min(windowMs, this.#windowMs),
+    };
   }
 
   clear(): void {
@@ -213,7 +236,7 @@ export class Backoff {
   current(identity: CandidateIdentity | null): BackoffState | null {
     const failure = this.#failure;
     if (!failure) return null;
-    const until = failure.at + this.#windowMs;
+    const until = failure.at + failure.windowMs;
     const now = this.#clock();
     if (now >= until || !sameCandidate(failure.identity, identity)) {
       this.#failure = null;

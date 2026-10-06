@@ -15,9 +15,15 @@
  */
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { KernelFlavour } from "./flavour.js";
-import { KernelSession, type RunOptions } from "./kernel.js";
+import {
+  isServerNotResolved,
+  KernelSession,
+  ServerNotResolved,
+  type RunOptions,
+} from "./kernel.js";
 import { baseDirectoryEnv, type KernelFacts } from "./inspect.js";
 import { errorText, type Logger } from "./log.js";
+import { formatWait, NOT_RESOLVED_BACKOFF_MS } from "./prepare.js";
 
 /**
  * The `SHAPING_VARS` a licence can depend on: `$BaseDirectory` and
@@ -84,6 +90,8 @@ export interface KernelPoolOptions {
    * be read here rather than by going back through `run`.
    */
   onKernelReady?: ((client: Client, flavour: string) => void | Promise<void>) | undefined;
+  /** For the suite, which cannot wait out a window of real time. */
+  clock?: (() => number) | undefined;
 }
 
 interface Slot {
@@ -135,6 +143,16 @@ export class KernelPool {
   #budget: number;
   #licence: LicenceInfo;
   #extraEnv: Record<string, string> | undefined;
+  /**
+   * The last time each flavour's server name did not resolve, and the kernel's
+   * words for it. A session's preparation only attaches to the broker, so this
+   * failure never reached a back-off: each request grew a kernel to fail, in
+   * parallel for simultaneous ones, and at the budget `#swapOut` retired other
+   * sessions' idle kernels to make room for a start that could not succeed
+   * (issue #19). Keyed on the flavour, so sharing it changes no answer: a
+   * session of the same flavour would get the same one from a kernel.
+   */
+  readonly #unresolved = new Map<string, { at: number; reason: string }>();
 
   constructor(options: KernelPoolOptions) {
     this.#options = options;
@@ -464,15 +482,39 @@ export class KernelPool {
     fn: (client: Client) => Promise<T>,
     options: RunOptions = {},
   ): Promise<T> {
+    this.#refuseUnresolved(flavour);
     const slot = await this.#acquire(flavour);
     try {
       const result = await slot.session.run(fn, options);
       this.#release(slot);
       return result;
     } catch (err) {
+      if (isServerNotResolved(err)) {
+        this.#unresolved.set(flavour.digest, { at: this.#now(), reason: errorText(err) });
+      }
       this.#quarantine(slot, errorText(err));
       throw err;
     }
+  }
+
+  #now(): number {
+    return (this.#options.clock ?? Date.now)();
+  }
+
+  /** Fails a request at once while its flavour's server name recently did not resolve. */
+  #refuseUnresolved(flavour: KernelFlavour): void {
+    const known = this.#unresolved.get(flavour.digest);
+    if (!known) return;
+    const age = this.#now() - known.at;
+    if (age >= NOT_RESOLVED_BACKOFF_MS) {
+      this.#unresolved.delete(flavour.digest);
+      return;
+    }
+    throw new ServerNotResolved(
+      `a kernel for this server could not resolve its name ${formatWait(age)} ago, so ` +
+        `none was started for this request; it is tried again in ` +
+        `${formatWait(NOT_RESOLVED_BACKOFF_MS - age)}.\n\nThe failure was: ${known.reason}`,
+    );
   }
 
   async stop(): Promise<void> {

@@ -35,6 +35,7 @@ import {
   candidateIdentity,
   Deadline,
   formatWait,
+  NOT_RESOLVED_BACKOFF_MS,
   PreparationStopped,
   PreparationTimeout,
   PREPARATION_BACKOFF_MS,
@@ -374,14 +375,14 @@ export class DeferredBackend implements KernelBackend {
         this.#resolving = null;
         if (err instanceof PreparationStopped) throw err;
         // A server name that does not resolve is fixed by creating the server
-        // or installing its paclet, which the back-off cannot see: kept, it held
-        // that fix off for its whole window. The kernel answers it in its first
-        // second, so the next call asking again costs little (issue #5).
-        if (isServerNotResolved(err)) {
-          this.#log?.(`preparation failed; the server name did not resolve: ${errorText(err)}`);
-          throw err;
-        }
-        this.#backoff.record(this.#identity(), err);
+        // or installing its paclet, which the back-off cannot see: the full
+        // window held that fix off for ten minutes (issue #5). So it gets a
+        // short one, which still spares a seat on every call meanwhile.
+        this.#backoff.record(
+          this.#identity(),
+          err,
+          isServerNotResolved(err) ? NOT_RESOLVED_BACKOFF_MS : undefined,
+        );
         this.#log?.(
           `preparation failed; not retrying for ${formatWait(this.#backoffWindow())}: ${errorText(err)}`,
         );

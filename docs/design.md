@@ -219,8 +219,9 @@ instead of the server.
   `StartMCPServer::InvalidArguments`, and the kernel drops to its REPL. `kernel.ts` watches
   the kernel's output for any `StartMCPServer::` message (and `MCPServerNotFound`) and fails
   immediately instead, which is what makes passing the name through safe. Such a failure
-  starts no back-off: it is fixed by creating the server or installing its paclet, which
-  the back-off, keyed on the kernel binary, cannot see.
+  starts only a short back-off, on both paths: it is fixed by creating the server or
+  installing its paclet, which the full back-off, keyed on the kernel binary, cannot see,
+  but every ask starts a kernel, so a burst of calls shares one failure for a few seconds.
 - All four built-in servers advertise `prompts`; none advertise `resources`. Tool counts:
   `Wolfram` 3, `WolframLanguage` 7, `WolframAlpha` 2, `WolframPacletDevelopment` 13.
 - Sessions survive a kernel restart. The evaluator persists session state to disk and

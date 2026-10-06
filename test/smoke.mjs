@@ -64,6 +64,9 @@ const suiteKey = lib.cacheKey(
 const marker = join(home, "starts.log");
 const startCount = () =>
   existsSync(marker) ? readFileSync(marker, "utf8").trim().split("\n").filter(Boolean).length : 0;
+/** Kernel starts recorded in a marker file of a section's own. */
+const starts = (path) =>
+  existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean).length : 0;
 
 // Every server process this suite starts, so none outlives it.
 // StdioClientTransport does not kill its child when the parent exits, and a
@@ -3004,10 +3007,12 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
   // thing that ended the wait was the start timeout — set high here on purpose,
   // so the clock tells the two apart.
   const startedAt = Date.now();
+  const badMarker = join(home, "marker-unresolved-name");
   const bad = await connect({
     MCP_SERVER_NAME: "Wolframm",
     FAKE_MODE: "no-such-server",
     WOLFRAM_MCP_START_TIMEOUT_SECONDS: "20",
+    FAKE_MARKER: badMarker,
   });
   const failed = await bad.client.callTool(
     { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
@@ -3025,15 +3030,18 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
   );
   // A name that does not resolve is fixed by creating the server or installing
   // its paclet, neither of which changes the kernel binary the back-off is keyed
-  // on, so a back-off kept the fix from working for ten minutes (issue #5).
+  // on, so the ten-minute back-off kept the fix from working (issue #5). It
+  // gets a short one instead: the next call, straight after, answers from the
+  // failure without starting a kernel, and says how soon it is asked again.
   const again = await bad.client.callTool(
     { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
   const againText = again?.content?.[0]?.text ?? "";
+  const retryIn = Number(/retried in (\d+)s\b/.exec(againText)?.[1] ?? NaN);
   check(
-    "and it starts no back-off: the next call asks the kernel again",
+    "and its back-off is seconds, not ten minutes, with no kernel started meanwhile",
     again.isError === true && /No MCPServerObject found for name/.test(againText) &&
-      !/last attempt to prepare/.test(againText),
-    againText.replace(/\s+/g, " ").slice(0, 95),
+      retryIn > 0 && retryIn <= 15 && starts(badMarker) === 1,
+    `retried in ${retryIn}s, ${starts(badMarker)} start(s): ${againText.replace(/\s+/g, " ").slice(0, 60)}`,
   );
   await bad.client.close();
 
@@ -3044,10 +3052,12 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
   // timeout, then the back-off, for an answer the kernel gave in its first
   // second.
   const pacletStartedAt = Date.now();
+  const noExtensionMarker = join(home, "marker-no-extension");
   const noExtension = await connect({
     MCP_SERVER_NAME: "WolframVerifier/Verifier",
     FAKE_MODE: "no-paclet-extension",
     WOLFRAM_MCP_START_TIMEOUT_SECONDS: "20",
+    FAKE_MARKER: noExtensionMarker,
   });
   const unresolved = await noExtension.client.callTool(
     { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
@@ -3066,10 +3076,12 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
   const retried = await noExtension.client.callTool(
     { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
   const retriedText = retried?.content?.[0]?.text ?? "";
+  const retriedIn = Number(/retried in (\d+)s\b/.exec(retriedText)?.[1] ?? NaN);
   check(
-    "and starts no back-off, so installing the paclet works on the next call",
-    /No AgentTools extension found/.test(retriedText) && !/last attempt to prepare/.test(retriedText),
-    retriedText.replace(/\s+/g, " ").slice(0, 95),
+    "and only a short back-off, so installing the paclet works within seconds",
+    /No AgentTools extension found/.test(retriedText) && retriedIn > 0 && retriedIn <= 15 &&
+      starts(noExtensionMarker) === 1,
+    `retried in ${retriedIn}s, ${starts(noExtensionMarker)} start(s)`,
   );
   await noExtension.client.close();
 
@@ -3098,6 +3110,7 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
   // it into a back-off either.
   const sharedRuntime = join(home, "run-unresolved");
   privateDir(sharedRuntime);
+  const sharedMarker = join(home, "marker-shared-unresolved");
   const sharedAt = Date.now();
   const sharedBad = await connect({
     MCP_SERVER_NAME: "WolframVerifier/Verifier",
@@ -3106,6 +3119,7 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
     WOLFRAM_MCP_SHARE: "1",
     XDG_RUNTIME_DIR: sharedRuntime,
     WOLFRAM_MCP_LICENSE_LIMIT: "2",
+    FAKE_MARKER: sharedMarker,
   });
   const sharedFirst = await sharedBad.client.callTool(
     { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
@@ -3113,11 +3127,15 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
   const sharedSecond = await sharedBad.client.callTool(
     { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
   const sharedSecondText = sharedSecond?.content?.[0]?.text ?? "";
+  // A session's preparation only attaches to the broker, so the start fails
+  // inside the broker's pool, where nothing remembered it: every request grew a
+  // kernel to fail the same way (issue #19). The pool remembers it per flavour.
   check(
-    "through a shared broker too, it fails in seconds and the next call asks again",
+    "through a shared broker too, it fails in seconds, and the next call starts no kernel",
     sharedFirst.isError === true && sharedElapsed < 8000 &&
-      /No AgentTools extension found/.test(sharedSecondText) && !/last attempt to prepare/.test(sharedSecondText),
-    `${sharedElapsed}ms; then: ${sharedSecondText.replace(/\s+/g, " ").slice(0, 80)}`,
+      /No AgentTools extension found/.test(sharedSecondText) && /tried again in \d+s/.test(sharedSecondText) &&
+      starts(sharedMarker) === 1,
+    `${sharedElapsed}ms, ${starts(sharedMarker)} start(s); then: ${sharedSecondText.replace(/\s+/g, " ").slice(0, 70)}`,
   );
   await sharedBad.client.close();
 
@@ -3134,6 +3152,90 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
     late?.name === "PreparationTimeout" && lib.isServerNotResolved?.(late) === true,
     `${late?.name}: ${String(late?.message).slice(0, 60)}`,
   );
+
+  // The window's other end, on a clock the suite controls: once it has passed,
+  // the next call asks a kernel again, which is what lets a fix take effect.
+  const savedEnv = { ...process.env };
+  const windowMarker = join(home, "marker-unresolved-window");
+  Object.assign(process.env, {
+    WOLFRAM_MCP_KERNEL: fakeKernel,
+    WOLFRAM_MCP_SHARE: "0",
+    WOLFRAM_MCP_INSPECT: "0",
+    WOLFRAM_MCP_CACHE: "0",
+    MCP_SERVER_NAME: "WolframVerifier/Verifier",
+    FAKE_MODE: "no-paclet-extension",
+    FAKE_MARKER: windowMarker,
+  });
+  let now = Date.now();
+  try {
+    const install = { bin: fakeKernel, version: null, source: "suite" };
+    const backend = lib.deferredBackend(lib.loadConfig(() => {}), install, () => {}, { clock: () => now });
+    const ask = () => backend.listTools().then(() => "served", (e) => e.message);
+    await ask();
+    const inside = await ask();
+    const startsInside = starts(windowMarker);
+    now += 16_000;
+    await ask();
+    await backend.stop();
+    check(
+      "a private session asks again once the short window has passed, and not before",
+      startsInside === 1 && /retried in/.test(inside) && starts(windowMarker) === 2,
+      `${startsInside} start(s) inside the window, ${starts(windowMarker)} after it`,
+    );
+
+    // On the shared path the window is the pool's, per flavour: within it a
+    // misconfigured flavour neither starts a kernel nor, at the budget, retires
+    // another session's idle one to make room for a start that cannot succeed.
+    let poolNow = Date.now();
+    const poolMarker = join(home, "marker-unresolved-pool");
+    process.env.FAKE_MARKER = poolMarker;
+    delete process.env.FAKE_MODE;
+    const pool = new lib.KernelPool({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 1, type: null },
+      learnFromKernels: false,
+      clock: () => poolNow,
+    });
+    const healthy = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" });
+    const broken = lib.kernelFlavour({
+      MCP_SERVER_NAME: "WolframVerifier/Verifier",
+      FAKE_MODE: "no-paclet-extension",
+      WOLFRAM_MCP_KERNEL_ENV: "FAKE_MODE",
+    });
+    const evaluate = (client) =>
+      client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } });
+    const tryBroken = () => pool.run(broken, evaluate).then(() => "served", (e) => e.message);
+    await pool.run(healthy, evaluate);
+    await tryBroken(); // takes the one seat from the healthy kernel, and fails
+    await pool.run(healthy, evaluate); // a fresh healthy kernel
+    const before = starts(poolMarker);
+    const refused = await tryBroken();
+    const second = await pool.run(healthy, evaluate).then((r) => r.content?.[0]?.text ?? "", (e) => e.message);
+    const within = starts(poolMarker) - before;
+    poolNow += 16_000;
+    await tryBroken();
+    const after = starts(poolMarker) - before;
+    await pool.stop();
+    check(
+      "within the window a misconfigured flavour starts no kernel and evicts no other session's",
+      /tried again in/.test(refused) && /evaluated/.test(second) && within === 0,
+      `${within} start(s) within the window: ${refused.replace(/\s+/g, " ").slice(0, 60)}`,
+    );
+    check(
+      "and the pool asks a kernel again once the window has passed",
+      after === 1,
+      `${after} start(s) after it`,
+    );
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key];
+    Object.assign(process.env, savedEnv);
+  }
 }
 
 // ---------------------------------------------------------------------------
