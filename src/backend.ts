@@ -27,7 +27,7 @@ import type {
 } from "@modelcontextprotocol/sdk/types.js";
 import { BrokerBackend, type BrokerClientOptions } from "./broker-client.js";
 import { brokerAddress } from "./broker-protocol.js";
-import type { Config } from "./config.js";
+import { DEFAULT_START_TIMEOUT_MS, type Config } from "./config.js";
 import { doctorCommand } from "./doctor.js";
 import { installationEnv, recordFacts, type KernelFacts } from "./inspect.js";
 import {
@@ -315,7 +315,7 @@ export class DeferredBackend implements KernelBackend {
   ) {
     this.#factory = factory;
     this.#log = log;
-    this.#startTimeoutMs = options.startTimeoutMs ?? 120_000;
+    this.#startTimeoutMs = options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS;
     this.#bin = options.bin;
     this.#clock = options.clock ?? Date.now;
     this.#backoff = new Backoff(options.backoffMs ?? PREPARATION_BACKOFF_MS, this.#clock);

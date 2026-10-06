@@ -50,6 +50,12 @@ export const DEFAULT_SERVER_NAME = "Wolfram";
  */
 export const DEFAULT_MIN_VERSION = "14.3";
 
+/**
+ * `WOLFRAM_MCP_START_TIMEOUT_SECONDS`'s default, in ms: the one copy, for the
+ * configuration and for options a library caller builds by hand.
+ */
+export const DEFAULT_START_TIMEOUT_MS = 120_000;
+
 export interface Config {
   /** Explicit kernel path, unresolved. `undefined` means auto-detect. */
   kernelPath: string | undefined;
@@ -187,7 +193,11 @@ export function loadConfig(log: Logger): Config {
     minVersion: readEnv("WOLFRAM_MCP_MIN_VERSION", "WOLFRAM_MIN_VERSION") ?? DEFAULT_MIN_VERSION,
     idleMs: readNumber(10, "WOLFRAM_MCP_IDLE_MINUTES", "WOLFRAM_IDLE_MINUTES") * 60_000,
     startTimeoutMs:
-      readNumber(120, "WOLFRAM_MCP_START_TIMEOUT_SECONDS", "WOLFRAM_START_TIMEOUT_SECONDS") * 1000,
+      readNumber(
+        DEFAULT_START_TIMEOUT_MS / 1000,
+        "WOLFRAM_MCP_START_TIMEOUT_SECONDS",
+        "WOLFRAM_START_TIMEOUT_SECONDS",
+      ) * 1000,
     callTimeoutMs:
       readNumber(300, "WOLFRAM_MCP_CALL_TIMEOUT_SECONDS", "WOLFRAM_CALL_TIMEOUT_SECONDS") * 1000,
     cacheEnabled: readBoolean(true, "WOLFRAM_MCP_CACHE"),

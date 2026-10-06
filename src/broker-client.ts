@@ -39,6 +39,7 @@ import {
   type BrokerResponse,
   socketFault,
 } from "./broker-protocol.js";
+import { DEFAULT_START_TIMEOUT_MS } from "./config.js";
 import type { KernelFlavour } from "./flavour.js";
 import { bareMcpText, errorText, type Logger } from "./log.js";
 import type { Deadline } from "./prepare.js";
@@ -61,15 +62,25 @@ const REQUEST_GRACE_MS = 2_000;
 /** Ceiling for ops that carry no timeout of their own, once a kernel is up. */
 const DEFAULT_OP_TIMEOUT_MS = 60_000;
 
-/** The ops a broker answers from a kernel, which it may first have to start. */
-const KERNEL_OPS: ReadonlySet<BrokerOp> = new Set<BrokerOp>([
-  "capabilities",
-  "listTools",
-  "listPrompts",
-  "getPrompt",
-  "listResources",
-  "readResource",
-]);
+/**
+ * Whether the broker answers each op from a kernel, which it may first have to
+ * start. A record rather than a list, so a new op cannot be added without being
+ * classified: one left off a list silently got the short ceiling.
+ */
+const FROM_KERNEL: Record<BrokerOp, boolean> = {
+  capabilities: true,
+  listTools: true,
+  listPrompts: true,
+  getPrompt: true,
+  listResources: true,
+  readResource: true,
+  callTool: true,
+  cancel: false,
+  status: false,
+  hello: false,
+  ping: false,
+  ready: false,
+};
 
 /**
  * How long to wait for the broker to answer `op`, given its own `timeoutMs`.
@@ -92,7 +103,7 @@ export function brokerCeilingMs(
 ): number {
   if (timeoutMs === 0) return 0;
   if (timeoutMs !== undefined) return timeoutMs + REQUEST_GRACE_MS;
-  const start = KERNEL_OPS.has(op) ? startTimeoutMs : 0;
+  const start = FROM_KERNEL[op] ? startTimeoutMs : 0;
   return start + DEFAULT_OP_TIMEOUT_MS + REQUEST_GRACE_MS;
 }
 
@@ -137,9 +148,11 @@ export interface BrokerClientOptions {
   log: Logger;
   /**
    * `WOLFRAM_MCP_START_TIMEOUT_SECONDS`: how long the broker may take to start a
-   * kernel before answering an op that needs one (`brokerCeilingMs`).
+   * kernel before answering an op that needs one (`brokerCeilingMs`). Optional,
+   * since these options are public: a caller that builds them by hand gets the
+   * setting's default rather than a ceiling of NaN, which Node runs as 1ms.
    */
-  startTimeoutMs: number;
+  startTimeoutMs?: number;
 }
 
 function tryConnect(address: string): Promise<Socket | null> {
@@ -534,7 +547,11 @@ export class BrokerBackend implements KernelBackend {
       ...(params === undefined ? {} : { params }),
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
     };
-    const ceiling = brokerCeilingMs(op, timeoutMs, this.#options.startTimeoutMs);
+    const ceiling = brokerCeilingMs(
+      op,
+      timeoutMs,
+      this.#options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS,
+    );
     return new Promise<T>((resolve, reject) => {
       // No timer at all when there is no ceiling, so this waits exactly as long
       // as a private kernel would.
