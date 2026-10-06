@@ -38,7 +38,9 @@ Three things shape it:
 
 A user never builds from source. They pick one of:
 
-1. **The Claude Code plugin** — `wolfram-plugin-<version>.zip`, the `archive` marketplace source.
+1. **The Claude Code plugin** — the `release` branch's marketplace, which a project adds to
+   follow every release or pins to one (below), or `wolfram-plugin-<version>.zip` through an
+   `archive` marketplace source.
 2. **The bundled server** — `wolfram-mcp-server.mjs`, a single file they point their MCP client's
    config at (`node /path/to/wolfram-mcp-server.mjs`).
 
@@ -157,8 +159,8 @@ stamped archive with Claude Code at 2.1.289 and at the 2.1.75 floor, and publish
 - **A `v<version>` tag** — the one merging the release PR makes — finishes that release: the
   build uploads the assets to release-please's draft before publishing it, so nobody meets a
   release without its files, and a build that fails leaves only an invisible draft, which the
-  next release run builds again. It is published as a normal release, marked Latest, and a
-  pre-release only when its version has a `-` suffix.
+  next release run builds again. It is published as a normal release, with Latest off, and a
+  pre-release only when its version has a `-` suffix. Latest is `advance`'s (below).
 - **Run by hand** — dispatched on a tag, or a tag pushed by a person — it builds that tag. A
   release already published is refused, never rebuilt: the new assets would differ byte for
   byte, and an `archive` source pinned to the first zip's digest would then refuse every
@@ -170,6 +172,52 @@ stamped archive with Claude Code at 2.1.289 and at the 2.1.75 floor, and publish
 Release runs never overlap, and GitHub keeps only the newest pending one, so pushes that land
 while one runs collapse into one run that sees all of them. The version is stamped into the CI
 checkout only and never committed.
+
+### `advance` — the `release` branch, and Latest
+
+Another project follows releases by adding this repository as a Claude Code marketplace at the
+`release` branch (plugin plan D34, #7):
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "wolfram-agent-tools": {
+      "source": { "source": "github", "repo": "averyd-wolfram/wolfram-agent-tools", "ref": "release" },
+      "autoUpdate": true
+    }
+  },
+  "enabledPlugins": { "wolfram@wolfram-agent-tools": true }
+}
+```
+
+To stay on one version, it sets `"ref": "wolfram--v<version>"` and leaves `autoUpdate` out. The
+branch holds `plugin/`, exactly a release's `wolfram-plugin-<version>.zip`, and
+`.claude-plugin/marketplace.json` naming it `./plugin`. A relative-path entry is what lets Claude
+Code fetch a plugin that only a project's settings enable, with no `claude plugin install` on
+each machine. A plugin updates when its `plugin.json` version changes, which release-please
+bumps every release.
+
+The last job of every release run, `advance` (`scripts/release-branch.mjs`), keeps the branch and
+GitHub's Latest on the newest release, read from what is published after every build in the
+run, whatever each did. The newest release is the highest `v<x.y.z>` published and not a
+pre-release. When the branch is behind it, `advance`:
+
+1. downloads that release's zip and `SHA256SUMS.txt`, and checks the zip's line;
+2. builds the branch's tree from that zip, refusing one whose `plugin.json` names another
+   version;
+3. commits it to `release` and pushes, refused unless it fast-forwards, so the branch only
+   ever moves forward;
+4. tags the commit `wolfram--v<version>`, Claude Code's `<plugin>--v<version>` convention,
+   never replacing a tag;
+5. marks the release Latest, after the branch, so Latest never names a release the branch
+   doesn't carry.
+
+A step that fails leaves everything after it for the next release run, which repeats it. A
+release finished late, or built by hand, is published with Latest off and moves neither until a
+release run does; dispatch `release-please.yml` to have one now. A branch that carries a version
+no published release does, because one was deleted or flagged pre-release by hand, stays where
+it is with a warning, since it never moves back. CI builds the tree from every PR's archive and
+validates it with `claude plugin validate`, at 2.1.289 and the 2.1.75 floor.
 
 ## The artifacts
 
@@ -220,6 +268,10 @@ just quietly fails to do its job, which is worse.
 - **Protect `main`.** No direct pushes, no force-pushes, no deletion: changes arrive only by pull
   request. Turn on secret scanning and push protection (Settings → Code security), the
   server-side half of what `public-content` checks.
+- **Protect the `release` branch and its tags.** A ruleset on `release` blocking force pushes
+  and deletion, and one on tags matching `wolfram--v*` blocking updates and deletion. Neither
+  stops `advance`, which only fast-forwards the branch and adds new tags, and with them a pinned
+  project's `ref` always names the same build.
 - **Private vulnerability reporting.** Settings → Code security → "Private vulnerability
   reporting". `SECURITY.md` sends reporters there; with it off, its *Report a vulnerability*
   button does not exist and the only way left to report is a public issue.
@@ -312,6 +364,7 @@ GITHUB_REF_NAME=release-please--branches--main GITHUB_REF_TYPE=branch \
   node scripts/release-version.mjs        # the version comes from package.json
 node scripts/commit-types.mjs origin/main HEAD   # what CI asks of a PR's commits
 GITHUB_REPOSITORY=<owner>/<repo> node scripts/pending-release.mjs   # what a release run would finish; reads only
+GITHUB_REPOSITORY=<owner>/<repo> node scripts/release-branch.mjs plan   # where advance would move the branch; reads only
 node scripts/release-version.mjs --stamp 0.1.0-pre.99   # then restore what it changed (git status)
 ```
 
