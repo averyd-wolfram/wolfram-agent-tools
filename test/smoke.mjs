@@ -5535,6 +5535,112 @@ heading("A commit that changes what ships carries a type that bumps the version"
 }
 
 // ---------------------------------------------------------------------------
+// release-please parses each squash commit, title and description together,
+// and skips one it cannot parse without failing anything. #21's fix went
+// missing from 0.1.2's release PR that way, with every check green, since they
+// read only the title (#24). The line the parser rejected exists only in the
+// commit: GitHub rewraps the description to 72 columns when it squashes.
+heading("release-please can read the commit a pull request squashes into");
+{
+  const { unreadable, wrap } = await import(join(root, "scripts", "squash-message.mjs"));
+  const { commitType } = await import(join(root, "scripts", "commit-types.mjs"));
+  // #21's title, and the paragraph of its description that broke, as written
+  // and as it reached its squash commit, 485a0ea.
+  const title =
+    "fix: hand on a start deadline's remainder from one read of the clock, so a spent one starts nothing";
+  const written = [
+    "**What happened.** Two places checked the start deadline and then read its remainder again to hand on:",
+    "- `LocalBackend.prepare`: `deadline.check()`, then `ensure(deadline.remaining())`. A deadline that ran out between the reads handed the handshake 0 ms, so a kernel was spawned — taking a licence seat — for a start that could only fail.",
+    "- `BrokerBackend.awaitReady`: the same, with the broker's `ready` request, where a `timeoutMs` of 0 means *no ceiling*. The request then sat pending until the socket closed, after the deadline had already failed.",
+  ].join("\n");
+  const committed = [
+    "**What happened.** Two places checked the start deadline and then read",
+    "its remainder again to hand on:",
+    "- `LocalBackend.prepare`: `deadline.check()`, then",
+    "`ensure(deadline.remaining())`. A deadline that ran out between the",
+    "reads handed the handshake 0 ms, so a kernel was spawned — taking a",
+    "licence seat — for a start that could only fail.",
+    "- `BrokerBackend.awaitReady`: the same, with the broker's `ready`",
+    "request, where a `timeoutMs` of 0 means *no ceiling*. The request then",
+    "sat pending until the socket closed, after the deadline had already",
+    "failed.",
+  ].join("\n");
+  check(
+    "the description is wrapped as GitHub wraps it: #21's, wrapped, is its squash commit's body",
+    wrap(written) === committed,
+    JSON.stringify(wrap(written).split("\n").find((line, i) => line !== committed.split("\n")[i]) ?? ""),
+  );
+  const found = unreadable({ title, number: 21, body: written });
+  check(
+    "#21, whose title the title checks pass, fails on the line only GitHub's wrap made",
+    commitType(title) !== null &&
+      found.length === 1 &&
+      found[0].includes("72 columns") &&
+      found[0].includes('"`ensure(deadline.remaining())`. A deadline'),
+    found.join(" | "),
+  );
+  const ok = (body) => unreadable({ title: "fix: guard the LSP", number: 9, body }).length === 0;
+  check(
+    "a plain description passes, a call's parentheses included, as do an empty one and none",
+    ok("Fixes #3.\n\n**What happened.** `Deadline.handOn(stage)` returned `f(x)`.\n\n🤖 Generated") &&
+      ok("") &&
+      ok(null),
+  );
+  const override = (lines) =>
+    unreadable({ title, number: 21, body: `${written}\n\nBEGIN_COMMIT_OVERRIDE\n${lines}\nEND_COMMIT_OVERRIDE` });
+  const badOverride = override("fix: call it\n\n`f(g())` again");
+  check(
+    "a BEGIN_COMMIT_OVERRIDE is read in the message's place, so it mends #21, and is checked itself",
+    override(`${title} (#21)`).length === 0 &&
+      override(`${title} (#21)\n\nfix: and a second fix`).length === 0 &&
+      badOverride.length === 1 &&
+      badOverride[0].startsWith("the BEGIN_COMMIT_OVERRIDE block"),
+    badOverride.join(" | "),
+  );
+  // release-please splits on the marker wherever it is: this check's own PR
+  // described it in a code span, and that sentence's tail became the override.
+  const named = unreadable({
+    title: "ci: check the squash commit",
+    body: "**Fix.** A `BEGIN_COMMIT_OVERRIDE` block replaces the message.",
+  });
+  check(
+    "and a description that only names the marker is read as using it, as release-please reads it",
+    named.length === 1 && named[0].startsWith("the BEGIN_COMMIT_OVERRIDE block"),
+    named.join(" | "),
+  );
+  const extra = unreadable({ title: "fix: guard the LSP", body: "Fixes #3.\n\nfeat: an option this does not add" });
+  check(
+    "a paragraph that begins like a commit is a commit of its own to release-please, and fails; marked nested, it passes",
+    extra.length === 1 &&
+      extra[0].includes('"feat: an option this does not add"') &&
+      ok("Fixes #3.\n\nBEGIN_NESTED_COMMIT\nfeat: an option this adds\nEND_NESTED_COMMIT"),
+    extra.join(" | "),
+  );
+  // 64 columns of prose and an 8-column call: 72 in all, so it stays on its
+  // line, unless a CR is counted and wraps the call to the start of the next.
+  const atWidth = `${"x".repeat(63)} \`f(g())\``;
+  check(
+    "a description with CRLF line ends is wrapped as its LF form is",
+    atWidth.length === 72 && ok(`${atWidth}\r\nnext`) && !ok(`${atWidth}x\nnext`),
+  );
+  const cli = (env) =>
+    spawnSync(process.execPath, [join(root, "scripts", "squash-message.mjs")], {
+      encoding: "utf8",
+      env: { ...process.env, PR_TITLE: "", PR_BODY: "", PR_NUMBER: "", ...env },
+    });
+  const failed = cli({ PR_TITLE: title, PR_BODY: written, PR_NUMBER: "21" });
+  const passed = cli({ PR_TITLE: "fix: guard the LSP" });
+  check(
+    "and the command exits 1 naming the line, 0 for a plain one, and 2 with no title",
+    failed.status === 1 &&
+      failed.stdout.includes("`ensure(deadline.remaining())`") &&
+      passed.status === 0 &&
+      cli({}).status === 2,
+    `${failed.status}/${passed.status}/${cli({}).status} ${passed.stdout.trim()}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // "Not published to npm" is a decision this repo states in prose and enforces
 // nowhere, and it has already been contradicted once by a check asserting an
 // npx invocation was present. `private` is the machine-readable form of it.

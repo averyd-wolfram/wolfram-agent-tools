@@ -184,7 +184,10 @@ built-ins, which is the bug it exists for.
   `metrics.mjs` derives the figures the docs no longer assert;
   `release-version.mjs` names a release build from its ref and stamps the version into the tree;
   `ci-changes.mjs` decides whether a pull request needs CI's test and build jobs — not when
-  it changed only markdown outside `plugin/`, `test/`, `src/`, `scripts/` and `examples/`
+  it changed only markdown outside `plugin/`, `test/`, `src/`, `scripts/` and `examples/`;
+  `squash-message.mjs` parses the commit a pull request squashes into — title, then the
+  description as written and as GitHub rewraps it to 72 columns — with release-please's own
+  parser, since one it cannot parse drops out of the release without failing anything
 - `examples/`: `weather.wl`, a worked example against a public API — sessions here lint it
   live through the plugin's LSP, and `npm run test:lsp` fails if it stops being lint-clean
 - `docs/`: developer documentation
@@ -224,9 +227,10 @@ built-ins, which is the bug it exists for.
   finishes as the release, a pre-release below 1.0.0 —
   `scripts/release-version.mjs` names the build and stamps its version into the checkout, and
   `pr-title.yml`'s `commit-types` job (`scripts/commit-types.mjs`) refuses a commit that changes what
-  ships under a type that bumps nothing; `pr-title.yml` fails a PR whose title is not a Conventional Commit, because under
-  squash-merge that title becomes the commit release-please reads, so a bad one silently skips a
-  bump. `release-please-config.json` and `.release-please-manifest.json` drive the bump — the
+  ships under a type that bumps nothing; `pr-title.yml`'s `conventional-title` job fails a PR
+  whose title is not a Conventional Commit, or whose squash commit release-please cannot parse
+  (`scripts/squash-message.mjs`), because under squash-merge the title and description become
+  the commit release-please reads, so a bad one silently skips a bump. `release-please-config.json` and `.release-please-manifest.json` drive the bump — the
   config's `extra-files` keep `plugin.json` in step with `package.json`.
   Nothing publishes to npm, and no personal token is used: release-please and the build run as
   jobs of one workflow run, because nothing `GITHUB_TOKEN` does starts another workflow, so the

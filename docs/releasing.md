@@ -186,11 +186,18 @@ just quietly fails to do its job, which is worse.
   -F can_approve_pull_request_reviews=true -f default_workflow_permissions=read`). release-please
   opens its PR with `GITHUB_TOKEN`; without this it cannot, and no release happens. No personal
   token is used anywhere.
-- **Squash-merge, with the PR title as the commit message.** Settings → General → Pull Requests:
-  enable "Allow squash merging", set the default squash commit message to "Pull request title,"
-  and turn off merge commits and rebase merging, so squash is the only way in. This is the linchpin — it makes one PR equal one Conventional Commit, which is what release-please
-  reads. `pr-title.yml` enforces that the title is a valid Conventional Commit so this never
-  produces a commit that skips a bump.
+- **Squash-merge, with the PR title and description as the commit message.** Settings → General
+  → Pull Requests: enable "Allow squash merging", set the default squash commit message to "Pull
+  request title and description", and turn off merge commits and rebase merging, so squash is
+  the only way in. This is the linchpin — it makes one PR equal one Conventional Commit, which is
+  what release-please reads. `pr-title.yml`'s `conventional-title` enforces that the title is a
+  valid Conventional Commit, and that release-please can parse the whole message
+  (`scripts/squash-message.mjs`), so this never produces a commit that skips a bump. The
+  description needs the second check because GitHub rewraps it to 72 columns in the commit,
+  and the parser rejects a line that begins with a word whose parenthesis holds another or runs
+  past the line — a line the description as written need not contain. release-please skips a
+  commit it cannot parse with nothing but a debug log line, which is how #21's fix missed its
+  release PR.
 - **Protect `main`.** No direct pushes, no force-pushes, no deletion: changes arrive only by pull
   request. Turn on secret scanning and push protection (Settings → Code security), the
   server-side half of what `public-content` checks.
@@ -285,6 +292,8 @@ a build's name and stamp:
 GITHUB_REF_NAME=release-please--branches--main GITHUB_REF_TYPE=branch \
   node scripts/release-version.mjs        # the version comes from package.json
 node scripts/commit-types.mjs origin/main HEAD   # what CI asks of a PR's commits
+PR_TITLE="$(gh pr view --json title -q .title)" PR_BODY="$(gh pr view --json body -q .body)" \
+  node scripts/squash-message.mjs        # whether release-please can read its squash commit
 node scripts/release-version.mjs --stamp 0.1.0-pre.99   # then restore what it changed (git status)
 ```
 

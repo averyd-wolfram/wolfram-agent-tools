@@ -1,18 +1,22 @@
 name: PR Title
 
 # release-please derives the version bump and the changelog entirely from
-# Conventional Commit messages, and with squash-merge the PR title becomes that
-# one commit. So a title that is not a Conventional Commit does not error
-# anywhere — it silently produces no bump and no changelog line, and the change
-# ships in a release that never mentions it. This fails such a PR up front.
+# Conventional Commit messages, and with squash-merge the PR becomes that one
+# commit: its title the subject, its description the body. So a title that is
+# not a Conventional Commit does not error anywhere — it silently produces no
+# bump and no changelog line, and the change ships in a release that never
+# mentions it. A description release-please cannot parse does the same, and
+# drops the commit from the release altogether (#24). conventional-title fails
+# either up front.
 #
 # The version is decided by those types (plugin plan D25), so commit-types
 # below also holds every commit the PR adds, and its title, to what it changes:
 # a docs: or test: commit that edits a skill or the server would ship in no
 # release. Both jobs are required checks.
 #
-# `edited` is in the trigger on purpose: a title fixed after opening must
-# re-run these, and the bare `pull_request` event does not fire on a title edit.
+# `edited` is in the trigger on purpose: a title or description fixed after
+# opening must re-run these, and the bare `pull_request` event does not fire on
+# an edit.
 on:
   pull_request:
     types: [opened, edited, reopened, synchronize]
@@ -47,6 +51,25 @@ jobs:
             build
             style
             revert
+      # The title is not all release-please reads. It parses the squash
+      # commit whole, with @conventional-commits/parser, and skips one it
+      # cannot parse: #21's description, rewrapped by GitHub, put a line
+      # starting `ensure(deadline.remaining())` in the commit, and its fix
+      # missed the release PR with every check green. So the description is
+      # parsed too, with the parser release-please depends on, as written and
+      # as GitHub wraps it (scripts/squash-message.mjs).
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      # The parser only: no build, and no git hooks on a runner.
+      - run: npm ci --ignore-scripts
+      - env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: node scripts/squash-message.mjs
 
   commit-types:
     runs-on: ubuntu-latest
