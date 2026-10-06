@@ -220,6 +220,14 @@ just quietly fails to do its job, which is worse.
 - **Protect `main`.** No direct pushes, no force-pushes, no deletion: changes arrive only by pull
   request. Turn on secret scanning and push protection (Settings → Code security), the
   server-side half of what `public-content` checks.
+- **Dependabot alerts and security updates.** Settings → Code security: turn on "Dependabot
+  alerts" and "Dependabot security updates" (or `gh api -X PUT repos/<owner>/<repo>/vulnerability-alerts`
+  then `gh api -X PUT repos/<owner>/<repo>/automated-security-fixes`). `.github/dependabot.yml`
+  sets the titles both kinds of Dependabot PR carry: `fix(deps):` for a production dependency,
+  which the bundle inlines, so its update makes a release; `chore(deps-dev):` and `ci(deps):`
+  for what doesn't ship. Without the settings, an advisory against a dependency the bundle
+  ships reaches nobody until someone happens to look, which is how 0.1.1 shipped `fast-uri`
+  inside six advisories (#26, #29).
 - **Private vulnerability reporting.** Settings → Code security → "Private vulnerability
   reporting". `SECURITY.md` sends reporters there; with it off, its *Report a vulnerability*
   button does not exist and the only way left to report is a public issue.

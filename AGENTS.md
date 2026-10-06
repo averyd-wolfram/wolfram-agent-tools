@@ -216,6 +216,9 @@ built-ins, which is the bug it exists for.
   in this repo — what they run is what was last assembled, which is what ships — and disables
   `.mcp.json`'s copy of the same server, so the tools appear once
 - `.mcp.json`: committed, so this repo runs its own working tree as an MCP server
+- `.github/dependabot.yml`: weekly npm and Actions updates, and security updates, titled
+  `fix(deps):`, `chore(deps-dev):` or `ci(deps):` so `commit-types` and release-please read
+  them right — a production dependency ships inside the bundle, so it makes a release
 - `.github/workflows/`: `ci.yml` runs `npm test` (hermetic, no seat) matrixed over the Node floor
   and newest — Node only, since the artifacts are platform-independent and the maintainer's own
   machine covers macOS — plus a single `build` job that assembles the release artifacts on every

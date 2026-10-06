@@ -1,0 +1,40 @@
+# Dependabot keeps the npm tree and the workflows' actions current, and with
+# the repository's Dependabot alerts and security updates on
+# (docs/releasing.md), it opens a PR for a published advisory too (#29).
+#
+# Its PR titles are Conventional Commits that pr-title.yml and commit-types
+# accept, and that release-please versions correctly. A production dependency
+# ships, since the bundle inlines it, so its update is `fix(deps):` and makes a
+# release: 0.1.1 shipped fast-uri inside six advisories (#26). A development
+# dependency is `chore(deps-dev):` and an action `ci(deps):`, and neither ships
+# nor makes a release. The colon follows the prefix by itself; `include: scope`
+# adds `deps` or `deps-dev`. Security updates follow the same messages.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: fix
+      prefix-development: chore
+      include: scope
+    # One PR a week for each kind, rather than one per package.
+    groups:
+      production:
+        dependency-type: production
+      development:
+        dependency-type: development
+    labels: [dependencies]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      actions:
+        patterns: ["*"]
+    labels: [dependencies, ci]
