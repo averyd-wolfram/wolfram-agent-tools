@@ -226,7 +226,8 @@ just quietly fails to do its job, which is worse.
   sets the titles both kinds of Dependabot PR carry: `fix(deps):` for a production dependency,
   which the bundle inlines, so its update makes a release; `chore(deps-dev):` and `ci(deps):`
   for what doesn't ship. A dev update can move a lockfile entry the production tree shares;
-  `commit-types` then says it ships, and the PR is retitled `fix(deps):`, since what a
+  `commit-types` then says it ships. Retitling can't fix that, since it reads Dependabot's commit
+  too: close the PR and make the same update in a `fix(deps):` PR of your own, since what a
   production install gets did change. Without the settings, an advisory against a dependency
   the bundle ships reaches nobody until someone happens to look, which is how 0.1.1 shipped
   `fast-uri` with known advisories (#26, #29).

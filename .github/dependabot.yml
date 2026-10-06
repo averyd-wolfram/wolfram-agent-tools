@@ -6,14 +6,17 @@
 # Its PR titles are Conventional Commits that pr-title.yml and commit-types
 # accept, and that release-please versions correctly. A production dependency
 # ships, since the bundle inlines it, so its update is `fix(deps):` and makes a
-# release (#26). A development dependency is `chore(deps-dev):` and an action
-# `ci(deps):`, which make none; esbuild's and TypeScript's updates still change
-# the bundle's bytes, which reach users with the next release. The colon
-# follows the prefix by itself; `include: scope` adds `deps` or `deps-dev`.
-# Security updates take the same titles.
+# release (#26); a major one that changes behaviour can be retitled
+# `feat(deps):`, which commit-types also accepts. A development dependency is
+# `chore(deps-dev):` and an action `ci(deps):`, which make none; esbuild's and
+# TypeScript's updates still change the bundle's bytes, which reach users with
+# the next release. The colon follows the prefix by itself; `include: scope`
+# adds `deps` or `deps-dev`. Security updates take the same titles.
 #
 # A dev update can move a lockfile entry the production tree shares, and then
-# commit-types says it ships: retitle that PR `fix(deps):` (docs/releasing.md).
+# commit-types says it ships. Retitling can't fix that, since commit-types
+# reads Dependabot's commit too: close the PR and make the same update in a
+# `fix(deps):` PR of your own (docs/releasing.md).
 version: 2
 updates:
   - package-ecosystem: npm
@@ -30,18 +33,18 @@ updates:
       prefix-development: chore
       include: scope
     # Dev tools in one weekly PR; a major, which can break the toolchain, in a
-    # PR of its own, so it can't hold the safe ones back. The production
-    # dependency is the SDK alone, so its PR names it.
+    # PR of its own, so it can't hold the safe ones back. Production updates
+    # aren't grouped, so each PR names its package.
     groups:
       development:
         dependency-type: development
         update-types: [minor, patch]
     ignore:
-      # Node's typings follow the Node floor, engines' 22.13: newer ones would
-      # let the code compile against APIs the floor doesn't have. They move
-      # when the floor does.
+      # Node's typings stay at the Node floor in package.json's engines: newer
+      # ones would let the code compile against APIs the floor doesn't have.
+      # Move this bound when the floor moves.
       - dependency-name: "@types/node"
-        update-types: ["version-update:semver-major"]
+        versions: [">=22.14.0"]
     labels: [dependencies]
 
   - package-ecosystem: github-actions
@@ -53,8 +56,9 @@ updates:
     commit-message:
       prefix: ci
       include: scope
+    # Every action is pinned to a major tag, so each update is the next major:
+    # grouped, they come as one weekly PR.
     groups:
       actions:
         patterns: ["*"]
-        update-types: [minor, patch]
     labels: [dependencies, ci]
