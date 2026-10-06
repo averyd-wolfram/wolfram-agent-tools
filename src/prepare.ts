@@ -214,8 +214,9 @@ export class Deadline {
   }
 
   /**
-   * Throws the timeout for `stage` if the deadline has already passed —
-   * unchanged, for callers of the library.
+   * Throws the timeout for `stage` if the deadline has already passed, kept for
+   * callers of the library. Its message says time ran out *before* the stage,
+   * which it refuses without beginning (#10); it said "while" until 0.1.2.
    *
    * @deprecated Use `handOn`, which returns the remainder from the same read:
    * this followed by `remaining()` is two reads of the clock, and a deadline
