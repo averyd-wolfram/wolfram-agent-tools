@@ -37,15 +37,10 @@ export const NOT_RESOLVED_BACKOFF_MS = 15_000;
 /**
  * The least a kernel start is handed: below this, the handshake could only
  * time out, so no kernel is spawned and no seat spent on it. A real kernel
- * takes seconds to start; the fake one a fraction of this. Capped at half the
- * start timeout itself (`minStartMs`), so a short one still gets an attempt.
+ * takes seconds to start; the fake one a fraction of this. `handOn` caps it
+ * at half the start timeout itself, so a short one still gets an attempt.
  */
 export const MIN_START_MS = 1_000;
-
-/** The minimum a start of a `totalMs` deadline is handed. */
-export function minStartMs(totalMs: number): number {
-  return Math.min(MIN_START_MS, totalMs / 2);
-}
 
 /** What ends that wait sooner, said by both paths, so they cannot drift apart. */
 export const NOT_RESOLVED_ADVICE =
@@ -184,22 +179,33 @@ export class Deadline {
    * then `remaining()` was two: a deadline that ran out between them handed on
    * 0, which spawned a kernel with a 0ms handshake (a seat for a start that
    * could only fail) or sent the broker a ceiling of 0, which means none (#11).
-   * `minimumMs` is what the work needs to have any chance: a kernel cannot
-   * start in a few milliseconds either.
+   * `minimumMs` is what the work needs to have any chance — a kernel cannot
+   * start in a few milliseconds either — capped at half the deadline, so a
+   * short one still gets an attempt; and never less than something.
    */
   handOn(stage: string, minimumMs = 1): number {
     if (this.signal.aborted) throw new PreparationStopped();
     const left = this.remaining();
-    if (left < minimumMs) {
+    const floor = Math.max(1, Math.min(minimumMs, this.totalMs / 2));
+    if (left < floor) {
       // Said plainly: nothing was tried, so "ran out while starting" alone
       // read as though a start had been under way and failed.
       throw new PreparationTimeout(
         stage,
         this.totalMs,
-        left > 0 ? `${left}ms were left, too little to begin, so nothing was started` : undefined,
+        `${Math.max(0, Math.round(left))}ms were left, too little to begin, so nothing was started`,
       );
     }
     return left;
+  }
+
+  /**
+   * Throws the timeout for `stage` if nothing is left. Kept for callers of
+   * the library; `handOn` is the one to use when the remainder is then handed
+   * on, since this then `remaining()` is two reads of the clock (#11).
+   */
+  check(stage: string): void {
+    this.handOn(stage);
   }
 }
 

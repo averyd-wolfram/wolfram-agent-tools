@@ -3224,24 +3224,23 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
   const witness = backendLogging(witnessLog);
   await witness.prepare(new lib.Deadline(20_000)).catch(() => {});
   await witness.stop();
-  const unstarted = new lib.LocalBackend({
-    bin: fakeKernel,
-    serverName: "WolframLanguage",
-    idleMs: 60_000,
-    startTimeoutMs: 20_000,
-    clientInfo: { name: "smoke", version: "0" },
-    log: (m) => spawnLog.push(m),
-  });
+  const unstarted = backendLogging(spawnLog);
   let spentReads = 0;
   const spentOutcome = await unstarted
     .prepare(new lib.Deadline(1_000, () => (++spentReads <= 1 ? 0 : 999)))
     .then(() => "prepared", (e) => e);
   await unstarted.stop();
+  // And a start timeout of 0, where a floor of half of it was 0 too and a
+  // kernel went out with no time at all.
+  const zero = backendLogging(spawnLog);
+  const zeroOutcome = await zero.prepare(new lib.Deadline(0)).then(() => "prepared", (e) => e);
+  await zero.stop();
   const spawned = spawnLog.filter((m) => /starting kernel/.test(m)).length;
   check(
     "a deadline too nearly spent for a kernel to start spawns none, and fails as the deadline",
     witnessLog.some((m) => /starting kernel/.test(m)) &&
       spentOutcome?.name === "PreparationTimeout" && /nothing was started/.test(spentOutcome?.message ?? "") &&
+      zeroOutcome?.name === "PreparationTimeout" && /nothing was started/.test(zeroOutcome?.message ?? "") &&
       spawned === 0,
     `${spentOutcome?.name ?? spentOutcome}; ${spawned} kernel(s) spawned`,
   );
