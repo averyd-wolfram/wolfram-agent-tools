@@ -17,7 +17,7 @@
  * installation itself changes.
  */
 import { statSync } from "node:fs";
-import { errorText } from "./log.js";
+import { budgetText, errorText } from "./log.js";
 
 /** How long a failed preparation is not retried, unless the binary changes. */
 export const PREPARATION_BACKOFF_MS = 10 * 60_000;
@@ -53,12 +53,23 @@ export class PreparationTimeout extends Error {
   /**
    * `cause` is the work's own failure when one landed as time ran out, kept so
    * a caller can still tell what it was: a server name that did not resolve
-   * starts no back-off even when the deadline wrapped it.
+   * starts no back-off even when the deadline wrapped it. `began` is false for
+   * a stage refused for lack of time, which ran out before it, not while it
+   * ran (#10).
    */
-  constructor(stage: string, totalMs: number, detail?: string, cause?: unknown) {
+  constructor(
+    stage: string,
+    totalMs: number,
+    detail?: string,
+    cause?: unknown,
+    { began = true }: { began?: boolean } = {},
+  ) {
     super(
-      `a Wolfram kernel was not ready within ${Math.round(totalMs / 1000)}s ` +
-        `(WOLFRAM_MCP_START_TIMEOUT_SECONDS): time ran out while ${stage}` +
+      `a Wolfram kernel was not ready within ${budgetText(totalMs)} ` +
+        `(WOLFRAM_MCP_START_TIMEOUT_SECONDS): time ran out ${began ? "while" : "before"} ` +
+        `${stage}` +
+        // Verbatim: the detail is often another error's own words, which are
+        // never rewritten, so a sentence's capital is its own.
         (detail ? `. ${detail}` : ""),
       cause === undefined ? undefined : { cause },
     );
@@ -189,12 +200,14 @@ export class Deadline {
     const floor = Math.max(1, Math.min(minimumMs, this.totalMs / 2));
     if (left < floor) {
       // Said plainly: this stage did not begin, so "ran out while starting"
-      // alone read as though it had been under way and failed. What earlier
-      // stages started is theirs to say.
+      // read as though it had been under way and failed. What earlier stages
+      // started is theirs to say.
       throw new PreparationTimeout(
         stage,
         this.totalMs,
         `${Math.floor(left)}ms were left, too little for this to begin`,
+        undefined,
+        { began: false },
       );
     }
     return left;
@@ -210,7 +223,9 @@ export class Deadline {
    */
   check(stage: string): void {
     if (this.signal.aborted) throw new PreparationStopped();
-    if (this.remaining() <= 0) throw new PreparationTimeout(stage, this.totalMs);
+    if (this.remaining() <= 0) {
+      throw new PreparationTimeout(stage, this.totalMs, undefined, undefined, { began: false });
+    }
   }
 }
 

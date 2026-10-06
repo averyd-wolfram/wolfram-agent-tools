@@ -88,6 +88,7 @@ and this table stop agreeing.
 | `NOT_RESOLVED_BACKOFF_MS` | `15_000` | `prepare.ts` | How long a server name the kernel could not resolve is not asked again: in place of `PREPARATION_BACKOFF_MS` for a private session, and in the broker's pool per kernel environment, where nothing remembered it before (a burst arriving before the first failure is still #19). Short, because the fix — creating the server or installing its paclet — is invisible to the binary-keyed back-off; not zero, because each ask starts a kernel and, at the budget, could retire another session's idle one. |
 | `KERNEL_TIME_CONSTRAINT_S` | `60` | `proxy.ts` | The evaluator's own default `TimeConstraint`, which `MCP_TOOL_OPTIONS` may change — used to warn when this server's ceiling is set below it. |
 | `TIME_CONSTRAINT_HEADROOM_MS` | `30_000` | `proxy.ts` | Added to a caller's requested `timeConstraint`, so this server answers after the kernel does and the caller gets the kernel's own words. |
+| `MAX_TIME_MS` | `24 * 86_400_000` | `config.ts` | The longest a time setting, or this server's wait on one call, is held to: Node fires a timer longer than about 24.8 days at once (#15). |
 
 ### Sharing and kernel flavours
 
@@ -195,7 +196,8 @@ the canonical `wolfram` is reported, matching Wolfram's own generated configurat
 | `WOLFRAM_IDLE_MINUTES`, `WOLFRAM_START_TIMEOUT_SECONDS`, `WOLFRAM_CALL_TIMEOUT_SECONDS` | — | Aliases for the above. |
 
 Each of the three is held to 24 days (`MAX_TIME_MS`), `Infinity` included, and the log says so
-when one is; a call's own `timeConstraint` is held the same way. Node fires a timer longer than about 24.8 days after 1 ms instead, so
+when one is. A call's own `timeConstraint` raises this server's wait only as far as the same 24
+days; the kernel still receives the constraint as requested. Node fires a timer longer than about 24.8 days after 1 ms instead, so
 a value set huge to mean "never" used to do the opposite — every start or call failed at once,
 or the kernel was shut down after each call (#15). The margin covers the seconds of grace added
 on the way to a timer. To keep a kernel resident, use `0`, not a large idle time.

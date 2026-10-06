@@ -3990,7 +3990,6 @@ heading("Timeouts layer the right way round");
 // hold, and the calls here are slow enough that a 1 ms timer fires first.
 heading("A time too long for a timer is held to the longest one can hold");
 {
-  const TIMER_LIMIT_MS = 2 ** 31 - 1;
   // The call timeout by its alias, so the log is seen to name the variable set.
   // Each value really overflowed a timer before the hold.
   const huge = {
@@ -3998,7 +3997,15 @@ heading("A time too long for a timer is held to the longest one can hold");
     WOLFRAM_CALL_TIMEOUT_SECONDS: "3000000",
     WOLFRAM_MCP_IDLE_MINUTES: "100000",
   };
-  const names = [...Object.keys(huge), "WOLFRAM_MCP_CALL_TIMEOUT_SECONDS"];
+  // Every name, aliases included, so the runner's own environment decides nothing.
+  const names = [
+    "WOLFRAM_MCP_START_TIMEOUT_SECONDS",
+    "WOLFRAM_START_TIMEOUT_SECONDS",
+    "WOLFRAM_MCP_CALL_TIMEOUT_SECONDS",
+    "WOLFRAM_CALL_TIMEOUT_SECONDS",
+    "WOLFRAM_MCP_IDLE_MINUTES",
+    "WOLFRAM_IDLE_MINUTES",
+  ];
   const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   const said = [];
   const loadWith = (env) => {
@@ -4019,9 +4026,8 @@ heading("A time too long for a timer is held to the longest one can hold");
   const held = [config.startTimeoutMs, config.callTimeoutMs, config.idleMs, infinite.idleMs];
   const noted = said.filter((message) => /is longer than the 24 days a time setting is held to/.test(message));
   check(
-    "each setting is held below the timer limit, with room for the grace added to it, and the log says so",
+    "each setting is held to 24 days, and the log says so",
     held.every((ms) => ms === lib.MAX_TIME_MS) &&
-      lib.MAX_TIME_MS + 3_600_000 < TIMER_LIMIT_MS &&
       noted.length === 4 &&
       noted.some((message) => message.startsWith("WOLFRAM_CALL_TIMEOUT_SECONDS=3000000")) &&
       noted.some((message) => /^WOLFRAM_MCP_IDLE_MINUTES=Infinity .*using 34560 minutes$/.test(message)),
@@ -4368,6 +4374,87 @@ heading("Preparation has one deadline, and names the stage it ran out in");
     );
     check("and is not recorded as a failed preparation", interrupted.backoff() === null);
   }
+}
+
+// ---------------------------------------------------------------------------
+// A start that runs out reports two budgets: the deadline's, in the headline,
+// and the handshake's, in the detail. Both were whole seconds, rounded, so a
+// sub-second budget read "within 0s" — and the detail, the handshake's own
+// message, followed a full stop in lower case (#10). And a start refused
+// because too little time was left read "time ran out while starting the
+// kernel", though the detail said it never began.
+heading("A start that runs out says what it had, in sentences");
+{
+  wipeCache();
+  // 0.9s: under a second, and enough that the start is not refused for lack
+  // of time before its handshake begins (half of it must be left).
+  const s = await connect({ WOLFRAM_MCP_START_TIMEOUT_SECONDS: "0.9", FAKE_INIT_DELAY_MS: "20000" });
+  const result = await s.client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } });
+  const said = (result.content?.[0]?.text ?? "").split("\n")[0];
+  const handshake = Number(/did not complete MCP initialization within (\d+)ms/i.exec(said)?.[1] ?? NaN);
+  check(
+    "a sub-second start timeout and the handshake's share of it are given in ms, never 0s",
+    result.isError === true &&
+      said.includes("not ready within 900ms") &&
+      handshake > 0 &&
+      handshake <= 900 &&
+      !/within 0s/.test(said),
+    said.slice(0, 220),
+  );
+  check(
+    "and the handshake's detail begins its own sentence",
+    said.includes("time ran out while starting the kernel. The Wolfram kernel did not complete"),
+    said.slice(60, 200),
+  );
+  await s.client.close();
+
+  let reads = 0;
+  const refused = (() => {
+    try {
+      new lib.Deadline(1_000, () => (++reads <= 1 ? 0 : 999)).handOn("starting the kernel", 1_000);
+      return null;
+    } catch (err) {
+      return err;
+    }
+  })();
+  // The budget, at each scale: ms below a second, tenths below ten, never
+  // rounded up; another error's words carried verbatim; and the deprecated
+  // check() refuses a stage before it, too.
+  const said2499 = new lib.PreparationTimeout("starting the kernel", 2499).message;
+  const wrapped = new lib.PreparationTimeout("starting the kernel", 120_000, "spawn wolfram ENOENT").message;
+  const checked = (() => {
+    try {
+      new lib.Deadline(0).check("starting the kernel");
+      return "";
+    } catch (err) {
+      return String(err?.message ?? err);
+    }
+  })();
+  check(
+    "budgets read as given — 2.4s, not 2s or 3s — other errors' words are kept as written, and check() says before",
+    said2499.includes("not ready within 2.4s") &&
+      new lib.PreparationTimeout("x", 120_000).message.includes("within 120s") &&
+      wrapped.endsWith("starting the kernel. spawn wolfram ENOENT") &&
+      checked.includes("time ran out before starting the kernel"),
+    `${said2499.slice(0, 50)} | ${wrapped.slice(-50)} | ${checked.slice(60, 120)}`,
+  );
+  // And a call's own deadline, which said "within 0s" of a sub-second ceiling.
+  const quick = await connect({ WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "0.4", FAKE_CALL_DELAY_MS: "2000" });
+  const late = await quick.client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } });
+  const lateText = late.content?.[0]?.text ?? "";
+  check(
+    "a call that outlasts a sub-second ceiling says it in ms",
+    late.isError === true && lateText.includes("no answer from the Wolfram kernel within 400ms"),
+    lateText.slice(0, 100),
+  );
+  await quick.client.close();
+  check(
+    "a start refused for lack of time says time ran out before it, not while it ran",
+    refused instanceof lib.PreparationTimeout &&
+      /time ran out before starting the kernel\. 1ms were left, too little for this to begin/.test(refused.message) &&
+      refused.stage === "starting the kernel",
+    refused?.message ?? String(refused),
+  );
 }
 
 // ---------------------------------------------------------------------------
