@@ -324,7 +324,8 @@ those is on the real repo:
   `gh release download <tag> -D <dir>` and `shasum -a 256 -c SHA256SUMS.txt`.
 - **`actionlint`** (`brew install actionlint`) statically checks the workflow syntax and the
   `${{ }}` expressions without running anything.
-- **`act`** (`brew install act`) runs `ci.yml` in a Docker container. It cannot stand in for the
+- **`act`** (`brew install act`; v0.2.81 or later, the first to run the Node 24 actions every
+  workflow here uses) runs `ci.yml` in a Docker container. It cannot stand in for the
   release path, which depends on GitHub's release API and token, so scope it to CI:
 
   ```bash
