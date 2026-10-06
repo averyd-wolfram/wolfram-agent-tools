@@ -34,6 +34,14 @@ export const PREPARATION_BACKOFF_MS = 10 * 60_000;
  */
 export const NOT_RESOLVED_BACKOFF_MS = 15_000;
 
+/**
+ * The least a kernel start is handed: below this, the handshake could only
+ * time out, so no kernel is spawned and no seat spent on it. A real kernel
+ * takes seconds to start; the fake one a fraction of this. `handOn` caps it
+ * at half the start timeout itself, so a short one still gets an attempt.
+ */
+export const MIN_START_MS = 1_000;
+
 /** What ends that wait sooner, said by both paths, so they cannot drift apart. */
 export const NOT_RESOLVED_ADVICE =
   "meanwhile, check the server MCP_SERVER_NAME names: create it, install the paclet " +
@@ -165,7 +173,41 @@ export class Deadline {
     }
   }
 
-  /** Throws the timeout for `stage` if the deadline has already passed. */
+  /**
+   * What is left, for work that bounds itself to it, or the timeout for
+   * `stage` if less than `minimumMs` is. One read of the clock, where a check
+   * then `remaining()` was two: a deadline that ran out between them handed on
+   * 0, which spawned a kernel with a 0ms handshake (a seat for a start that
+   * could only fail) or sent the broker a ceiling of 0, which means none (#11).
+   * `minimumMs` is what the work needs to have any chance — a kernel cannot
+   * start in a few milliseconds either — capped at half the deadline, so a
+   * short one still gets an attempt; and never less than something.
+   */
+  handOn(stage: string, minimumMs = 1): number {
+    if (this.signal.aborted) throw new PreparationStopped();
+    const left = this.remaining();
+    const floor = Math.max(1, Math.min(minimumMs, this.totalMs / 2));
+    if (left < floor) {
+      // Said plainly: this stage did not begin, so "ran out while starting"
+      // alone read as though it had been under way and failed. What earlier
+      // stages started is theirs to say.
+      throw new PreparationTimeout(
+        stage,
+        this.totalMs,
+        `${Math.floor(left)}ms were left, too little for this to begin`,
+      );
+    }
+    return left;
+  }
+
+  /**
+   * Throws the timeout for `stage` if the deadline has already passed —
+   * unchanged, for callers of the library.
+   *
+   * @deprecated Use `handOn`, which returns the remainder from the same read:
+   * this followed by `remaining()` is two reads of the clock, and a deadline
+   * that runs out between them hands on 0 (#11).
+   */
   check(stage: string): void {
     if (this.signal.aborted) throw new PreparationStopped();
     if (this.remaining() <= 0) throw new PreparationTimeout(stage, this.totalMs);

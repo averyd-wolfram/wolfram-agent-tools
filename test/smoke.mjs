@@ -2120,6 +2120,35 @@ heading("Unit — when a broker may serve this session");
   await toAccepts?.stop();
   accepts.server.close();
 
+  // A deadline that runs out between its check and the remainder it hands on
+  // (issue #11): `ready` went out with timeoutMs 0, which means "no ceiling",
+  // so the request sat pending until the socket closed while the deadline had
+  // already failed. A clock that reads 0 at construction and at the next read,
+  // then past the deadline, hit that window every time: the check was one
+  // read and the remainder another. Whatever reads it, `ready` must never go
+  // out without a ceiling.
+  const readyTimeouts = [];
+  const silent = await serve("broker-silent-ready", (frame) => {
+    if (frame.op === "ready") readyTimeouts.push(frame.timeoutMs);
+    return frame.op === "ready" ? null : answering(true)(frame);
+  });
+  const toSilent = await attach(silent.address);
+  let reads = 0;
+  const spent = new lib.Deadline(1_000, () => (++reads <= 2 ? 0 : 5_000));
+  const readyOutcome = toSilent
+    ? await toSilent.awaitReady(spent).then(() => "ready", (e) => e)
+    : "no attach";
+  // The frame is written before the deadline fails, but read by the stub a
+  // moment later: wait for it, so an empty list cannot pass for a good one.
+  for (let i = 0; i < 40 && readyTimeouts.length === 0; i++) await new Promise((r) => setTimeout(r, 25));
+  check(
+    "a deadline running out as it is read never asks the broker without a ceiling",
+    readyOutcome?.name === "PreparationTimeout" && readyTimeouts.length === 1 && readyTimeouts[0] > 0,
+    `${readyOutcome?.name ?? readyOutcome}; ready sent with ${readyTimeouts.join(", ") || "nothing"}`,
+  );
+  await toSilent?.stop();
+  silent.server.close();
+
   // Accepts, never answers: a SIGSTOPped or wedged broker, without needing to
   // stop a real process to make one.
   const startedAt = Date.now();
@@ -3171,6 +3200,67 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
     "a not-found the deadline wraps is still known as one, so it starts no back-off",
     late?.name === "PreparationTimeout" && lib.isServerNotResolved?.(late) === true,
     `${late?.name}: ${String(late?.message).slice(0, 60)}`,
+  );
+
+  // A deadline that runs out between its check and the remainder it hands to
+  // the start (issue #11) spawned a kernel with a 0ms handshake: a seat spent
+  // on a start that could only fail — and with a millisecond or two left, the
+  // same. Here 1ms is left when the start is asked for: no kernel may be
+  // spawned. Read off the session's own log of what it spawned: one killed by
+  // a near-0ms timer dies before it can write a marker.
+  const spawnLog = [];
+  const backendLogging = (into) =>
+    new lib.LocalBackend({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "0" },
+      log: (m) => into.push(m),
+    });
+  // First, that a spawn is what this log line says, so a reworded line cannot
+  // make the check below pass by seeing nothing.
+  const witnessLog = [];
+  const witness = backendLogging(witnessLog);
+  await witness.prepare(new lib.Deadline(20_000)).catch(() => {});
+  await witness.stop();
+  const unstarted = backendLogging(spawnLog);
+  let spentReads = 0;
+  const spentOutcome = await unstarted
+    .prepare(new lib.Deadline(1_000, () => (++spentReads <= 1 ? 0 : 999)))
+    .then(() => "prepared", (e) => e);
+  await unstarted.stop();
+  // And a start timeout of 0, where a floor of half of it was 0 too and a
+  // kernel went out with no time at all.
+  const zero = backendLogging(spawnLog);
+  const zeroOutcome = await zero.prepare(new lib.Deadline(0)).then(() => "prepared", (e) => e);
+  await zero.stop();
+  const spawned = spawnLog.filter((m) => /starting kernel/.test(m)).length;
+  check(
+    "a deadline too nearly spent for a kernel to start spawns none, and fails as the deadline",
+    witnessLog.some((m) => /starting kernel/.test(m)) &&
+      spentOutcome instanceof lib.PreparationTimeout && /too little for this to begin/.test(spentOutcome?.message ?? "") &&
+      zeroOutcome instanceof lib.PreparationTimeout && /too little for this to begin/.test(zeroOutcome?.message ?? "") &&
+      spawned === 0,
+    `${spentOutcome?.name ?? spentOutcome}; ${spawned} kernel(s) spawned`,
+  );
+
+  // But the floor is capped by the start timeout itself: one of a second must
+  // still try, where a fixed second-long floor refused every start.
+  const shortLog = [];
+  const short = backendLogging(shortLog);
+  // 100ms of it spent before the start, as inspection or an attach would.
+  let shortReads = 0;
+  const shortStart = Date.now();
+  const shortClock = () => (++shortReads === 1 ? shortStart : Date.now() + 100);
+  const shortOutcome = await short
+    .prepare(new lib.Deadline(1_000, shortClock))
+    .then(() => "prepared", (e) => e.message);
+  await short.stop();
+  check(
+    "a start timeout of a second still gets an attempt",
+    shortLog.some((m) => /starting kernel/.test(m)),
+    String(shortOutcome).slice(0, 80),
   );
 
   // The window's other end, on a clock the suite controls: once it has passed,
