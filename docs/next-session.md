@@ -68,7 +68,8 @@ in `docs/design.md`.
    from the archive. #7 (installing at project scope from this repository) belongs here.
 5. **MD, downstream packages** (plan §5 MD, D33), after the restructure: another project's
    plugin built on the release bundle. Item 3's defect for today's users — a server not found
-   held off for ten minutes — is fixed in 0.1.2 (#5); its `test:custom` counterpart remains.
+   held off for ten minutes — is fixed for 0.1.2 (#5), not yet released; its `test:custom`
+   counterpart remains.
 6. **The rest of M1**: the chat checklist and M1b's client version, `SessionStart` and file
    workflow (run by a maintainer); entitlement leases outliving clean kernel exits by about an hour
    (measured, cause not found, matters only to entitlement users); a resumed Claude Desktop
@@ -90,7 +91,7 @@ in `docs/design.md`.
   to the draft, then publishes it. A docs-only merge builds nothing.
 - **No personal token.** Nothing `GITHUB_TOKEN` does starts another workflow, so it is all one
   run; "Allow GitHub Actions to create and approve pull requests" must be on.
-- **Only the PR title reaches `main`.** A squash commit is the title, which `conventional-title`
+- **The PR description no longer reaches `main`.** A squash commit is the title, which `conventional-title`
   and `commit-types` check, plus any `Co-authored-by:` trailers GitHub adds, which release-please
   reads as footers that change nothing; the description is for reviewers. Keep it that way: release-please reads commit bodies by design —
   a footer-shaped line becomes a commit, `BREAKING-CHANGE:` makes one breaking, a body it cannot

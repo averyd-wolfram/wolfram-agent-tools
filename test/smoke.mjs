@@ -8,6 +8,7 @@
  */
 import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, mkdtempSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -5086,6 +5087,22 @@ heading("The bundle is the deliverable, and the suite drives the bundle");
   });
   check("the bundle builds", built.status === 0, (built.stderr || built.stdout).slice(0, 90).trim());
   const artifact = join(root, "bundle", "wolfram-mcp-server.mjs");
+
+  // The bundle inlines the SDK's ajv and, through it, fast-uri, so an advisory
+  // against fast-uri ships in every release: 0.1.1 inlined 3.1.5, inside six
+  // (#26). This asks the copy the bundle inlines, resolved from ajv as esbuild
+  // resolves it, to do what 3.1.8 fixed: refuse a malformed scheme.
+  {
+    const sdk = createRequire(join(root, "node_modules", "@modelcontextprotocol", "sdk", "package.json"));
+    const fastUri = createRequire(sdk.resolve("ajv"))("fast-uri");
+    let refused = false;
+    try {
+      fastUri.resolve("", "1bad:scheme");
+    } catch {
+      refused = true;
+    }
+    check("the URI parser the bundle inlines refuses a malformed scheme, as fast-uri 3.1.8 does (#26)", refused);
+  }
 
   // Two builds of one version are two programs. The socket was keyed on the
   // package version alone, so a broker started by this checkout's dist/ — the
