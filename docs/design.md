@@ -213,9 +213,13 @@ instead of the server.
   recognise is ordinarily somebody's own server, and `resolveServerName` used to
   substitute the default for it, silently serving a different server's tools.
 - A name that genuinely does not resolve fails as `MCPServerNotFound` and the kernel then
-  runs on as a non-server, so nothing ends the wait but the start timeout. `kernel.ts`
-  watches the kernel's output for that message and fails immediately instead, which is
-  what makes passing the name through safe.
+  runs on as a non-server, so nothing ends the wait but the start timeout. A
+  paclet-qualified name whose paclet is missing, has no AgentTools extension, or lacks the
+  server prints one of the paclet's `Paclet…` messages instead, and `StartMCPServer` drops
+  the kernel to its REPL. `kernel.ts` watches the kernel's output for all of these and fails
+  immediately instead, which is what makes passing the name through safe. Such a failure
+  starts no back-off: it is fixed by creating the server or installing its paclet, which
+  the back-off, keyed on the kernel binary, cannot see.
 - All four built-in servers advertise `prompts`; none advertise `resources`. Tool counts:
   `Wolfram` 3, `WolframLanguage` 7, `WolframAlpha` 2, `WolframPacletDevelopment` 13.
 - Sessions survive a kernel restart. The evaluator persists session state to disk and

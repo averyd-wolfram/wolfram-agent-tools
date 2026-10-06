@@ -41,7 +41,7 @@ import {
   type BackoffState,
   type CandidateIdentity,
 } from "./prepare.js";
-import { HandshakeTimeout, KernelSession } from "./kernel.js";
+import { HandshakeTimeout, isServerNotResolved, KernelSession } from "./kernel.js";
 import type { KernelInstall } from "./locate.js";
 import { errorText, type Logger } from "./log.js";
 import { PKG } from "./version.js";
@@ -373,6 +373,14 @@ export class DeferredBackend implements KernelBackend {
         // failure is recorded first, and that call meets the back-off.
         this.#resolving = null;
         if (err instanceof PreparationStopped) throw err;
+        // A server name that does not resolve is fixed by creating the server
+        // or installing its paclet, which the back-off cannot see: kept, it held
+        // that fix off for its whole window. The kernel answers it in its first
+        // second, so the next call asking again costs little (issue #5).
+        if (isServerNotResolved(err)) {
+          this.#log?.(`preparation failed; the server name did not resolve: ${errorText(err)}`);
+          throw err;
+        }
         this.#backoff.record(this.#identity(), err);
         this.#log?.(
           `preparation failed; not retrying for ${formatWait(this.#backoffWindow())}: ${errorText(err)}`,

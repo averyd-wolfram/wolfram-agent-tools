@@ -256,6 +256,26 @@ VerificationTest[
 ]
 
 VerificationTest[
+    (* The same watch, for a paclet-qualified Publisher/Server: SERVER_NOT_FOUND
+       also matches these message names, which a real 15.0 kernel printed for a
+       paclet with no AgentTools extension before StartMCPServer dropped it to
+       its REPL (issue #5). A message renamed here would bring back the wait for
+       the whole start timeout, so each name is pinned to the paclet's own
+       Messages.wl. *)
+    With[{messages = Import[FileNameJoin[{PacletObject["Wolfram/AgentTools"]["Location"],
+                                          "Kernel", "Messages.wl"}], "Text"]},
+        Select[
+            {"MCPServerFileNotFound", "PacletNotInstalled", "PacletExtensionNotFound",
+             "PacletServerNotFound", "InvalidPacletServerDefinition",
+             "InvalidAgentToolsPacletExtension"},
+            !StringContainsQ[messages, "AgentTools::" <> # ~~ Whitespace ~~ "="] &
+        ]
+    ],
+    {},
+    TestID -> "paclet-server-messages-are-what-we-watch-for"
+]
+
+VerificationTest[
     (* Why the server name travels as an environment variable rather than an argument:
        the no-argument overload reads it itself. StartMCPServer is ReadProtected,
        so Definition[] shows only attributes; read the shipped source instead. *)

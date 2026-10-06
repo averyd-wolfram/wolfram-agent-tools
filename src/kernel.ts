@@ -115,19 +115,47 @@ interface AbandonedWork {
 }
 
 /**
- * The paclet's own words for a `MCP_SERVER_NAME` it cannot resolve —
- * `AgentTools::MCPServerNotFound = "No MCPServerObject found for name \`1\`."`,
- * from its `Messages.wl`.
+ * The paclet's own messages for a `MCP_SERVER_NAME` it cannot resolve to a
+ * server, from its `Messages.wl`: a name with no server of that name
+ * (`MCPServerNotFound`, `MCPServerFileNotFound`), and a paclet-qualified
+ * `Publisher/Server` whose paclet is not installed, has no AgentTools extension,
+ * declares no such server, or declares it invalidly.
  *
- * Watched for because such a kernel does not fail: it loads, prints this, and
- * runs on as a non-server, so the only thing that ever ended the wait was the
- * start timeout — two minutes by default, for an answer the kernel gave in the
- * first second. `resolveServerName` used to avoid the wait by refusing any name
- * it did not recognise, which silently substituted a different server for every
- * user-defined one. Pinned by `server-not-found-message-is-what-we-watch-for`
- * in the `.wlt`.
+ * Watched for because such a kernel does not fail: it prints one of these and
+ * runs on as a non-server — or, when `StartMCPServer` itself rejects the name,
+ * drops to its REPL and reads the client's JSON as Wolfram Language — so the
+ * only thing that ever ended the wait was the start timeout, for an answer the
+ * kernel gave in its first second. Only the first two were watched for until a
+ * paclet-declared server hit the others (issue #5). `resolveServerName` used to
+ * avoid the wait by refusing any name it did not recognise, which silently
+ * substituted a different server for every user-defined one. Pinned by
+ * `server-not-found-message-is-what-we-watch-for` and
+ * `paclet-server-messages-are-what-we-watch-for` in the `.wlt`.
  */
-const SERVER_NOT_FOUND = /MCPServerNotFound|No MCPServerObject found for name/;
+const SERVER_NOT_FOUND =
+  /MCPServerNotFound|MCPServerFileNotFound|No MCPServerObject found for name|PacletNotInstalled|PacletExtensionNotFound|PacletServerNotFound|InvalidPacletServerDefinition|InvalidAgentToolsPacletExtension/;
+
+/**
+ * A start that ended because the kernel could not resolve its server name.
+ *
+ * Typed because it is not a failure of the installation: it is fixed by
+ * creating the server or installing its paclet, neither of which changes the
+ * kernel binary a preparation's back-off is keyed on, so it must start none.
+ */
+export class ServerNotResolved extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ServerNotResolved";
+  }
+}
+
+/** Whether `err`, or anything it was wrapped around, is a `ServerNotResolved`. */
+export function isServerNotResolved(err: unknown): boolean {
+  for (let e: unknown = err; e instanceof Error; e = e.cause) {
+    if (e instanceof ServerNotResolved) return true;
+  }
+  return false;
+}
 
 /** How far past a start's own handshake timer the SDK's request timeout is set. */
 const HANDSHAKE_SDK_GRACE_MS = 1_000;
@@ -306,7 +334,7 @@ export class KernelSession {
         // waiting out a timeout for something already answered.
         if (SERVER_NOT_FOUND.test(line)) {
           reportFatal(
-            new Error(
+            new ServerNotResolved(
               `the Wolfram kernel could not resolve MCP_SERVER_NAME="${serverName}": ` +
                 line.trim(),
             ),

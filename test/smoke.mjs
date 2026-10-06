@@ -3023,7 +3023,55 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
     /No MCPServerObject found for name/.test(reason) && /Wolframm/.test(reason),
     reason.replace(/\s+/g, " ").slice(0, 95),
   );
+  // A name that does not resolve is fixed by creating the server or installing
+  // its paclet, neither of which changes the kernel binary the back-off is keyed
+  // on, so a back-off kept the fix from working for ten minutes (issue #5).
+  const again = await bad.client.callTool(
+    { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
+  const againText = again?.content?.[0]?.text ?? "";
+  check(
+    "and it starts no back-off: the next call asks the kernel again",
+    again.isError === true && /No MCPServerObject found for name/.test(againText) &&
+      !/last attempt to prepare/.test(againText),
+    againText.replace(/\s+/g, " ").slice(0, 95),
+  );
   await bad.client.close();
+
+  // A paclet-qualified name whose paclet has no AgentTools extension, as a real
+  // kernel answered it (issue #5): StartMCPServer fails and the kernel drops to
+  // its REPL, which reads the client's JSON as Wolfram Language. Only
+  // MCPServerNotFound was watched for, so this waited out the whole start
+  // timeout, then the back-off, for an answer the kernel gave in its first
+  // second.
+  const pacletStartedAt = Date.now();
+  const noExtension = await connect({
+    MCP_SERVER_NAME: "WolframVerifier/Verifier",
+    FAKE_MODE: "no-paclet-extension",
+    WOLFRAM_MCP_START_TIMEOUT_SECONDS: "20",
+  });
+  const unresolved = await noExtension.client.callTool(
+    { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
+  const pacletElapsed = Date.now() - pacletStartedAt;
+  const unresolvedText = unresolved?.content?.[0]?.text ?? "";
+  check(
+    "a paclet server the paclet cannot provide fails in seconds, not at the start timeout",
+    unresolved.isError === true && pacletElapsed < 8000,
+    `${unresolved.isError ? "isError" : "ok"} after ${pacletElapsed}ms, timeout was 20000ms`,
+  );
+  check(
+    "and says why in the kernel's own words",
+    /No AgentTools extension found in paclet "WolframVerifier"/.test(unresolvedText),
+    unresolvedText.replace(/\s+/g, " ").slice(0, 95),
+  );
+  const retried = await noExtension.client.callTool(
+    { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
+  const retriedText = retried?.content?.[0]?.text ?? "";
+  check(
+    "and starts no back-off, so installing the paclet works on the next call",
+    /No AgentTools extension found/.test(retriedText) && !/last attempt to prepare/.test(retriedText),
+    retriedText.replace(/\s+/g, " ").slice(0, 95),
+  );
+  await noExtension.client.close();
 }
 
 // ---------------------------------------------------------------------------
