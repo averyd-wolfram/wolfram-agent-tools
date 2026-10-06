@@ -268,6 +268,13 @@ just quietly fails to do its job, which is worse.
 - **Protect `main`.** No direct pushes, no force-pushes, no deletion: changes arrive only by pull
   request. Turn on secret scanning and push protection (Settings → Code security), the
   server-side half of what `public-content` checks.
+- **Dependabot alerts and security updates.** Settings → Code security: turn on "Dependabot
+  alerts" and "Dependabot security updates" (or `gh api -X PUT repos/<owner>/<repo>/vulnerability-alerts`
+  then `gh api -X PUT repos/<owner>/<repo>/automated-security-fixes`). Without them, an advisory
+  against a dependency the bundle ships reaches nobody until someone happens to look, which is
+  how 0.1.1 shipped `fast-uri` with known advisories (#26, #29). `.github/dependabot.yml`'s
+  header says how its PR titles fit the release pipeline, and what to do when `commit-types`
+  rejects one.
 - **Protect the `release` branch and its tags.** A ruleset on `release` blocking force pushes
   and deletion, and one on tags matching `wolfram--v*` blocking updates and deletion. Neither
   stops `advance`, which only fast-forwards the branch and adds new tags, and with them a pinned
