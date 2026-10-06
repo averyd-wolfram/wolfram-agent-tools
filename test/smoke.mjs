@@ -4080,6 +4080,48 @@ heading("A time too long for a timer is held to the longest one can hold");
 }
 
 // ---------------------------------------------------------------------------
+// The MCP SDK gives a request 60 s unless told otherwise, and the calls this
+// server sends a kernel told it nothing: their deadline is the session's, kept
+// apart so that a late reply is still received. So every call longer than a
+// minute — a raised timeConstraint, a paclet build — was cut at 60 s with
+// "Request timed out", and the kernel's answer dropped (#34). A 65 s call under
+// a 120 s ceiling must be answered, on each path; both run at once, so the
+// suite waits the minute once.
+heading("A call longer than a minute is answered, on either path");
+{
+  wipeCache();
+  const runtime = join(home, "run-long-call");
+  privateDir(runtime);
+  const slow = { WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "120", FAKE_CALL_DELAY_MS: "65000" };
+  const [privately, shared] = await Promise.all([
+    connect(slow),
+    connect({ ...slow, WOLFRAM_MCP_SHARE: "1", XDG_RUNTIME_DIR: runtime }),
+  ]);
+  // This client's own SDK would stop at 60 s too.
+  const call = async (s) => {
+    const started = Date.now();
+    const result = await s.client.callTool(
+      { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } },
+      undefined,
+      { timeout: 150_000 },
+    );
+    return { result, elapsed: Date.now() - started };
+  };
+  const outcomes = await Promise.all([call(privately), call(shared)]);
+  for (const [label, { result, elapsed }] of [["a private kernel", outcomes[0]], ["a shared one", outcomes[1]]]) {
+    check(
+      `${label} answers a 65 s call under a 120 s ceiling`,
+      !result.isError && elapsed >= 64_000,
+      `${elapsed}ms: ${(result.content?.[0]?.text ?? "").slice(0, 90)}`,
+    );
+  }
+  await privately.client.close();
+  await shared.client.close();
+  signalOwnBrokers("SIGTERM", runtime);
+  await new Promise((r) => setTimeout(r, 300));
+}
+
+// ---------------------------------------------------------------------------
 // Everything before a kernel receives its first request — the broker's
 // preparation, the handshake, and once an installation probe kernel — used to
 // carry its own bound: the probe 120s, the handshake
