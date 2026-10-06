@@ -49,10 +49,8 @@ export const RELEASE_BRANCH = /^release-please--branches--.+/;
  */
 export function releaseVersion({ ref, refType, tags, packageVersion }) {
   if (refType === "tag") {
-    const version = ref.replace(/^v/, "");
-    if (!ref.startsWith("v") || !SEMVER.test(version)) {
-      throw new Error(`tag ${ref} is not v<semver>, so it names no release`);
-    }
+    const version = tagVersion(ref);
+    if (!version) throw new Error(`tag ${ref} is not v<semver>, so it names no release`);
     return { version, tag: ref, prerelease: version.includes("-"), create: false };
   }
   if (!RELEASE_BRANCH.test(ref)) {
@@ -154,20 +152,31 @@ export function tagCommits(lsRemote) {
 }
 
 /**
+ * Run `gh` and parse what it prints as one JSON value per line: what `--jq`
+ * prints for a stream such as `.[] | {…}`, page after page under
+ * `--paginate`. GH_TOKEN, or a signed-in `gh`, is needed.
+ */
+export function ghJsonLines(args) {
+  return execFileSync("gh", args, { encoding: "utf8" })
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
+/**
  * Every release of `repo`, drafts included — GitHub lists a draft only to a
- * token that can push. Through `gh`, so GH_TOKEN or a signed-in `gh` is needed.
+ * token that can push.
  *
  * @returns {{ tag: string, draft: boolean, prerelease: boolean }[]}
  */
 export function listReleases(repo) {
-  return execFileSync(
-    "gh",
-    ["api", "--paginate", `repos/${repo}/releases?per_page=100`, "--jq", ".[] | {tag: .tag_name, draft, prerelease}"],
-    { encoding: "utf8" },
-  )
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => JSON.parse(line));
+  return ghJsonLines([
+    "api",
+    "--paginate",
+    `repos/${repo}/releases?per_page=100`,
+    "--jq",
+    ".[] | {tag: .tag_name, draft, prerelease}",
+  ]);
 }
 
 /**

@@ -62,10 +62,10 @@ jobs:
       create: ${{ steps.v.outputs.create }}
       sha: ${{ steps.v.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.BUILD_REF }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
       # The commit is pinned here, so every later job builds exactly this one
@@ -91,13 +91,19 @@ jobs:
       contents: write
       statuses: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.name.outputs.sha }}
-      - uses: actions/setup-node@v4
+      # No cache restored into the job that publishes: the entries it would
+      # restore are written by this run's own CI jobs, which hold no write
+      # token, so caching would let them reach what ships; setup-node advises
+      # against caching in release jobs. Said explicitly, since setup-node turns
+      # caching on by itself once package.json names a packageManager. One
+      # uncached install per build, pre-releases included.
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
-          cache: npm
+          package-manager-cache: false
       - run: npm ci
       # Into this checkout only: the branch says what release is being
       # prepared, and the stamp says which build of it this is.

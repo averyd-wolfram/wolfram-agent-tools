@@ -92,10 +92,10 @@ jobs:
     steps:
       # Repository code runs here with a token that can push: it is handed to
       # the one step that reads GitHub, never left in the checkout's config.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
       - id: p

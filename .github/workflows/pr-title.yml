@@ -25,7 +25,7 @@ jobs:
   conventional-title:
     runs-on: ubuntu-latest
     steps:
-      - uses: amannn/action-semantic-pull-request@v5
+      - uses: amannn/action-semantic-pull-request@v6
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -53,7 +53,7 @@ jobs:
     steps:
       # Every branch and tag: the range needs the base's history, and a commit
       # already inside a published build (reachable from a v* tag) is skipped.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - env:
