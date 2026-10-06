@@ -194,12 +194,12 @@ export function unreadable({ title, number, body }) {
       }
       for (const commit of commits.filter((_, i) => i !== at)) {
         problems.push(
-          `release-please reads another commit from ${where}, "${shown(commit)}", with its ` +
+          `release-please reads another commit, "${shown(commit)}", from ${where} with its ` +
             "own changelog line and bump",
         );
       }
       if (!own && errors.length === 0) {
-        problems.push(`release-please does not read the title's commit from ${where}`);
+        problems.push(`${where} does not hold the title's commit, as release-please reads it`);
       }
     }
     if (problems.length > 0) return problems;
