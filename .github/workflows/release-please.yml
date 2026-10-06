@@ -203,6 +203,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          # The token is masked in logs, but this encoding of it isn't.
+          echo "::add-mask::$auth"
           push() { git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin "$@"; }
           base=
           # The full ref: a bare `release` matches any branch ending in /release.

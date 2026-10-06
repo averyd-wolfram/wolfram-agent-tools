@@ -127,6 +127,9 @@ jobs:
           name: release-artifacts${{ inputs.ref && format('-{0}', inputs.ref) || '' }}
           path: release/
           if-no-files-found: error
+          # upload-artifact leaves out dot-files by default, and a marketplace
+          # or a plugin is nothing without its .claude-plugin/.
+          include-hidden-files: true
 
   validate-plugin:
     # Claude Code's own validator, on the archive a user installs — extracted

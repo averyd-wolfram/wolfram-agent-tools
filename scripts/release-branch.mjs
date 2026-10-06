@@ -58,6 +58,9 @@ export function versionTag(version) {
  *   `ahead`: why the branch stays put although it carries no published version
  */
 export function advancePlan({ releases, branchVersion, latestTag, tags }) {
+  if (branchVersion !== undefined && !tagVersion(`v${branchVersion}`, { core: true })) {
+    throw new Error(`the ${BRANCH} branch's plugin.json says ${branchVersion}, which is not x.y.z, so it can't be ordered`);
+  }
   const newest = latestRelease(releases);
   if (!newest) return { move: false, latest: false };
   const version = tagVersion(newest);
@@ -164,7 +167,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       const heads = run("git", ["ls-remote", "--heads", "origin", `refs/heads/${BRANCH}`]).trim();
       const branchVersion = heads
         ? JSON.parse(
-            run("gh", ["api", "-H", "Accept: application/vnd.github.raw+json", `repos/${repo}/contents/plugin/.claude-plugin/plugin.json?ref=${BRANCH}`]),
+            run("gh", ["api", "-H", "Accept: application/vnd.github.raw+json", `repos/${repo}/contents/plugin/.claude-plugin/plugin.json?ref=refs/heads/${BRANCH}`]),
           ).version
         : undefined;
       // Only "no Latest yet" is a 404 here; anything else must stop the run.

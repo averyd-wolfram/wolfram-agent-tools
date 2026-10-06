@@ -84,6 +84,16 @@ check(
   !ahead.move && !ahead.tag && !ahead.latest && /0\.1\.3/.test(ahead.ahead ?? ""),
   show(ahead),
 );
+// Not a version, a branch can't be ordered against a release: comparing one
+// would read as "already current", and tag and mark Latest over a build the
+// branch may not hold.
+let garbled = "";
+try {
+  plan({ branchVersion: "0.1" });
+} catch (err) {
+  garbled = err.message;
+}
+check("a branch whose plugin.json carries no x.y.z version stops the plan", /0\.1/.test(garbled), garbled);
 const none = plan({ releases: [rel("v0.1.0-pre.1", false, true)], branchVersion: undefined, latestTag: undefined, tags: [] });
 check("with no release published, nothing happens", !none.newest && !none.move && !none.tag && !none.latest, show(none));
 check("a version's tag follows Claude Code's <plugin>--v<version>", versionTag("1.2.3") === "wolfram--v1.2.3");
