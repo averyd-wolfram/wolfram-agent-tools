@@ -62,10 +62,10 @@ jobs:
       create: ${{ steps.v.outputs.create }}
       sha: ${{ steps.v.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.BUILD_REF }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
       # The commit is pinned here, so every later job builds exactly this one
@@ -91,10 +91,10 @@ jobs:
       contents: write
       statuses: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.name.outputs.sha }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
