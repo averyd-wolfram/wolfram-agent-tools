@@ -54,9 +54,12 @@ in `docs/design.md`.
 ## What to do next, in order
 
 1. **#42's follow-ups are in PR #45**: every action on Node 24 (checkout v7, setup-node v7, the
-   artifact pair v7/v8, action-semantic-pull-request v6), and #44's tidy of the release scripts.
-   `release-please.yml` and `release-build.yml` run only on `main`, so check the first release
-   run after #45 merges for Node 20 warnings and failures. Five of #42's review threads are left
+   artifact pair v7/v8, action-semantic-pull-request v6), #44's tidy of the release scripts, and
+   no npm cache in the release jobs. No PR runs `release-please.yml` or `release-build.yml`, and a
+   dispatch runs the dispatched ref's own copy of a workflow — `--ref v0.1.2` would run v0.1.2's,
+   on the old actions — so their new versions are first exercised after merge: `pending` on the
+   merge's own release run, and the build on the next update of the release PR. Check both for
+   Node 20 warnings and failures. Five of #42's review threads are left
    open on purpose, each answered with evidence and changing nothing: the relabel's token scopes,
    the release listing's paging, scripts run from the built tag's checkout, the test harness's
    copies (the suite's split is `docs/plan.md` §12), and `pending` as a job of its own. Resolve
