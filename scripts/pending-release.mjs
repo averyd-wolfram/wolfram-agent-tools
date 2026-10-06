@@ -17,14 +17,14 @@
  *
  * - `finish`: every draft whose `v<x.y.z>` tag exists, with no published
  *   release beside it and no newer release published, for release-build.yml
- *   to publish as Latest. A draft without its tag is someone's notes for a
- *   version not yet released, and one on a suffixed tag is not
- *   release-please's: it makes only `v<x.y.z>`, and a pre-release is published
- *   as it is made. The same rule rebuilds a release whose build failed, on the
- *   next run — until a newer release is out: then finishing it would take
- *   Latest from that one, and a build that fails every time would fail every
+ *   to publish. A draft without its tag is someone's notes for a version not
+ *   yet released, and one on a suffixed tag is not release-please's: it makes
+ *   only `v<x.y.z>`, and a pre-release is published as it is made. The same
+ *   rule rebuilds a release whose build failed, on the next run — until a
+ *   newer release is out: then a build that fails every time would fail every
  *   run, so it is a person's to finish or delete, and `left` names it for the
- *   run to warn of.
+ *   run to warn of. Finishing one late moves neither Latest nor the release
+ *   branch, which follow the newest release (release-branch.mjs).
  * - `relabel`: every merged PR still labelled pending whose merge commit
  *   carries such a tag with a release, draft or published — the state in which
  *   release-please would have relabelled it. A tag with no release yet keeps
@@ -107,8 +107,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     for (const { tag, newest } of left) {
       process.stdout.write(
         `::warning::${tag} is still a draft, older than the newest release, ${newest}, so no release run ` +
-          `finishes it. Delete it, or build it (gh workflow run release-build.yml --ref ${tag}) and then ` +
-          `mark ${newest} Latest again (gh release edit ${newest} --latest): a build publishes as Latest\n`,
+          `finishes it. Delete it, or build it (gh workflow run release-build.yml --ref ${tag}); ` +
+          `Latest and the release branch stay on ${newest}\n`,
       );
     }
   } catch (err) {
