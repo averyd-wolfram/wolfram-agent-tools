@@ -5095,13 +5095,17 @@ heading("The bundle is the deliverable, and the suite drives the bundle");
   {
     const sdk = createRequire(join(root, "node_modules", "@modelcontextprotocol", "sdk", "package.json"));
     const fastUri = createRequire(sdk.resolve("ajv"))("fast-uri");
-    let refused = false;
+    let refused = "";
     try {
       fastUri.resolve("", "1bad:scheme");
-    } catch {
-      refused = true;
+    } catch (err) {
+      refused = String(err?.message ?? err);
     }
-    check("the URI parser the bundle inlines refuses a malformed scheme, as fast-uri 3.1.8 does (#26)", refused);
+    check(
+      "the URI parser the bundle inlines refuses a malformed scheme, as fast-uri 3.1.8 does (#26)",
+      /scheme is malformed/.test(refused),
+      refused || "accepted",
+    );
   }
 
   // Two builds of one version are two programs. The socket was keyed on the
