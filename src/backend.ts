@@ -516,6 +516,7 @@ export function brokerLaunch(
     spawnArgs: [process.argv[1] ?? "", "broker", "--address", address, "--kernel", install.bin],
     spawnEnv: { ...process.env, WOLFRAM_MCP_SHARE: "0", MCP_SERVER_NAME: config.serverName },
     log,
+    startTimeoutMs: config.startTimeoutMs,
   };
 }
 

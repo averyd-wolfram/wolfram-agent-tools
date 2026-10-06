@@ -90,7 +90,7 @@ export {
   type PreferredKernel,
   type WolframScriptConfig,
 } from "./wolframscript.js";
-export { BrokerBackend, type BrokerClientOptions } from "./broker-client.js";
+export { BrokerBackend, brokerCeilingMs, type BrokerClientOptions } from "./broker-client.js";
 export { startBroker, type BrokerOptions } from "./broker-server.js";
 export { brokerAddress, socketFault, BROKER_PROTOCOL } from "./broker-protocol.js";
 export { FilteringStdioTransport, type FilteringStdioTransportOptions } from "./transport.js";

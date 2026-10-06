@@ -3849,6 +3849,10 @@ heading("A handshake is bounded by the start timeout, not the SDK's default");
     if (request.method === "initialize") sent.push(options?.timeout);
     return original.call(this, request, schema, options);
   };
+  // The remainder a preparation hands ensure(), not the configured timeout,
+  // is what bounds this start, so that is what the request must carry: a
+  // second past it, exactly. Matched by value, since the wrapper sees every
+  // client in this process.
   const session = new lib.KernelSession({
     bin: fakeKernel,
     serverName: "WolframLanguage",
@@ -3858,15 +3862,33 @@ heading("A handshake is bounded by the start timeout, not the SDK's default");
     log: () => {},
   });
   try {
-    await session.ensure();
+    await session.ensure(90_000);
   } finally {
     Client.prototype.request = original;
     await session.stop();
   }
   check(
-    "initialize is sent with a timeout past the start timeout, so the handshake's own timer is what fires",
-    sent.length === 1 && typeof sent[0] === "number" && sent[0] > 120_000,
+    "initialize is sent with a timeout a beat past the start's own, so the handshake's own timer is what fires",
+    sent.includes(91_000),
     `initialize timeout ${sent.map(String).join(", ") || "none sent"}`,
+  );
+
+  // And a session waiting on a broker gives it as long: an op with no deadline
+  // of its own may first wait for the broker to start a kernel, bounded by the
+  // start timeout. The ceiling covered only the op, and fitted only while the
+  // SDK cut every handshake at 60s, so a cold start longer than a minute
+  // outlived it and the session gave up on a broker that was only starting.
+  const ceiling = lib.brokerCeilingMs;
+  check(
+    "a session waits for a broker's op long enough for the broker to start a kernel first",
+    typeof ceiling === "function" &&
+      ceiling(undefined, 120_000) > 120_000 + 60_000 &&
+      ceiling(undefined, 600_000) > 600_000 + 60_000,
+    typeof ceiling === "function" ? `${ceiling(undefined, 120_000)}ms on a 120s start timeout` : "not exported",
+  );
+  check(
+    "while an op with a ceiling of its own keeps it, and 0 still means none",
+    typeof ceiling === "function" && ceiling(300_000, 120_000) === 302_000 && ceiling(0, 120_000) === 0,
   );
 }
 
