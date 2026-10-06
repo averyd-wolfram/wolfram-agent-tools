@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.2](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.1...v0.1.2) (2026-10-06)
+
+
+### Bug Fixes
+
+* bound a kernel's handshake by the start timeout, not the MCP SDK's 60s default ([#14](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/14)) ([5e78259](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/5e78259c24cf013a7e0980ca6eec0d612844a74a))
+* fail a server that will not start at once, and back off for seconds rather than ten minutes ([#18](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/18)) ([5ae701a](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/5ae701a7da37d8ec30331a0fad33c3fb9e43c755))
+* hand on a start deadline's remainder from one read of the clock, so a spent one starts nothing ([#21](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/21)) ([485a0ea](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/485a0eac439b933c59d2fbee8d96e8f7ff764bdc))
+* update five advised production dependencies, among them fast-uri, which the bundle inlines ([#27](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/27)) ([d17034e](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/d17034e2b1697a5c55b2b88bf07ea9b01c283a92))
+
 ## [0.1.1](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.0...v0.1.1) (2026-10-06)
 
 
