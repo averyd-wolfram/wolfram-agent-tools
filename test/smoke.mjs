@@ -3239,8 +3239,8 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
   check(
     "a deadline too nearly spent for a kernel to start spawns none, and fails as the deadline",
     witnessLog.some((m) => /starting kernel/.test(m)) &&
-      spentOutcome?.name === "PreparationTimeout" && /nothing was started/.test(spentOutcome?.message ?? "") &&
-      zeroOutcome?.name === "PreparationTimeout" && /nothing was started/.test(zeroOutcome?.message ?? "") &&
+      spentOutcome?.name === "PreparationTimeout" && /too little for this to begin/.test(spentOutcome?.message ?? "") &&
+      zeroOutcome?.name === "PreparationTimeout" && /too little for this to begin/.test(zeroOutcome?.message ?? "") &&
       spawned === 0,
     `${spentOutcome?.name ?? spentOutcome}; ${spawned} kernel(s) spawned`,
   );

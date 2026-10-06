@@ -188,24 +188,27 @@ export class Deadline {
     const left = this.remaining();
     const floor = Math.max(1, Math.min(minimumMs, this.totalMs / 2));
     if (left < floor) {
-      // Said plainly: nothing was tried, so "ran out while starting" alone
-      // read as though a start had been under way and failed.
+      // Said plainly: this stage did not begin, so "ran out while starting"
+      // alone read as though it had been under way and failed. What earlier
+      // stages started is theirs to say.
       throw new PreparationTimeout(
         stage,
         this.totalMs,
-        `${Math.max(0, Math.round(left))}ms were left, too little to begin, so nothing was started`,
+        `${Math.round(left)}ms were left, too little for this to begin`,
       );
     }
     return left;
   }
 
   /**
-   * Throws the timeout for `stage` if nothing is left. Kept for callers of
-   * the library; `handOn` is the one to use when the remainder is then handed
-   * on, since this then `remaining()` is two reads of the clock (#11).
+   * Throws the timeout for `stage` if the deadline has already passed —
+   * unchanged, for callers of the library. `handOn` is the one to use when
+   * the remainder is then handed on, since this then `remaining()` is two
+   * reads of the clock (#11).
    */
   check(stage: string): void {
-    this.handOn(stage);
+    if (this.signal.aborted) throw new PreparationStopped();
+    if (this.remaining() <= 0) throw new PreparationTimeout(stage, this.totalMs);
   }
 }
 
