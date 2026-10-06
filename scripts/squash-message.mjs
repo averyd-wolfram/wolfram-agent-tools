@@ -224,7 +224,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
         "around the word that lands at a line's start. A line may not begin with a word " +
         "whose parenthesis holds another or does not close on that line, `f(g())`, nor " +
         "read like `type: …` where a commit could start. Write a breaking change as `!` in " +
-        "the title. A BEGIN_COMMIT_OVERRIDE … END_COMMIT_OVERRIDE block replaces the whole " +
+        "the title: `BREAKING-CHANGE:` anywhere in a description, code spans too, makes " +
+        "one. A BEGIN_COMMIT_OVERRIDE … END_COMMIT_OVERRIDE block replaces the whole " +
         "message and may list several commits; release-please finds its markers wherever " +
         "they appear, code spans too, so name them in a description only to use them.\n",
     );
