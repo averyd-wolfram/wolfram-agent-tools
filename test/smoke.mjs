@@ -3953,37 +3953,6 @@ heading("Stopping reaches a preparation wherever it is");
           skewed.backoff() !== null,
         skewedOutcome.slice(0, 90),
       );
-
-      // But only that timer is the deadline's. A prepare() that joins a start
-      // already under way waits on that start's configured timeout, and its
-      // expiry is the handshake's own: blaming the deadline named the wrong
-      // budget and the wrong setting. Told apart by which call began the start,
-      // not by comparing timeouts, which coincide here: a frozen deadline clock
-      // keeps the remainder at exactly the joined start's 4s.
-      const local = new lib.LocalBackend({
-        bin: fakeKernel,
-        serverName: "WolframLanguage",
-        idleMs: 60_000,
-        // Long enough that prepare() reliably arrives while it is under way,
-        // even on a loaded runner; well short of the deadline it joins under.
-        startTimeoutMs: 4_000,
-        clientInfo: { name: "smoke", version: "0" },
-        log: () => {},
-      });
-      // Queued work reaches ensure() a beat later, so wait for its kernel:
-      // only then is there a start for prepare() to join.
-      const beforeJoin = fakePids("-run PacletSymbol");
-      const joinedStart = local.capabilities().catch(() => {});
-      await settle(() => appeared(beforeJoin, "-run PacletSymbol").length > 0);
-      const frozen = Date.now();
-      const joined = await local.prepare(new lib.Deadline(4_000, () => frozen)).then(() => "ready", (e) => e.message);
-      await joinedStart;
-      await local.stop();
-      check(
-        "a start prepare() merely joined is reported as itself, not as the deadline",
-        /did not complete MCP initialization within 4s/.test(joined) && !/not ready within/.test(joined),
-        joined.slice(0, 90),
-      );
     },
   );
 }

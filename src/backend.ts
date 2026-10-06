@@ -180,23 +180,23 @@ export class LocalBackend implements KernelBackend {
    * Start the kernel within what the deadline has left. Its own handshake
    * timer gets that remainder, so on expiry it tears the kernel down through
    * the transport as any failed start does: this kernel is ours to stop.
+   *
+   * Must be the first call on this backend, as `DeferredBackend` guarantees:
+   * it builds a fresh one per preparation and lets nothing reach it until this
+   * returns. A start already under way would be joined, and it runs on the
+   * configured timeout, so its expiry would be reported as the deadline's.
    */
   async prepare(deadline: Deadline): Promise<void> {
     deadline.check("starting the kernel");
     // A beat of grace, so the handshake's own timer fires first: its error
-    // carries the kernel's last output, which names the actual cause. Only a
-    // start this call begins runs on the remainder, so only its timeout is the
-    // deadline's: ensure() may instead join a start already under way, which
-    // runs on the configured timeout and must be reported as itself. Read
-    // before ensure(), which begins a start synchronously.
-    const joining = this.#session.starting;
-    const remainder = deadline.remaining();
+    // carries the kernel's last output, which names the actual cause. That
+    // timer is the deadline's remainder, so its expiry is the deadline's.
     await deadline.within(
       "starting the kernel",
-      this.#session.ensure(remainder),
+      this.#session.ensure(deadline.remaining()),
       undefined,
       1_000,
-      (err) => !joining && err instanceof Error && err.cause instanceof HandshakeTimeout,
+      (err) => err instanceof Error && err.cause instanceof HandshakeTimeout,
     );
   }
 

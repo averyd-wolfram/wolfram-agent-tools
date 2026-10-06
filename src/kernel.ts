@@ -377,14 +377,6 @@ export class KernelSession {
   }
 
   /**
-   * Whether a start is under way, which an `ensure()` now would join rather
-   * than begin — and so would wait on that start's timeout, not its own.
-   */
-  get starting(): boolean {
-    return this.#starting !== null;
-  }
-
-  /**
    * Start the kernel if it is not already up, collapsing concurrent starts.
    *
    * `startTimeoutMs` bounds this start's handshake in place of the configured
