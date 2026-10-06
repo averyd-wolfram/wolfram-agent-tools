@@ -10,16 +10,15 @@ in `docs/design.md`.
 - **`v0.1.1` is released**, with the bundle, the plugin archive and `SHA256SUMS.txt`. Below
   1.0.0 every release is marked a GitHub pre-release, which `releases/latest` skips, so link a
   release by its tag (`releases/download/v0.1.1/...`), never by `latest`.
-- **0.1.2 waits on #34.** release-please's PR #17 holds the fixes in the `0.1.2` milestone: #9
-  (a kernel's handshake bounded by the start timeout, not the MCP SDK's default), #5 (a server
-  that will not start fails at once, with a short back-off — on the shared path only for
-  requests after the first failure; a simultaneous burst is #19), #11 (a start deadline handed
-  on from one read, so a spent one starts nothing), #26 (five advised production dependencies
-  updated, `fast-uri` among them, the one the bundle inlines; PR #27), #15 (each time setting
-  held to 24 days, so one too long for a timer no longer fires at once; PR #28) and #10 (a
-  start's budgets said truthfully, in sentences; PR #30). Still to come: #34, every kernel tool
-  call cut at the MCP SDK's 60 s default whatever the call ceiling — reproduced, and the
-  maintainer put it in 0.1.2.
+- **0.1.2 is ready to release.** release-please's PR #17 holds every fix in the `0.1.2`
+  milestone: #9 (a kernel's handshake bounded by the start timeout, not the MCP SDK's default),
+  #5 (a server that will not start fails at once, with a short back-off — on the shared path
+  only for requests after the first failure; a simultaneous burst is #19), #11 (a start deadline
+  handed on from one read, so a spent one starts nothing), #26 (five advised production
+  dependencies updated, `fast-uri` among them, the one the bundle inlines; PR #27), #15 (each
+  time setting held to 24 days, so one too long for a timer no longer fires at once; PR #28),
+  #10 (a start's budgets said truthfully, in sentences; PR #30) and #34 (a kernel tool call no
+  longer cut at the MCP SDK's 60 s default; PR #37).
 - **#21 is in #17 by its override.** release-please could not parse #21's squash commit, whose
   body was its PR description; the `BEGIN_COMMIT_OVERRIDE` block added to #21's description
   (2026-10-06, with the maintainer's approval) restored it on the next run, as confirmed after
@@ -40,12 +39,10 @@ in `docs/design.md`.
 
 ## What to do next, in order
 
-1. **Finish and release 0.1.2** (milestone `0.1.2`): **#34**, a `fix:` — pass the SDK a
-   `timeout` that cannot fire before this server's own deadline, on the private and the broker
-   path, with a fake-kernel check of a call longer than 60 s on each. Then, with the
-   maintainer's go-ahead, check #17's changelog lists every fix in the milestone, merge it, and
-   the same run tags and publishes `v0.1.2`. Download the assets and check `SHA256SUMS.txt` and
-   the bundle's `--version`, as for 0.1.1. Close the milestone.
+1. **Release 0.1.2** (milestone `0.1.2`), with the maintainer's go-ahead: check #17's
+   changelog lists every fix above, merge it, and the same run tags and publishes `v0.1.2`.
+   Download the assets and check `SHA256SUMS.txt` and the bundle's `--version`, as for 0.1.1.
+   Close the milestone.
 2. **Design the kernel-start cluster before code** (`needs design`, `area: startup` and
    `area: broker`): #22 (back off by what failed — a start refused for lack of time is not a
    broken installation), #20 (any failed start in the pool, and a private restart after idling),
@@ -61,7 +58,9 @@ in `docs/design.md`.
    compile fails the whole `tools/list`). #29 (how to hear of the next advisory against what
    the bundle inlines) needs a design too; an audit gate tried in #27 was reverted. Smaller,
    from 0.1.2's reviews: #33 (timers fed by library-built options can still overflow; clamp at
-   each timer) and #35 (a numeric setting with a unit suffix is misread silently).
+   each timer), #35 (a numeric setting with a unit suffix is misread silently) and #38
+   (durations read three ways across the private path, the broker client and
+   `wolfram_status`).
 3. **Restructure the agent instructions** (#36, `needs design`): a trimmed `AGENTS.md`, the
    handoff's durable rules moved out of it, and the project rules now in the maintainer's
    private Claude Code memory moved into the repository. Agree the design first.
