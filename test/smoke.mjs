@@ -3239,10 +3239,42 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
   check(
     "a deadline too nearly spent for a kernel to start spawns none, and fails as the deadline",
     witnessLog.some((m) => /starting kernel/.test(m)) &&
-      spentOutcome?.name === "PreparationTimeout" && /too little for this to begin/.test(spentOutcome?.message ?? "") &&
-      zeroOutcome?.name === "PreparationTimeout" && /too little for this to begin/.test(zeroOutcome?.message ?? "") &&
+      spentOutcome instanceof lib.PreparationTimeout && /too little for this to begin/.test(spentOutcome?.message ?? "") &&
+      zeroOutcome instanceof lib.PreparationTimeout && /too little for this to begin/.test(zeroOutcome?.message ?? "") &&
       spawned === 0,
     `${spentOutcome?.name ?? spentOutcome}; ${spawned} kernel(s) spawned`,
+  );
+
+  // A start refused for lack of time tried nothing, and the next call has a
+  // fresh deadline, so it backs off for seconds, not the ten minutes a broken
+  // installation gets — and says why, rather than pointing at the
+  // installation. The factory spends 19.5s of a 20s deadline, as a slow
+  // broker attach would, on a clock the suite controls.
+  let lateNow = Date.now();
+  const lateLog = [];
+  const tooLate = new lib.DeferredBackend(
+    async (deadline) => {
+      lateNow += 19_500;
+      return lib.createBackend(
+        { ...lib.loadConfig(() => {}), share: false, startTimeoutMs: 20_000 },
+        { bin: fakeKernel, version: null, source: "suite" },
+        (m) => lateLog.push(m),
+        deadline,
+      );
+    },
+    () => {},
+    { startTimeoutMs: 20_000, bin: fakeKernel, clock: () => lateNow },
+  );
+  const lateFirst = await tooLate.listTools().then(() => "served", (e) => e.message);
+  const lateWait = tooLate.backoff();
+  const lateSecond = await tooLate.listTools().then(() => "served", (e) => e.message);
+  await tooLate.stop();
+  check(
+    "a start refused for lack of time backs off for seconds, saying the next attempt has the whole deadline",
+    /too little for this to begin/.test(lateFirst) && lateWait !== null && lateWait.remainingMs <= 15_000 &&
+      /next attempt has the whole of it again/.test(lateSecond) &&
+      !lateLog.some((m) => /starting kernel/.test(m)),
+    `back-off ${lateWait ? Math.round(lateWait.remainingMs / 1000) : "none"}s: ${lateSecond.replace(/\s+/g, " ").slice(0, 70)}`,
   );
 
   // But the floor is capped by the start timeout itself: one of a second must

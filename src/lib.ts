@@ -83,8 +83,6 @@ export {
   PreparationStopped,
   PreparationTimeout,
   PREPARATION_BACKOFF_MS,
-  MIN_START_MS,
-  NOT_RESOLVED_BACKOFF_MS,
   type BackoffState,
 } from "./prepare.js";
 export {

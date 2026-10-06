@@ -37,6 +37,9 @@ import {
   formatWait,
   MIN_START_MS,
   NOT_RESOLVED_ADVICE,
+  TOO_LATE_ADVICE,
+  TOO_LATE_BACKOFF_MS,
+  TooLateToBegin,
   NOT_RESOLVED_BACKOFF_MS,
   PreparationStopped,
   PreparationTimeout,
@@ -383,14 +386,16 @@ export class DeferredBackend implements KernelBackend {
         // or installing its paclet, which the back-off cannot see: the full
         // window held that fix off for ten minutes (issue #5). So it gets a
         // short one, which still spares a seat on every call meanwhile.
+        // Neither of these is the installation, so the doctor and an install
+        // change would point the user at the wrong thing, and neither warrants
+        // the full window: one is fixed by the server, the other tried nothing.
         const unresolved = isServerNotResolved(err);
+        const tooLate = err instanceof TooLateToBegin;
         this.#backoff.record(
           this.#identity(),
           err,
-          unresolved ? NOT_RESOLVED_BACKOFF_MS : undefined,
-          // Not the installation: the doctor and an install change point
-          // the user at the wrong thing.
-          unresolved ? NOT_RESOLVED_ADVICE : undefined,
+          unresolved ? NOT_RESOLVED_BACKOFF_MS : tooLate ? TOO_LATE_BACKOFF_MS : undefined,
+          unresolved ? NOT_RESOLVED_ADVICE : tooLate ? TOO_LATE_ADVICE : undefined,
         );
         this.#log?.(
           `preparation failed; not retrying for ${formatWait(this.#backoffWindow())}: ${errorText(err)}`,
