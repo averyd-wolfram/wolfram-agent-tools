@@ -12,9 +12,14 @@ in `docs/design.md`.
   release by its tag (`releases/download/v0.1.1/...`), never by `latest`.
 - **0.1.2 is being collected.** release-please's PR #17 holds the fixes merged since, and the
   `0.1.2` milestone shows the release: #9 (a kernel's handshake bounded by the start timeout,
-  not the MCP SDK's 60 s), #5 (a server that will not start fails at once, with a 15 s back-off
-  on both paths), #11 (a start deadline handed on from one read, so a spent one starts nothing).
-  Still in it: #15 and #10.
+  not the MCP SDK's default), #5 (a server that will not start fails at once, with a short
+  back-off — on the shared path only for requests after the first failure; a simultaneous burst
+  is #19), #11 (a start deadline handed on from one read, so a spent one starts nothing). Still
+  in it: #24, #15 and #10.
+- **#21's commit is missing from #17.** release-please could not parse its squash message (the
+  PR description is the body, and one of its lines broke the parser), so #17's changelog lacks
+  #11 and no pre-release with it was built (#24). Adding a `BEGIN_COMMIT_OVERRIDE` block to
+  #21's description restores it on the next run; that edit needs the maintainer.
 - **The backlog is GitHub issues** (`gh issue list`), labelled by type, `needs design` and area
   (*Working here* below). Other agents file there too, notably the downstream plugin's.
 - **The release pipeline versions itself** from the commit types on `main`. `docs/releasing.md`
@@ -24,25 +29,29 @@ in `docs/design.md`.
 
 ## What to do next, in order
 
-1. **Finish 0.1.2** (milestone `0.1.2`), each a `fix:` PR:
-   - **#15**, clamp the time settings in `config.ts` — a maximum, since a start timeout above
-     about 24.8 days overflows Node's timers and every start fails at once, and a minimum, since
-     a start timeout of 0 still spawns kernels with no time on the paths that read the setting
-     directly (the broker's pool, `doctor`, a private restart after idling). Probably the call
-     timeout and idle minutes too.
-   - **#10**, the start-timeout message: the "within 0s" detail, and a refused start reading
-     "time ran out while starting the kernel. 0ms were left, too little for this to begin".
+1. **Finish 0.1.2** (milestone `0.1.2`):
+   - **#21's override** (above), then **#24**, a `ci:` PR: a required check that parses the
+     squash message — title and description — as release-please will, so no fix is dropped
+     silently again. Before the next `fix:` PR merges.
+   - **#15**, a `fix:`: clamp the time settings in `config.ts` to what Node's timers can hold —
+     a start timeout too large overflows them and every start fails at once. Probably the call
+     timeout and idle minutes too. A *minimum* start timeout belongs with #22's design, where it
+     meets the start floor, not here.
+   - **#10**, a `fix:`: the start-timeout message — the handshake's detail rounding to "within
+     0s", and a refused start reading "time ran out while starting the kernel. …too little for
+     this to begin".
 
-   Then merge #17: the same run tags and publishes `v0.1.2` with its assets. Download them and
-   check `SHA256SUMS.txt` and the bundle's `--version`, as for 0.1.1.
+   Then check #17's changelog lists every fix in the milestone, merge it, and the same run tags
+   and publishes `v0.1.2`. Download the assets and check `SHA256SUMS.txt` and the bundle's
+   `--version`, as for 0.1.1.
 2. **Design the kernel-start cluster before code** (`needs design`, `area: startup` and
    `area: broker`): #22 (back off by what failed — a start refused for lack of time is not a
    broken installation), #20 (any failed start in the pool, and a private restart after idling),
    #19 (a burst for a server that will not start, at a shared broker), #16 (the session guessing
    how long a broker spends starting a kernel) and #12 (one timer for a start). #22 and #19
    record what #21 and #18 tried, why each attempt was reverted, and the constraints a design
-   must keep. Write it up in the plan first; the pool shapes every session's latency and licence
-   use. #3 (warm kernels serve a paclet's old server after an upgrade) wants the same treatment,
+   must keep. Write it up in `docs/plugin-plan.md` first — the one plan; the pool shapes every
+   session's latency and licence use. A minimum start timeout (#15's other half) is part of it. #3 (warm kernels serve a paclet's old server after an upgrade) wants the same treatment,
    with #4 and #6 (`area: paclet`).
 3. **MA's experiments**, each a ledger row (plan §5 MA, *Order of work*): Codex installing a
    Claude Code marketplace entry and trusting our hook; Cursor importing an installed Claude Code
@@ -75,9 +84,16 @@ in `docs/design.md`.
   to the draft, then publishes it. A docs-only merge builds nothing.
 - **No personal token.** Nothing `GITHUB_TOKEN` does starts another workflow, so it is all one
   run; "Allow GitHub Actions to create and approve pull requests" must be on.
+- **The PR description is part of the commit.** Squash merges take the title as the subject and
+  the description as the body, and release-please parses both: a description it cannot parse
+  drops the commit from the release without failing anything (#24). Until #24's check exists,
+  keep descriptions free of lines that look like `type(scope):`, and read the release run's log
+  after a merge for `commit could not be parsed`.
 - **Holding a release.** The release PR collects every bumping merge until it is merged, so a
   patch release can wait for a batch: give it a milestone holding its fix issues, their PRs and
-  the release PR, and merge the release PR when the milestone's issues are closed.
+  the release PR, and merge the release PR when the milestone's issues are closed and its
+  changelog lists each of their fixes. A `feat:` merged meanwhile turns the held patch into the
+  next minor.
 
 ## Working here
 
@@ -95,9 +111,10 @@ in `docs/design.md`.
   can keep producing them for round after round. When the fix itself is settled and the rounds
   are about the new design, revert that design, record what was tried and found in an issue
   (#19, #22), and merge the fix.
-- **Issues and labels.** Label every issue and PR as it is filed: one type (`bug`,
-  `enhancement`, `documentation`, `refactor`, `ci`), `needs design` when the approach must be
-  agreed before code, and its areas (`area: startup` — deadlines, handshake, back-off;
+- **Issues and labels.** Label every issue and PR as it is filed: a type where one fits (`bug`,
+  `enhancement`, `documentation`, `refactor`, `ci`; release-please's PRs carry its own
+  `autorelease:` labels), `needs design` when the approach must be agreed before code, and its
+  areas (`area: startup` — deadlines, handshake, back-off;
   `area: broker` — the shared broker and its pool; `area: paclet` — paclet-declared servers and
   the capability cache; `area: distribution` — install, packaging, release). File issues in the
   existing ones' shape: what happens, repro, expected, suggested fix.
@@ -115,8 +132,8 @@ in `docs/design.md`.
 - **A running session keeps the server it loaded,** however often you rebuild. Its broker shows
   as a `wolfram-mcp-server.mjs broker` or `scripts/mcp-server.mjs broker` process. Never kill
   brokers broadly (`AGENTS.md`).
-- **The suite can outlast a ten-minute tool call.** Run `npm test` in the background and read
-  its log, rather than racing it with a foreground timeout.
+- **The suite can outlast a foreground tool call.** Run `npm test` in the background and read
+  its log, rather than racing it with a timeout.
 - **Real-kernel suites cost licence seats.** `test:wl`, `test:custom` and `test:lsp` are opt-in.
   Point a run at another installation with `WOLFRAMSCRIPT_KERNELPATH`, which writes nothing.
 - **Agree with the maintainers before changing the installed paclets.**
