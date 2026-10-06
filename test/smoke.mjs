@@ -3245,49 +3245,6 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
     `${spentOutcome?.name ?? spentOutcome}; ${spawned} kernel(s) spawned`,
   );
 
-  // A start refused for lack of time tried nothing, and the next call has a
-  // fresh deadline, so it backs off for seconds, not the ten minutes a broken
-  // installation gets — and says why, rather than pointing at the
-  // installation. The factory spends 19.5s of a 20s deadline, as a slow
-  // broker attach would, on a clock the suite controls.
-  let lateNow = Date.now();
-  const lateLog = [];
-  const tooLate = new lib.DeferredBackend(
-    async (deadline) => {
-      lateNow += 19_500;
-      return lib.createBackend(
-        { ...lib.loadConfig(() => {}), share: false, startTimeoutMs: 20_000 },
-        { bin: fakeKernel, version: null, source: "suite" },
-        (m) => lateLog.push(m),
-        deadline,
-      );
-    },
-    () => {},
-    { startTimeoutMs: 20_000, bin: fakeKernel, clock: () => lateNow },
-  );
-  const lateFirst = await tooLate.listTools().then(() => "served", (e) => e.message);
-  const lateWait = tooLate.backoff();
-  const lateSecond = await tooLate.listTools().then(() => "served", (e) => e.message);
-  // Refused again once the window has passed — the stages before the start
-  // are slow every time — and the full back-off follows, rather than the
-  // short one repeated for good.
-  lateNow += 16_000;
-  await tooLate.listTools().catch(() => {});
-  const lateAgain = tooLate.backoff();
-  await tooLate.stop();
-  check(
-    "and a second refusal in a row waits the full back-off",
-    lateAgain !== null && lateAgain.remainingMs > 60_000,
-    `back-off ${lateAgain ? Math.round(lateAgain.remainingMs / 1000) : "none"}s`,
-  );
-  check(
-    "a start refused for lack of time backs off for seconds, saying the next attempt has the whole deadline",
-    /too little for this to begin/.test(lateFirst) && lateWait !== null && lateWait.remainingMs <= 15_000 &&
-      /next attempt has whole again/.test(lateSecond) &&
-      !lateLog.some((m) => /starting kernel/.test(m)),
-    `back-off ${lateWait ? Math.round(lateWait.remainingMs / 1000) : "none"}s: ${lateSecond.replace(/\s+/g, " ").slice(0, 70)}`,
-  );
-
   // But the floor is capped by the start timeout itself: one of a second must
   // still try, where a fixed second-long floor refused every start.
   const shortLog = [];

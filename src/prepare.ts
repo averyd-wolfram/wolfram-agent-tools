@@ -42,17 +42,6 @@ export const NOT_RESOLVED_BACKOFF_MS = 15_000;
  */
 export const MIN_START_MS = 1_000;
 
-/**
- * How long a preparation refused for lack of time is not retried: the next
- * call has a fresh deadline, so only long enough that a client retrying in a
- * loop does not spend every earlier stage again at once.
- */
-export const TOO_LATE_BACKOFF_MS = 15_000;
-
-/** What a refused start says about why, in place of the installation advice. */
-export const TOO_LATE_ADVICE =
-  "the stages before the start used most of WOLFRAM_MCP_START_TIMEOUT_SECONDS, which the next attempt has whole again; if it is refused again, it waits the full back-off, so raise the setting or run doctor";
-
 /** What ends that wait sooner, said by both paths, so they cannot drift apart. */
 export const NOT_RESOLVED_ADVICE =
   "meanwhile, check the server MCP_SERVER_NAME names: create it, install the paclet " +
@@ -75,21 +64,6 @@ export class PreparationTimeout extends Error {
     );
     this.name = "PreparationTimeout";
     this.stage = stage;
-  }
-}
-
-/**
- * A stage refused because too little of the deadline was left for it to begin.
- *
- * Still a timeout — the deadline did run out, in the stages before — but not
- * a failure of the kernel or the installation: nothing was tried, and the next
- * call has a fresh deadline. So it gets a short back-off, not the full one
- * with its pointer at the installation.
- */
-export class TooLateToBegin extends PreparationTimeout {
-  constructor(stage: string, totalMs: number, leftMs: number) {
-    super(stage, totalMs, `${Math.floor(leftMs)}ms were left, too little for this to begin`);
-    this.name = "TooLateToBegin";
   }
 }
 
@@ -213,10 +187,16 @@ export class Deadline {
     if (this.signal.aborted) throw new PreparationStopped();
     const left = this.remaining();
     const floor = Math.max(1, Math.min(minimumMs, this.totalMs / 2));
-    // Said plainly: this stage did not begin, so "ran out while starting"
-    // alone read as though it had been under way and failed. What earlier
-    // stages started is theirs to say.
-    if (left < floor) throw new TooLateToBegin(stage, this.totalMs, left);
+    if (left < floor) {
+      // Said plainly: this stage did not begin, so "ran out while starting"
+      // alone read as though it had been under way and failed. What earlier
+      // stages started is theirs to say.
+      throw new PreparationTimeout(
+        stage,
+        this.totalMs,
+        `${Math.floor(left)}ms were left, too little for this to begin`,
+      );
+    }
     return left;
   }
 

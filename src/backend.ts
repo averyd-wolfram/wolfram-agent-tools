@@ -37,9 +37,6 @@ import {
   formatWait,
   MIN_START_MS,
   NOT_RESOLVED_ADVICE,
-  TOO_LATE_ADVICE,
-  TOO_LATE_BACKOFF_MS,
-  TooLateToBegin,
   NOT_RESOLVED_BACKOFF_MS,
   PreparationStopped,
   PreparationTimeout,
@@ -314,8 +311,6 @@ export class DeferredBackend implements KernelBackend {
   #abort: AbortController | null = null;
   #stopped = false;
   #onReady: KernelReadyHandler | undefined;
-  /** Whether the last preparation was refused for lack of time. */
-  #lastTooLate = false;
 
   constructor(
     factory: (deadline: Deadline) => Promise<KernelBackend>,
@@ -377,7 +372,6 @@ export class DeferredBackend implements KernelBackend {
       (backend) => {
         this.#resolved = backend;
         this.#resolving = null;
-        this.#lastTooLate = false;
         return backend;
       },
       (err: unknown) => {
@@ -389,8 +383,15 @@ export class DeferredBackend implements KernelBackend {
         // or installing its paclet, which the back-off cannot see: the full
         // window held that fix off for ten minutes (issue #5). So it gets a
         // short one, which still spares a seat on every call meanwhile.
-        const policy = this.#backoffPolicy(err);
-        this.#backoff.record(this.#identity(), err, policy.windowMs, policy.advice);
+        const unresolved = isServerNotResolved(err);
+        this.#backoff.record(
+          this.#identity(),
+          err,
+          unresolved ? NOT_RESOLVED_BACKOFF_MS : undefined,
+          // Not the installation: the doctor and an install change point
+          // the user at the wrong thing.
+          unresolved ? NOT_RESOLVED_ADVICE : undefined,
+        );
         this.#log?.(
           `preparation failed; not retrying for ${formatWait(this.#backoffWindow())}: ${errorText(err)}`,
         );
@@ -398,27 +399,6 @@ export class DeferredBackend implements KernelBackend {
       },
     );
     return this.#resolving;
-  }
-
-  /**
-   * How long a failed preparation waits, and what fixes it, by what it was.
-   * A server that would not start is fixed by the server, so the doctor and an
-   * installation change point the wrong way. A start refused for lack of time
-   * is the stages before it having used the deadline: once, a slow moment the
-   * next attempt likely clears, so a short wait; twice running, those stages
-   * are too slow every time — or the timeout is set too short — so the full
-   * window and the usual pointers, rather than repeating them every few
-   * seconds for good.
-   */
-  #backoffPolicy(err: unknown): { windowMs?: number; advice?: string } {
-    const tooLate = err instanceof TooLateToBegin;
-    const again = tooLate && this.#lastTooLate;
-    this.#lastTooLate = tooLate;
-    if (isServerNotResolved(err)) {
-      return { windowMs: NOT_RESOLVED_BACKOFF_MS, advice: NOT_RESOLVED_ADVICE };
-    }
-    if (tooLate && !again) return { windowMs: TOO_LATE_BACKOFF_MS, advice: TOO_LATE_ADVICE };
-    return {};
   }
 
   #backoffWindow(): number {
