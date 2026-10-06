@@ -1,0 +1,18 @@
+{
+  "name": "wolfram-agent-tools",
+  "description": "The wolfram plugin's latest release, from averyd-wolfram/wolfram-agent-tools",
+  "owner": {
+    "name": "Avery Davis",
+    "email": "averyd@wolfram.com"
+  },
+  "metadata": {
+    "description": "The wolfram plugin's latest release, from averyd-wolfram/wolfram-agent-tools"
+  },
+  "plugins": [
+    {
+      "name": "wolfram",
+      "source": "./plugin",
+      "description": "Wolfram Language for Claude Code — evaluation, notebooks and Wolfram|Alpha through a seat-sharing MCP server, and code intelligence from Wolfram's own LSPServer"
+    }
+  ]
+}
