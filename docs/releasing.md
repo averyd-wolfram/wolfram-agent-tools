@@ -222,15 +222,11 @@ just quietly fails to do its job, which is worse.
   server-side half of what `public-content` checks.
 - **Dependabot alerts and security updates.** Settings → Code security: turn on "Dependabot
   alerts" and "Dependabot security updates" (or `gh api -X PUT repos/<owner>/<repo>/vulnerability-alerts`
-  then `gh api -X PUT repos/<owner>/<repo>/automated-security-fixes`). `.github/dependabot.yml`
-  sets the titles both kinds of Dependabot PR carry: `fix(deps):` for a production dependency,
-  which the bundle inlines, so its update makes a release; `chore(deps-dev):` and `ci(deps):`
-  for what doesn't ship. A dev update can move a lockfile entry the production tree shares;
-  `commit-types` then says it ships. Retitling can't fix that, since it reads Dependabot's commit
-  too: close the PR and make the same update in a `fix(deps):` PR of your own, since what a
-  production install gets did change. Without the settings, an advisory against a dependency
-  the bundle ships reaches nobody until someone happens to look, which is how 0.1.1 shipped
-  `fast-uri` with known advisories (#26, #29).
+  then `gh api -X PUT repos/<owner>/<repo>/automated-security-fixes`). Without them, an advisory
+  against a dependency the bundle ships reaches nobody until someone happens to look, which is
+  how 0.1.1 shipped `fast-uri` with known advisories (#26, #29). `.github/dependabot.yml`'s
+  header says how its PR titles fit the release pipeline, and what to do when `commit-types`
+  rejects one.
 - **Private vulnerability reporting.** Settings → Code security → "Private vulnerability
   reporting". `SECURITY.md` sends reporters there; with it off, its *Report a vulnerability*
   button does not exist and the only way left to report is a public issue.

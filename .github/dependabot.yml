@@ -1,50 +1,41 @@
-# Dependabot keeps the direct npm dependencies and the workflows' actions
-# current, and with the repository's Dependabot alerts and security updates on
-# (docs/releasing.md), it opens a PR for a published advisory too, transitive
-# dependencies included (#29).
+# Dependabot: weekly updates for the npm dependencies and the workflows'
+# actions, and, with the repository's Dependabot alerts and security updates
+# on (docs/releasing.md), a PR for each published advisory (#29).
 #
-# Its PR titles are Conventional Commits that pr-title.yml and commit-types
-# accept, and that release-please versions correctly. A production dependency
-# ships, since the bundle inlines it, so its update is `fix(deps):` and makes a
-# release (#26); a major one that changes behaviour can be retitled
-# `feat(deps):`, which commit-types also accepts. A development dependency is
-# `chore(deps-dev):` and an action `ci(deps):`, which make none; esbuild's and
-# TypeScript's updates still change the bundle's bytes, which reach users with
-# the next release. The colon follows the prefix by itself; `include: scope`
-# adds `deps` or `deps-dev`. Security updates take the same titles.
+# The titles are what fit it to the release pipeline. A production dependency
+# is inlined in the bundle, so it ships: `fix(deps):`, which makes a release
+# and which commit-types requires (#26). A development dependency is
+# `chore(deps-dev):` and an action `ci(deps):`, and neither makes a release.
+# `include: scope` adds the scope, and Dependabot adds the colon. Security
+# updates take the same titles.
 #
-# A dev update can move a lockfile entry the production tree shares, and then
-# commit-types says it ships. Retitling can't fix that, since commit-types
-# reads Dependabot's commit too: close the PR and make the same update in a
-# `fix(deps):` PR of your own (docs/releasing.md).
+# When commit-types rejects a dev update as shipping, because it moved a
+# lockfile entry the production tree shares, leave the PR open and make the
+# same update in a `fix(deps):` PR of your own: Dependabot closes its PR once
+# the update is on main. Closing it first would make Dependabot skip that
+# version, and retitling can't help, since commit-types reads the commit too.
 version: 2
 updates:
   - package-ecosystem: npm
     directory: /
     schedule:
       interval: weekly
-    # A version is proposed only once it has been public for a week, so a
-    # compromised release is likelier to be pulled before it reaches a PR, and
-    # through a fix(deps) merge, a release. Security updates don't wait.
+    # A version is proposed after a week in public, so a compromised release
+    # is likelier to be pulled first. Security updates don't wait.
     cooldown:
       default-days: 7
     commit-message:
       prefix: fix
       prefix-development: chore
       include: scope
-    # Dev tools in one weekly PR; a major, which can break the toolchain, in a
-    # PR of its own, so it can't hold the safe ones back. Production updates
-    # aren't grouped, so each PR names its package.
+    # Dev tools' minor and patch updates in one weekly PR. Any major comes on
+    # its own, and so does esbuild, which builds the bundle and, while it is
+    # 0.x, can break on a minor.
     groups:
       development:
         dependency-type: development
         update-types: [minor, patch]
-    ignore:
-      # Node's typings stay at the Node floor in package.json's engines: newer
-      # ones would let the code compile against APIs the floor doesn't have.
-      # Move this bound when the floor moves.
-      - dependency-name: "@types/node"
-        versions: [">=22.14.0"]
+        exclude-patterns: [esbuild]
     labels: [dependencies]
 
   - package-ecosystem: github-actions
@@ -56,9 +47,4 @@ updates:
     commit-message:
       prefix: ci
       include: scope
-    # Every action is pinned to a major tag, so each update is the next major:
-    # grouped, they come as one weekly PR.
-    groups:
-      actions:
-        patterns: ["*"]
     labels: [dependencies, ci]
