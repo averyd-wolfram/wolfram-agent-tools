@@ -123,13 +123,14 @@ const TIME_CONSTRAINT_HEADROOM_MS = 30_000;
  *
  * The ceiling is held to `MAX_TIME_MS`, whether configured or requested: past
  * it the timer fires at once, and a model asking for "as long as it takes" was
- * told at once that there was no answer (#15). A configured 0, no ceiling,
- * stays 0.
+ * told at once that there was no answer (#15). An infinite request is held
+ * like any other too long. A configured 0, no ceiling, stays 0 when no
+ * constraint is requested; a requested one sets the ceiling, as it always has.
  */
 export function evaluationCeilingMs(configuredMs: number, args: unknown): number {
   const requested = Number((args as Record<string, unknown> | null)?.["timeConstraint"]);
   const ceiling =
-    !Number.isFinite(requested) || requested <= 0
+    Number.isNaN(requested) || requested <= 0
       ? configuredMs
       : Math.max(configuredMs, requested * 1000 + TIME_CONSTRAINT_HEADROOM_MS);
   return Math.min(MAX_TIME_MS, ceiling);

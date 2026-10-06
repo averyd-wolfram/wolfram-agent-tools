@@ -3991,35 +3991,38 @@ heading("Timeouts layer the right way round");
 heading("A time too long for a timer is held to the longest one can hold");
 {
   const TIMER_LIMIT_MS = 2 ** 31 - 1;
-  // The call timeout by its alias, so the log is seen to name the variable set,
-  // and the idle time as Infinity, which a plain number read dropped for the
-  // default.
+  // The call timeout by its alias, so the log is seen to name the variable set.
+  // Each value really overflowed a timer before the hold.
   const huge = {
     WOLFRAM_MCP_START_TIMEOUT_SECONDS: "3000000",
     WOLFRAM_CALL_TIMEOUT_SECONDS: "3000000",
-    WOLFRAM_MCP_IDLE_MINUTES: "Infinity",
+    WOLFRAM_MCP_IDLE_MINUTES: "100000",
   };
   const names = [...Object.keys(huge), "WOLFRAM_MCP_CALL_TIMEOUT_SECONDS"];
   const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   const said = [];
-  let config;
-  try {
-    for (const name of names) delete process.env[name];
-    Object.assign(process.env, huge);
-    config = lib.loadConfig((message) => said.push(message));
-  } finally {
-    for (const name of names) {
-      if (saved[name] === undefined) delete process.env[name];
-      else process.env[name] = saved[name];
+  const loadWith = (env) => {
+    try {
+      for (const name of names) delete process.env[name];
+      Object.assign(process.env, env);
+      return lib.loadConfig((message) => said.push(message));
+    } finally {
+      for (const name of names) {
+        if (saved[name] === undefined) delete process.env[name];
+        else process.env[name] = saved[name];
+      }
     }
-  }
-  const held = [config.startTimeoutMs, config.callTimeoutMs, config.idleMs];
+  };
+  const config = loadWith(huge);
+  // And Infinity, which a plain number read dropped for the default.
+  const infinite = loadWith({ WOLFRAM_MCP_IDLE_MINUTES: "Infinity" });
+  const held = [config.startTimeoutMs, config.callTimeoutMs, config.idleMs, infinite.idleMs];
   const noted = said.filter((message) => /is longer than the 24 days a time setting is held to/.test(message));
   check(
     "each setting is held below the timer limit, with room for the grace added to it, and the log says so",
     held.every((ms) => ms === lib.MAX_TIME_MS) &&
       lib.MAX_TIME_MS + 3_600_000 < TIMER_LIMIT_MS &&
-      noted.length === 3 &&
+      noted.length === 4 &&
       noted.some((message) => message.startsWith("WOLFRAM_CALL_TIMEOUT_SECONDS=3000000")) &&
       noted.some((message) => /^WOLFRAM_MCP_IDLE_MINUTES=Infinity .*using 34560 minutes$/.test(message)),
     `${held.join(", ")} | ${said.join(" | ").slice(0, 200)}`,
@@ -4027,6 +4030,7 @@ heading("A time too long for a timer is held to the longest one can hold");
   check(
     "as is the call ceiling, requested by a model or configured, and a configured 0 stays none",
     lib.evaluationCeilingMs(300_000, { timeConstraint: 3_000_000 }) === lib.MAX_TIME_MS &&
+      lib.evaluationCeilingMs(300_000, { timeConstraint: "Infinity" }) === lib.MAX_TIME_MS &&
       lib.evaluationCeilingMs(3_000_000_000, { code: "1+1" }) === lib.MAX_TIME_MS &&
       lib.evaluationCeilingMs(0, { code: "1+1" }) === 0,
     `${lib.evaluationCeilingMs(300_000, { timeConstraint: 3_000_000 })}, ${lib.evaluationCeilingMs(3_000_000_000, {})}`,
