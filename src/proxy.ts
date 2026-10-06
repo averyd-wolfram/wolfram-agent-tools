@@ -121,17 +121,18 @@ const TIME_CONSTRAINT_HEADROOM_MS = 30_000;
  * of an hour — a paclet build, a submission — declare nothing. Any table would
  * be this server asserting facts about someone else's configuration.
  *
- * A requested constraint is held to `MAX_TIME_MS`, as the configured ceiling
- * is: past it the timer fires at once, and a model asking for "as long as it
- * takes" was told at once that there was no answer (#15).
+ * The ceiling is held to `MAX_TIME_MS`, whether configured or requested: past
+ * it the timer fires at once, and a model asking for "as long as it takes" was
+ * told at once that there was no answer (#15). A configured 0, no ceiling,
+ * stays 0.
  */
 export function evaluationCeilingMs(configuredMs: number, args: unknown): number {
   const requested = Number((args as Record<string, unknown> | null)?.["timeConstraint"]);
-  if (!Number.isFinite(requested) || requested <= 0) return configuredMs;
-  return Math.min(
-    MAX_TIME_MS,
-    Math.max(configuredMs, requested * 1000 + TIME_CONSTRAINT_HEADROOM_MS),
-  );
+  const ceiling =
+    !Number.isFinite(requested) || requested <= 0
+      ? configuredMs
+      : Math.max(configuredMs, requested * 1000 + TIME_CONSTRAINT_HEADROOM_MS);
+  return Math.min(MAX_TIME_MS, ceiling);
 }
 
 /**

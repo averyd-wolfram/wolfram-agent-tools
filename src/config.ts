@@ -65,7 +65,11 @@ export const DEFAULT_START_TIMEOUT_MS = 120_000;
  * (#15). The margin below the limit is for what is added to a setting on its
  * way to a timer — a grace, an op's own ceiling — which is seconds.
  */
-export const MAX_TIME_MS = 24 * 24 * 60 * 60 * 1000;
+export const MAX_TIME_MS = 24 * 86_400_000;
+
+/** The units the time settings are given in, for reading and for saying. */
+const SECONDS = { ms: 1000, name: "seconds" };
+const MINUTES = { ms: 60_000, name: "minutes" };
 
 export interface Config {
   /** Explicit kernel path, unresolved. `undefined` means auto-detect. */
@@ -139,17 +143,27 @@ function readNumber(fallback: number, ...names: string[]): number {
 }
 
 /**
- * A time setting, given in units of `unitMs`, as ms held to `MAX_TIME_MS`.
- * Held rather than refused: a value that long means "as long as it can be",
- * and the held value is what doctor and the startup line then show.
+ * A time setting, given in `unit`s, as ms held to `MAX_TIME_MS`. Held rather
+ * than refused: a value that long — `Infinity` included, which `readNumber`
+ * would have dropped for the default — means "as long as it can be", and the
+ * held value is what doctor and the startup line then show.
  */
-function readTime(fallback: number, unitMs: number, log: Logger, ...names: string[]): number {
-  const ms = readNumber(fallback, ...names) * unitMs;
+function readTime(
+  fallback: number,
+  unit: { ms: number; name: string },
+  log: Logger,
+  ...names: string[]
+): number {
+  const entry = readEnvEntry(...names);
+  if (entry === undefined) return fallback * unit.ms;
+  const [name, raw] = entry;
+  const parsed = /^inf(inity)?$/i.test(raw) ? Infinity : Number.parseFloat(raw);
+  if (Number.isNaN(parsed) || parsed < 0) return fallback * unit.ms;
+  const ms = parsed * unit.ms;
   if (ms <= MAX_TIME_MS) return ms;
-  const [name, raw] = readEnvEntry(...names) ?? [names[0], ""];
   log(
-    `${name}=${raw} is longer than Node's timers can hold; using ${MAX_TIME_MS / unitMs}, ` +
-      "which is 24 days",
+    `${name}=${raw} is longer than the ${MAX_TIME_MS / 86_400_000} days a time setting is ` +
+      `held to; using ${MAX_TIME_MS / unit.ms} ${unit.name}`,
   );
   return MAX_TIME_MS;
 }
@@ -223,17 +237,17 @@ export function loadConfig(log: Logger): Config {
     serverName,
     version: readEnv("WOLFRAM_MCP_VERSION"),
     minVersion: readEnv("WOLFRAM_MCP_MIN_VERSION", "WOLFRAM_MIN_VERSION") ?? DEFAULT_MIN_VERSION,
-    idleMs: readTime(10, 60_000, log, "WOLFRAM_MCP_IDLE_MINUTES", "WOLFRAM_IDLE_MINUTES"),
+    idleMs: readTime(10, MINUTES, log, "WOLFRAM_MCP_IDLE_MINUTES", "WOLFRAM_IDLE_MINUTES"),
     startTimeoutMs: readTime(
       DEFAULT_START_TIMEOUT_MS / 1000,
-      1000,
+      SECONDS,
       log,
       "WOLFRAM_MCP_START_TIMEOUT_SECONDS",
       "WOLFRAM_START_TIMEOUT_SECONDS",
     ),
     callTimeoutMs: readTime(
       300,
-      1000,
+      SECONDS,
       log,
       "WOLFRAM_MCP_CALL_TIMEOUT_SECONDS",
       "WOLFRAM_CALL_TIMEOUT_SECONDS",
