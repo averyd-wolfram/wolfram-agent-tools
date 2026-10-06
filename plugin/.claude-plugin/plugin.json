@@ -1,7 +1,7 @@
 {
   "name": "wolfram",
   "description": "Wolfram Language for Claude Code — evaluation, notebooks and Wolfram|Alpha through a seat-sharing MCP server, and code intelligence from Wolfram's own LSPServer",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "author": {
     "name": "Avery Davis",
     "email": "averyd@wolfram.com"
