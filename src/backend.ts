@@ -41,7 +41,7 @@ import {
   type BackoffState,
   type CandidateIdentity,
 } from "./prepare.js";
-import { KernelSession } from "./kernel.js";
+import { HandshakeTimeout, KernelSession } from "./kernel.js";
 import type { KernelInstall } from "./locate.js";
 import { errorText, type Logger } from "./log.js";
 import { PKG } from "./version.js";
@@ -180,16 +180,23 @@ export class LocalBackend implements KernelBackend {
    * Start the kernel within what the deadline has left. Its own handshake
    * timer gets that remainder, so on expiry it tears the kernel down through
    * the transport as any failed start does: this kernel is ours to stop.
+   *
+   * Must be the first call on this backend, as `DeferredBackend` guarantees:
+   * it builds a fresh one per preparation and lets nothing reach it until this
+   * returns. A start already under way would be joined, and it runs on the
+   * configured timeout, so its expiry would be reported as the deadline's.
    */
   async prepare(deadline: Deadline): Promise<void> {
     deadline.check("starting the kernel");
     // A beat of grace, so the handshake's own timer fires first: its error
-    // carries the kernel's last output, which names the actual cause.
+    // carries the kernel's last output, which names the actual cause. That
+    // timer is the deadline's remainder, so its expiry is the deadline's.
     await deadline.within(
       "starting the kernel",
       this.#session.ensure(deadline.remaining()),
       undefined,
       1_000,
+      (err) => err instanceof Error && err.cause instanceof HandshakeTimeout,
     );
   }
 
@@ -472,8 +479,13 @@ export function deferredBackend(
   config: Config,
   install: KernelInstall,
   log: Logger,
+  // The clock and back-off window, for a suite that must not hand-build the
+  // wiring this function exists to own. The budget and binary always come from
+  // the configuration and the installation.
+  overrides: Pick<DeferredOptions, "clock" | "backoffMs"> = {},
 ): DeferredBackend {
   return new DeferredBackend((deadline) => createBackend(config, install, log, deadline), log, {
+    ...overrides,
     startTimeoutMs: config.startTimeoutMs,
     bin: install.bin,
   });

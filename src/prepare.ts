@@ -91,12 +91,19 @@ export class Deadline {
    * set to the remaining time, and whichever of the two fires first, the
    * caller should learn the stage. `graceMs` lets work that bounds itself fail
    * first, so its richer error — a kernel's last words — is the one wrapped.
+   *
+   * "Once the deadline has passed" is read off this deadline's clock, and the
+   * work's timer runs on Node's loop clock, which lags it: the work can fail on
+   * its own expiry with a millisecond still showing here. `ranOut` names that
+   * failure — the work timing out on the remainder it was given — so it is
+   * reported as the timeout whatever the two clocks say.
    */
   async within<T>(
     stage: string,
     work: Promise<T>,
     onLate?: (late: T) => void,
     graceMs = 0,
+    ranOut?: (err: unknown) => boolean,
   ): Promise<T> {
     let expired = false;
     let timer: NodeJS.Timeout | undefined;
@@ -126,7 +133,8 @@ export class Deadline {
       return await Promise.race([work, timeout]);
     } catch (err) {
       if (this.signal.aborted) throw new PreparationStopped();
-      if (err instanceof PreparationTimeout || this.remaining() > 0) throw err;
+      if (err instanceof PreparationTimeout) throw err;
+      if (this.remaining() > 0 && !ranOut?.(err)) throw err;
       throw new PreparationTimeout(stage, this.totalMs, errorText(err));
     } finally {
       clearTimeout(timer);

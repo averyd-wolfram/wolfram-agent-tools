@@ -64,6 +64,31 @@ export class DeadlineExceeded extends Error {
   }
 }
 
+/**
+ * Raised when a start's handshake runs out of its own time, carrying that time.
+ *
+ * Typed so that a caller which set that time from a larger budget can report the
+ * expiry as that budget's: `LocalBackend.prepare` hands the handshake what its
+ * preparation deadline has left, but the two timers read different clocks, and
+ * the handshake's could fire first by a millisecond, escaping as a bare error
+ * that named neither the stage nor the setting to raise.
+ */
+export class HandshakeTimeout extends Error {
+  readonly timeoutMs: number;
+  constructor(timeoutMs: number) {
+    super(
+      `the Wolfram kernel did not complete MCP initialization within ` +
+        `${Math.round(timeoutMs / 1000)}s. Common causes: the ` +
+        `Wolfram/AgentTools paclet is missing or is being downloaded, the ` +
+        `selected kernel predates AgentTools support, or an unactivated ` +
+        `Wolfram Engine is waiting for credentials on stdin, which cannot ` +
+        `be answered here.`,
+    );
+    this.name = "HandshakeTimeout";
+    this.timeoutMs = timeoutMs;
+  }
+}
+
 /** The SDK's own timeout, for ops this server gives no deadline of its own. */
 // Widened to number once: the SDK types McpError.code as a number while
 // ErrorCode is the enum of its values, and comparing them raw is an unsafe mix.
@@ -179,12 +204,20 @@ function chosenShaping(flavour: KernelFlavour | undefined): string[] {
   );
 }
 
-/** Attach recent kernel output to an error, so the cause is visible to the user. */
-function withKernelOutput(message: string, output: string[]): Error {
+/**
+ * Attach recent kernel output to an error, so the cause is visible to the user.
+ *
+ * Always a plain `Error`: an `McpError` from the handshake must not reach the
+ * proxy as one, where it would become a protocol error rather than a failed
+ * call. The original rides along as `cause`, so a caller can still tell a
+ * handshake timeout from any other failure.
+ */
+function withKernelOutput(err: unknown, output: string[]): Error {
+  const message = errorText(err);
   // The facts line is this server's own bookkeeping, not something the kernel
   // said about the failure.
   const recent = output.filter((line) => !isFactsLine(line));
-  if (recent.length === 0) return new Error(message);
+  if (recent.length === 0) return new Error(message, { cause: err });
   const tail = recent.map((line) => `  ${line}`).join("\n");
   // No doctor command here: on the shared path this runs in the broker, whose
   // launch context is not the caller's, so it could name the wrong one.
@@ -192,7 +225,7 @@ function withKernelOutput(message: string, output: string[]): Error {
     ? "\n\nThis kernel is not activated. Activate it, by opening Wolfram once and " +
       "signing in or with `wolframscript -activate` in a terminal, then try again."
     : "";
-  return new Error(`${message}\n\nLast output from the kernel:\n${tail}${hint}`);
+  return new Error(`${message}\n\nLast output from the kernel:\n${tail}${hint}`, { cause: err });
 }
 
 export class KernelSession {
@@ -296,20 +329,7 @@ export class KernelSession {
 
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () =>
-          reject(
-            new Error(
-              `the Wolfram kernel did not complete MCP initialization within ` +
-                `${Math.round(startTimeoutMs / 1000)}s. Common causes: the ` +
-                `Wolfram/AgentTools paclet is missing or is being downloaded, the ` +
-                `selected kernel predates AgentTools support, or an unactivated ` +
-                `Wolfram Engine is waiting for credentials on stdin, which cannot ` +
-                `be answered here.`,
-            ),
-          ),
-        startTimeoutMs,
-      );
+      timer = setTimeout(() => reject(new HandshakeTimeout(startTimeoutMs)), startTimeoutMs);
       timer.unref?.();
     });
     void timeout.catch(() => {});
@@ -318,7 +338,7 @@ export class KernelSession {
       await Promise.race([client.connect(transport), fatal, timeout]);
     } catch (err) {
       await transport.close().catch(() => {});
-      throw withKernelOutput(errorText(err), transport.recentOutput());
+      throw withKernelOutput(err, transport.recentOutput());
     } finally {
       clearTimeout(timer);
       this.#handshaking = null;

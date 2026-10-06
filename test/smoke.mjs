@@ -3931,6 +3931,28 @@ heading("Stopping reaches a preparation wherever it is");
         /not ready within 2s/.test(outcome) && took < 6_000 && deferred.backoff() !== null,
         `${took}ms: ${outcome.slice(0, 70)}`,
       );
+
+      // The handshake's timer is set to what the deadline has left, so its
+      // expiry is the deadline's. But the two read different clocks: Node's
+      // timers run on libuv's cached loop time, which lags Date.now(), so the
+      // handshake could fire a millisecond before the deadline saw itself
+      // expire, and the raw handshake error escaped without the stage or the
+      // variable to raise. A deadline clock running at half speed makes that
+      // skew certain rather than occasional.
+      const start = Date.now();
+      const slow = () => start + (Date.now() - start) / 2;
+      const skewed = lib.deferredBackend(config, { bin: fakeKernel, version: null, source: "suite" }, () => {}, {
+        clock: slow,
+      });
+      const skewedOutcome = await skewed.listTools().then(() => "served", (e) => e.message);
+      await skewed.stop();
+      check(
+        "a handshake that times out on the deadline's remainder is reported as the deadline, whatever the clocks say",
+        /not ready within 2s/.test(skewedOutcome) &&
+          /did not complete MCP initialization/.test(skewedOutcome) &&
+          skewed.backoff() !== null,
+        skewedOutcome.slice(0, 90),
+      );
     },
   );
 }
