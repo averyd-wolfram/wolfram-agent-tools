@@ -5091,20 +5091,21 @@ heading("The bundle is the deliverable, and the suite drives the bundle");
   // The bundle inlines the SDK's ajv and, through it, fast-uri, so an advisory
   // against fast-uri ships in every release: 0.1.1 inlined 3.1.5, inside six
   // (#26). This asks the copy the bundle inlines, resolved from ajv as esbuild
-  // resolves it, to do what 3.1.8 fixed: refuse a malformed scheme.
+  // resolves it, for the last of those fixes, 3.1.8's: a host is lower-cased
+  // after it is percent-decoded, where 3.1.7 and earlier left "exAmple.com".
   {
-    const sdk = createRequire(join(root, "node_modules", "@modelcontextprotocol", "sdk", "package.json"));
-    const fastUri = createRequire(sdk.resolve("ajv"))("fast-uri");
-    let refused = "";
+    let host;
     try {
-      fastUri.resolve("", "1bad:scheme");
+      const sdk = createRequire(join(root, "node_modules", "@modelcontextprotocol", "sdk", "package.json"));
+      const fastUri = createRequire(sdk.resolve("ajv"))("fast-uri");
+      host = fastUri.parse("foo://EX%41MPLE.com/").host;
     } catch (err) {
-      refused = String(err?.message ?? err);
+      host = `failed: ${String(err?.message ?? err)}`;
     }
     check(
-      "the URI parser the bundle inlines refuses a malformed scheme, as fast-uri 3.1.8 does (#26)",
-      /scheme is malformed/.test(refused),
-      refused || "accepted",
+      "the URI parser the bundle inlines folds a decoded host's case, as fast-uri 3.1.8 does (#26)",
+      host === "example.com",
+      String(host),
     );
   }
 
