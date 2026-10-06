@@ -51,7 +51,7 @@ export const TOO_LATE_BACKOFF_MS = 15_000;
 
 /** What a refused start says about why, in place of the installation advice. */
 export const TOO_LATE_ADVICE =
-  "the stages before the start used most of WOLFRAM_MCP_START_TIMEOUT_SECONDS, and the next attempt has the whole of it again";
+  "the stages before the start used most of WOLFRAM_MCP_START_TIMEOUT_SECONDS, which the next attempt has whole again; if it is refused again, it waits the full back-off, so raise the setting or run doctor";
 
 /** What ends that wait sooner, said by both paths, so they cannot drift apart. */
 export const NOT_RESOLVED_ADVICE =
