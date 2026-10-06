@@ -10,6 +10,26 @@ in `docs/design.md`.
 - **`v0.1.1` is released**, with the bundle, the plugin archive and `SHA256SUMS.txt`. Below
   1.0.0 every release is marked a GitHub pre-release, which `releases/latest` skips, so link a
   release by its tag (`releases/download/v0.1.1/...`), never by `latest`.
+- **0.1.2 is being collected.** release-please's PR #17 holds the fixes merged since, and the
+  `0.1.2` milestone shows the release: #9 (a kernel's handshake bounded by the start timeout,
+  not the MCP SDK's default), #5 (a server that will not start fails at once, with a short
+  back-off — on the shared path only for requests after the first failure; a simultaneous burst
+  is #19), #11 (a start deadline handed on from one read, so a spent one starts nothing — not
+  yet in #17's changelog, see the next point), #26
+  (`fast-uri` past its advisory, PR #27). Still in it: #15 (PR #28) and #10. How to hear of the
+  next advisory is #29 (`needs design`): an audit gate tried in #27 was reverted.
+- **#21's fix returns to #17 with the next merge to `main`.** release-please could not parse
+  #21's squash commit, whose body was its PR description, so #17's changelog lacks #11 and no
+  pre-release with it was built. #21's description now carries a `BEGIN_COMMIT_OVERRIDE` block
+  (added 2026-10-06, with the maintainer's approval), which release-please reads in the commit's
+  place; it runs only on a push to `main`. After that merge, check #17 lists #21.
+- **Squash commits no longer carry the PR description**, since 2026-10-06
+  (`squash_merge_commit_message: BLANK`), as D16 and `docs/releasing.md` always said. The setting had been title and
+  description from the first merge, so every description was release-please input — how #21
+  was dropped (#24). #25 tried to check descriptions instead, imitating how GitHub builds the
+  commit; two review rounds kept finding more of GitHub to imitate, and it was closed unmerged.
+- **The backlog is GitHub issues** (`gh issue list`), labelled by type, `needs design` and area
+  (*Working here* below). Other agents file there too, notably the downstream plugin's.
 - **The release pipeline versions itself** from the commit types on `main`. `docs/releasing.md`
   has the whole of it; the short form is under *How releases work* below.
 - **The direction is client-neutral agent tools with a package per client** (plan §5 MA,
@@ -17,29 +37,44 @@ in `docs/design.md`.
 
 ## What to do next, in order
 
-1. **The open bugs, filed as GitHub issues** (`gh issue list`). For 0.1.2: #15 (a start timeout
-   too large for a timer makes every start fail at once) and #10 (a message's wording), each its
-   own `fix:` PR; release-please's 0.1.2 PR is held open to collect them, so merge it when they
-   are in. After that, design before code: #3 (warm kernels serve a paclet's old server after an
-   upgrade), and the pool's handling of starts — #19 (a burst for a server that will not start;
-   what was tried and reverted is recorded there), #16 (the session guessing how long a broker
-   spends starting a kernel) and #20 (any failed start, and a private restart after idling) —
-   weighed together, with #12 (one timer for a start).
-2. **MA's experiments**, each a ledger row (plan §5 MA, *Order of work*): Codex installing a
+1. **Finish 0.1.2** (milestone `0.1.2`):
+   - **#15**, a `fix:`: clamp the time settings in `config.ts` to what Node's timers can hold —
+     a start timeout too large overflows them and every start fails at once. Probably the call
+     timeout and idle minutes too. A *minimum* start timeout belongs with #22's design, where it
+     meets the start floor, not here.
+   - **#10**, a `fix:`: the start-timeout message — the handshake's detail rounding to "within
+     0s", and a refused start reading "time ran out while starting the kernel. …too little for
+     this to begin".
+
+   Then check #17's changelog lists every fix in the milestone, merge it, and the same run tags
+   and publishes `v0.1.2`. Download the assets and check `SHA256SUMS.txt` and the bundle's
+   `--version`, as for 0.1.1.
+2. **Design the kernel-start cluster before code** (`needs design`, `area: startup` and
+   `area: broker`): #22 (back off by what failed — a start refused for lack of time is not a
+   broken installation), #20 (any failed start in the pool, and a private restart after idling),
+   #19 (a burst for a server that will not start, at a shared broker), #16 (the session guessing
+   how long a broker spends starting a kernel) and #12 (one timer for a start). #22 and #19
+   record what #21 and #18 tried, why each attempt was reverted, and the constraints a design
+   must keep. Write it up in `docs/plugin-plan.md` first — the one plan; the pool shapes every
+   session's latency and licence use. A minimum start timeout (#15's other half) is part of it.
+   #3 (warm kernels serve a paclet's old server after an upgrade) wants the same treatment, with
+   #4 and #6 (`area: paclet`).
+3. **MA's experiments**, each a ledger row (plan §5 MA, *Order of work*): Codex installing a
    Claude Code marketplace entry and trusting our hook; Cursor importing an installed Claude Code
    plugin, and whether its `sessionStart` injects context; Copilot honouring `userConfig`; the
    Agent Plugins precedence in VS Code; Codex's filtered environment against our broker.
-3. **The restructure** (MA). M1's `archive` install, update and bad-digest rows need only public
+4. **The restructure** (MA). M1's `archive` install, update and bad-digest rows need only public
    releases (`v0.1.0` then `v0.1.1` is an update), as does a Claude run of the plugin installed
-   from the archive.
-4. **MD, downstream packages** (plan §5 MD, D33), after the restructure: another project's
-   plugin built on the release bundle. Its item 3 holds a defect for today's users too — a
-   server not found starts the ten-minute back-off, which creating the server does not end.
-5. **The rest of M1**: the chat checklist and M1b's client version, `SessionStart` and file
+   from the archive. #7 (installing at project scope from this repository) belongs here.
+5. **MD, downstream packages** (plan §5 MD, D33), after the restructure: another project's
+   plugin built on the release bundle. Item 3's defect for today's users — a server not found
+   held off by the long back-off — is fixed for 0.1.2 (#5), not yet released; its
+   `test:custom` counterpart remains.
+6. **The rest of M1**: the chat checklist and M1b's client version, `SessionStart` and file
    workflow (run by a maintainer); entitlement leases outliving clean kernel exits by about an hour
    (measured, cause not found, matters only to entitlement users); a resumed Claude Desktop
    session after a re-upload may lose the LSP (a new session works).
-6. **M2's design checkpoint**, which starts with the stable-2.2.0 union experiment and needs
+7. **M2's design checkpoint**, which starts with the stable-2.2.0 union experiment and needs
    AgentTools 2.2.7 disabled — agree it with the maintainers first.
 
 ## How releases work
@@ -56,16 +91,42 @@ in `docs/design.md`.
   to the draft, then publishes it. A docs-only merge builds nothing.
 - **No personal token.** Nothing `GITHUB_TOKEN` does starts another workflow, so it is all one
   run; "Allow GitHub Actions to create and approve pull requests" must be on.
+- **The PR description no longer reaches `main`.** A squash commit is the title, which `conventional-title`
+  and `commit-types` check, plus any `Co-authored-by:` trailers GitHub adds, which release-please
+  reads as footers that change nothing; the description is for reviewers. Keep it that way: release-please reads commit bodies by design —
+  a footer-shaped line becomes a commit, `BREAKING-CHANGE:` makes one breaking, a body it cannot
+  parse is skipped without failing anything (#24, #25). To correct a commit already on `main`,
+  put a `BEGIN_COMMIT_OVERRIDE` block in its PR's description; the next run on `main` reads it.
+- **Holding a release.** The release PR collects every bumping merge until it is merged, so a
+  patch release can wait for a batch: give it a milestone holding its fix issues, their PRs and
+  the release PR, and merge the release PR when the milestone's issues are closed and its
+  changelog lists each of their fixes. A `feat:` merged meanwhile turns the held patch into the
+  next minor.
 
 ## Working here
 
 - **Branches and PRs.** `main` is protected: work on a branch, open a PR into `main` with a
   Conventional Commit title, and squash-merge it once `ci-ok`, `conventional-title` and
-  `commit-types` pass — the title becomes the commit release-please reads. GitHub deletes a merged PR's
-  branch; delete the local copy with `git branch -d`.
-- **Review.** Run `/code-review high <pr> --comment` on each PR. Answer every finding with its
-  fixing commit and the check that failed first, then resolve the thread (GraphQL
-  `resolveReviewThread`).
+  `commit-types` pass — the title becomes the commit release-please reads. GitHub deletes a
+  merged PR's branch; delete the local copy with `git branch -d`.
+- **Review.** Run `/code-review high <pr> --comment` on each PR, and again on every new head
+  before merging — except a push that only rewrites commit messages, whose tree the finished
+  review already covered. Answer every finding with its fixing commit and the check that failed
+  first, then resolve the thread (GraphQL `resolveReviewThread`). A finding the PR does not fix
+  is answered with the issue that tracks it; file one if none does.
+- **When reviews stop converging, split.** Each review round finds new edges, and a design
+  added inside a fix — the pool's burst handling in #18, a refused start's back-off in #21 —
+  can keep producing them for round after round. When the fix itself is settled and the rounds
+  are about the new design, revert that design, record what was tried and found in an issue
+  (#19, #22), and merge the fix. And ask whether the fault is code at all: #25's rounds were
+  about imitating GitHub, and ended when the squash setting turned out to contradict D16.
+- **Issues and labels.** Label every issue and PR as it is filed: a type where one fits (`bug`,
+  `enhancement`, `documentation`, `refactor`, `ci`; release-please's PRs carry its own
+  `autorelease:` labels), `needs design` when the approach must be agreed before code, and its
+  areas (`area: startup` — deadlines, handshake, back-off;
+  `area: broker` — the shared broker and its pool; `area: paclet` — paclet-declared servers and
+  the capability cache; `area: distribution` — install, packaging, release). File issues in the
+  existing ones' shape: what happens, repro, expected, suggested fix.
 - **CI.** `ci.yml` runs on every PR; a PR that changed only prose outside the shipped trees
   skips the suite and build, but never `public-content`.
 - **This repository is public.** Every pushed commit is published, branches included. The
@@ -80,6 +141,8 @@ in `docs/design.md`.
 - **A running session keeps the server it loaded,** however often you rebuild. Its broker shows
   as a `wolfram-mcp-server.mjs broker` or `scripts/mcp-server.mjs broker` process. Never kill
   brokers broadly (`AGENTS.md`).
+- **The suite can outlast a foreground tool call.** Run `npm test` in the background and read
+  its log, rather than racing it with a timeout.
 - **Real-kernel suites cost licence seats.** `test:wl`, `test:custom` and `test:lsp` are opt-in.
   Point a run at another installation with `WOLFRAMSCRIPT_KERNELPATH`, which writes nothing.
 - **Agree with the maintainers before changing the installed paclets.**
