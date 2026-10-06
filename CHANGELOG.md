@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.2](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.1...v0.1.2) (2026-10-06)
+
+
+### Bug Fixes
+
+* bound a kernel's handshake by the start timeout, not the MCP SDK's 60s default ([#14](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/14)) ([5e78259](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/5e78259c24cf013a7e0980ca6eec0d612844a74a))
+* fail a server that will not start at once, and back off for seconds rather than ten minutes ([#18](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/18)) ([5ae701a](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/5ae701a7da37d8ec30331a0fad33c3fb9e43c755))
+* give the SDK a call timeout that cannot fire first, so a call longer than a minute is answered ([#37](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/37)) ([5673e95](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/5673e9518cde0d6c2b74029fb819ce53496b9e44))
+* hand on a start deadline's remainder from one read of the clock, so a spent one starts nothing ([#21](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/21)) ([485a0ea](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/485a0eac439b933c59d2fbee8d96e8f7ff764bdc))
+* hold each time setting to 24 days, so one too long for a timer no longer fires at once ([#28](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/28)) ([6c4b04d](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/6c4b04d951ae31408ce3eebfb0f0eca9bb3f6aeb))
+* say a start's budgets truthfully, in sentences, and that a refused start never began ([#30](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/30)) ([dcb2d6f](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/dcb2d6fe3f1be5a9041379d8633995c0a1bad4af))
+* update five advised production dependencies, among them fast-uri, which the bundle inlines ([#27](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/27)) ([d17034e](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/d17034e2b1697a5c55b2b88bf07ea9b01c283a92))
+
 ## [0.1.1](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.0...v0.1.1) (2026-10-06)
 
 
