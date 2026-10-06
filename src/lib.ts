@@ -26,6 +26,7 @@ export {
   knownCapabilitiesFor,
   DEFAULT_MIN_VERSION,
   DEFAULT_SERVER_NAME,
+  MAX_TIME_MS,
   MCP_SERVERS,
   type Config,
   type UpstreamCapabilities,
