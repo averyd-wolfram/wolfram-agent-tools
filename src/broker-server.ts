@@ -25,6 +25,7 @@ import {
   SOCKET_MODE,
 } from "./broker-protocol.js";
 import { settingValue, type KernelFlavour } from "./flavour.js";
+import { CALL_REQUEST_TIMEOUT_MS } from "./kernel.js";
 import { errorText, type Logger } from "./log.js";
 
 /** How long to linger with no connections before exiting. */
@@ -360,6 +361,9 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
                 flavour,
                 (c) =>
                   c.callTool(request.params as never, undefined, {
+                    // One that cannot fire first: unset, the SDK's 60 s
+                    // default cut every longer call (#34).
+                    timeout: CALL_REQUEST_TIMEOUT_MS,
                     signal: controller.signal,
                     onprogress: (progress) =>
                       emit({ event: "progress", target: request.id, progress }),

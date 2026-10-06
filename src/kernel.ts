@@ -89,6 +89,16 @@ export class HandshakeTimeout extends Error {
   }
 }
 
+/**
+ * The SDK request timeout for a tool call: the longest delay a timer can hold,
+ * so that it never fires before this server's own deadline, which is held to
+ * `MAX_TIME_MS` (#15). That deadline is the session's, kept apart from the
+ * request so a late reply still arrives (`#fate`). Left unset, the SDK applied
+ * its own 60 s default instead, cutting every call longer than a minute and
+ * dropping the kernel's answer (#34).
+ */
+export const CALL_REQUEST_TIMEOUT_MS = 2 ** 31 - 1;
+
 /** The SDK's own timeout, for ops this server gives no deadline of its own. */
 // Widened to number once: the SDK types McpError.code as a number while
 // ErrorCode is the enum of its values, and comparing them raw is an unsafe mix.

@@ -44,7 +44,12 @@ import {
   type BackoffState,
   type CandidateIdentity,
 } from "./prepare.js";
-import { HandshakeTimeout, isServerNotResolved, KernelSession } from "./kernel.js";
+import {
+  CALL_REQUEST_TIMEOUT_MS,
+  HandshakeTimeout,
+  isServerNotResolved,
+  KernelSession,
+} from "./kernel.js";
 import type { KernelInstall } from "./locate.js";
 import { errorText, type Logger } from "./log.js";
 import { PKG } from "./version.js";
@@ -254,10 +259,12 @@ export class LocalBackend implements KernelBackend {
     // as a request timeout: the SDK's timeout cancels the request and forgets
     // it, discarding the kernel's eventual reply, which is the only proof of
     // life this server can get from a kernel that answers nothing while it
-    // computes. See KernelSession.#fate.
+    // computes. See KernelSession.#fate. The SDK is still given a timeout, one
+    // that cannot fire first, or it applies its own 60 s default (#34).
     return this.#session.run(
       (c) =>
         c.callTool(params, undefined, {
+          timeout: CALL_REQUEST_TIMEOUT_MS,
           ...(options.signal ? { signal: options.signal } : {}),
           ...(options.onprogress
             ? { onprogress: options.onprogress, resetTimeoutOnProgress: true }
