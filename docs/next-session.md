@@ -8,10 +8,11 @@ in `docs/design.md`.
 
 - **M0 and M1 are built**, and M1's acceptance is nearly done (plan §5 M1).
 - **`v0.1.2` is released** (2026-10-06), with the bundle, the plugin archive and
-  `SHA256SUMS.txt`, verified after download. v0.1.0–v0.1.2 are still flagged GitHub
-  pre-releases, which `releases/latest` skips, until they are unflagged (*What to do next*, 1);
-  until then link a release by its tag (`releases/download/v0.1.2/...`).
-- **A release finishes itself, and is a release** (#41, PR #42). After release-please, failed or
+  `SHA256SUMS.txt`, verified after download. Since #42, v0.1.0–v0.1.2 are normal releases and
+  v0.1.2 is Latest (unflagged 2026-10-06), so `releases/latest/download/…` serves 0.1.2 —
+  checked by downloading through it and verifying `SHA256SUMS.txt`.
+- **A release finishes itself, and is a release** (#41, PR #42, merged 2026-10-06; its first
+  run on `main` ran `pending`, which found nothing left, as expected). After release-please, failed or
   not, the `pending` job (`scripts/pending-release.mjs`) reads from GitHub what is left: every
   draft whose `v<x.y.z>` tag exists is built and published, oldest first, and every merged PR
   still `autorelease: pending` whose tag has a release is relabelled, in a job beside the build.
@@ -52,18 +53,14 @@ in `docs/design.md`.
 
 ## What to do next, in order
 
-1. **Finish #41's rollout.** Once PR #42 is merged, unflag the published releases and mark the
-   newest Latest — `--latest=false` on the older two, since GitHub may otherwise make an edited
-   release Latest:
-   `gh release edit v0.1.0 --prerelease=false --latest=false`,
-   `gh release edit v0.1.1 --prerelease=false --latest=false`,
-   `gh release edit v0.1.2 --prerelease=false --latest`. Then check
-   `GITHUB_REPOSITORY=<owner>/<repo> node scripts/pending-release.mjs` says nothing is left, and
-   that `gh release view --json tagName` (Latest) names v0.1.2. This session's auto mode refused
-   writes that publish, so the maintainer may need to run these. Some of #42's review threads
-   are left open on purpose, each answered with evidence and changing nothing: the relabel's
-   token scopes, the release listing's paging, scripts run from the built tag's checkout, and the
-   test harness's copies (the suite's split is `docs/plan.md` §12).
+1. **#42's follow-ups are in PR #45**: every action on Node 24 (checkout v7, setup-node v7, the
+   artifact pair v7/v8, action-semantic-pull-request v6), and #44's tidy of the release scripts.
+   `release-please.yml` and `release-build.yml` run only on `main`, so check the first release
+   run after #45 merges for Node 20 warnings and failures. Five of #42's review threads are left
+   open on purpose, each answered with evidence and changing nothing: the relabel's token scopes,
+   the release listing's paging, scripts run from the built tag's checkout, the test harness's
+   copies (the suite's split is `docs/plan.md` §12), and `pending` as a job of its own. Resolve
+   them or reopen the questions.
 2. **Downstream projects follow releases** (#7, the agreed shape in its last comment): the
    release workflow commits the assembled plugin and a `wolfram-agent-tools` marketplace to a
    `release` branch after each verified release, and only then (the §5 M1 publication order);
