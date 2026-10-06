@@ -165,6 +165,20 @@ export class Deadline {
     }
   }
 
+  /**
+   * What is left, for work that bounds itself to it, or the timeout for
+   * `stage` if nothing is. One read of the clock, where `check()` then
+   * `remaining()` was two: a deadline that ran out between them handed on 0,
+   * which spawned a kernel with a 0ms handshake (a seat for a start that could
+   * only fail) or sent the broker a ceiling of 0, which means none (#11).
+   */
+  handOn(stage: string): number {
+    if (this.signal.aborted) throw new PreparationStopped();
+    const left = this.remaining();
+    if (left <= 0) throw new PreparationTimeout(stage, this.totalMs);
+    return left;
+  }
+
   /** Throws the timeout for `stage` if the deadline has already passed. */
   check(stage: string): void {
     if (this.signal.aborted) throw new PreparationStopped();

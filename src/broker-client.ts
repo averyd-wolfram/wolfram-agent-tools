@@ -655,12 +655,14 @@ export class BrokerBackend implements KernelBackend {
    */
   async awaitReady(deadline: Deadline): Promise<void> {
     const stage = "waiting for the shared broker to prepare";
-    deadline.check(stage);
+    // Read once: a remainder of 0 would go out as a ceiling of 0, which means
+    // none, and leave the request pending after the deadline had failed.
+    const remainder = deadline.handOn(stage);
     // The request's own ceiling is the remainder plus the usual grace, so the
     // deadline is what fires — and a ceiling firing would also mark a broker
     // that is merely slow as dead.
     try {
-      await deadline.within(stage, this.#request("ready", undefined, deadline.remaining()));
+      await deadline.within(stage, this.#request("ready", undefined, remainder));
     } catch (err) {
       // A broker older than the op: it is running and answering, and cannot
       // say more. Treated as ready, as the attach probe treats any reply.

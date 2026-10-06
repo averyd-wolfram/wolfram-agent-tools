@@ -189,13 +189,14 @@ export class LocalBackend implements KernelBackend {
    * configured timeout, so its expiry would be reported as the deadline's.
    */
   async prepare(deadline: Deadline): Promise<void> {
-    deadline.check("starting the kernel");
+    // Read once: no kernel is spawned on a remainder that has already run out.
+    const remainder = deadline.handOn("starting the kernel");
     // A beat of grace, so the handshake's own timer fires first: its error
     // carries the kernel's last output, which names the actual cause. That
     // timer is the deadline's remainder, so its expiry is the deadline's.
     await deadline.within(
       "starting the kernel",
-      this.#session.ensure(deadline.remaining()),
+      this.#session.ensure(remainder),
       undefined,
       1_000,
       (err) => err instanceof Error && err.cause instanceof HandshakeTimeout,

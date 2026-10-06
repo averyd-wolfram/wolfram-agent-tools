@@ -17,14 +17,14 @@ in `docs/design.md`.
 
 ## What to do next, in order
 
-1. **The open bugs, filed as GitHub issues** (`gh issue list`), in this order: #11, a start
-   whose deadline runs out between `check()` and `ensure()` still spends a seat (and its shared
-   counterpart, a `ready` sent with no time left); #3, warm kernels serve a paclet's old server
-   after an upgrade, which wants a short design note before code. Then #15 (a start timeout too
-   large for a timer), #16 (the session guessing how long a broker spends starting a kernel),
-   #10 (a message's wording) and #12 (one timer for a start, weighed with #11 and #16). Each is
-   its own `fix:` PR. release-please's 0.1.2 PR is held open to collect them; merge it when the
-   batch is in.
+1. **The open bugs, filed as GitHub issues** (`gh issue list`). For 0.1.2: #15 (a start timeout
+   too large for a timer makes every start fail at once) and #10 (a message's wording), each its
+   own `fix:` PR; release-please's 0.1.2 PR is held open to collect them, so merge it when they
+   are in. After that, design before code: #3 (warm kernels serve a paclet's old server after an
+   upgrade), and the pool's handling of starts — #19 (a burst for a server that will not start;
+   what was tried and reverted is recorded there), #16 (the session guessing how long a broker
+   spends starting a kernel) and #20 (any failed start, and a private restart after idling) —
+   weighed together, with #12 (one timer for a start).
 2. **MA's experiments**, each a ledger row (plan §5 MA, *Order of work*): Codex installing a
    Claude Code marketplace entry and trusting our hook; Cursor importing an installed Claude Code
    plugin, and whether its `sessionStart` injects context; Copilot honouring `userConfig`; the
