@@ -25,11 +25,17 @@ export const PREPARATION_BACKOFF_MS = 10 * 60_000;
 /** A preparation that did not finish in time, naming the stage it was in. */
 export class PreparationTimeout extends Error {
   readonly stage: string;
-  constructor(stage: string, totalMs: number, detail?: string) {
+  /**
+   * `cause` is the work's own failure when one landed as time ran out, kept so
+   * a caller can still tell what it was: a server name that did not resolve
+   * starts no back-off even when the deadline wrapped it.
+   */
+  constructor(stage: string, totalMs: number, detail?: string, cause?: unknown) {
     super(
       `a Wolfram kernel was not ready within ${Math.round(totalMs / 1000)}s ` +
         `(WOLFRAM_MCP_START_TIMEOUT_SECONDS): time ran out while ${stage}` +
         (detail ? `. ${detail}` : ""),
+      cause === undefined ? undefined : { cause },
     );
     this.name = "PreparationTimeout";
     this.stage = stage;
@@ -135,7 +141,7 @@ export class Deadline {
       if (this.signal.aborted) throw new PreparationStopped();
       if (err instanceof PreparationTimeout) throw err;
       if (this.remaining() > 0 && !ranOut?.(err)) throw err;
-      throw new PreparationTimeout(stage, this.totalMs, errorText(err));
+      throw new PreparationTimeout(stage, this.totalMs, errorText(err), err);
     } finally {
       clearTimeout(timer);
       if (onAbort) this.signal.removeEventListener("abort", onAbort);

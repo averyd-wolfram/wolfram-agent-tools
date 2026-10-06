@@ -3072,6 +3072,68 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
     retriedText.replace(/\s+/g, " ").slice(0, 95),
   );
   await noExtension.client.close();
+
+  // Whatever the cause, StartMCPServer says it failed, so that is what is
+  // watched: a list of the causes' own message names missed this one, a server
+  // whose file will not read, and waited out the start timeout again.
+  const unreadableAt = Date.now();
+  const unreadable = await connect({
+    MCP_SERVER_NAME: "My Server",
+    FAKE_MODE: "unreadable-server-file",
+    WOLFRAM_MCP_START_TIMEOUT_SECONDS: "20",
+  });
+  const unread = await unreadable.client.callTool(
+    { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
+  const unreadableElapsed = Date.now() - unreadableAt;
+  check(
+    "a server that will not start fails in seconds whatever the cause, on StartMCPServer's own failure",
+    unread.isError === true && unreadableElapsed < 8000 &&
+      /Invalid MCPServerObject file/.test(unread?.content?.[0]?.text ?? ""),
+    `${unread.isError ? "isError" : "ok"} after ${unreadableElapsed}ms`,
+  );
+  await unreadable.client.close();
+
+  // The same on the shared path, the default: the kernel starts in the broker's
+  // pool and its failure crosses the socket as text, so nothing there may turn
+  // it into a back-off either.
+  const sharedRuntime = join(home, "run-unresolved");
+  privateDir(sharedRuntime);
+  const sharedAt = Date.now();
+  const sharedBad = await connect({
+    MCP_SERVER_NAME: "WolframVerifier/Verifier",
+    FAKE_MODE: "no-paclet-extension",
+    WOLFRAM_MCP_START_TIMEOUT_SECONDS: "20",
+    WOLFRAM_MCP_SHARE: "1",
+    XDG_RUNTIME_DIR: sharedRuntime,
+    WOLFRAM_MCP_LICENSE_LIMIT: "2",
+  });
+  const sharedFirst = await sharedBad.client.callTool(
+    { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
+  const sharedElapsed = Date.now() - sharedAt;
+  const sharedSecond = await sharedBad.client.callTool(
+    { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
+  const sharedSecondText = sharedSecond?.content?.[0]?.text ?? "";
+  check(
+    "through a shared broker too, it fails in seconds and the next call asks again",
+    sharedFirst.isError === true && sharedElapsed < 8000 &&
+      /No AgentTools extension found/.test(sharedSecondText) && !/last attempt to prepare/.test(sharedSecondText),
+    `${sharedElapsed}ms; then: ${sharedSecondText.replace(/\s+/g, " ").slice(0, 80)}`,
+  );
+  await sharedBad.client.close();
+
+  // And when the not-found lands just as the start deadline runs out, the
+  // deadline's timeout wraps it — and used to drop it, so the back-off saw a
+  // timeout and was recorded after all.
+  const late = lib.ServerNotResolved
+    ? await new lib.Deadline(0)
+        .within("starting the kernel", Promise.reject(new lib.ServerNotResolved("no such server")))
+        .then(() => null, (e) => e)
+    : null;
+  check(
+    "a not-found the deadline wraps is still known as one, so it starts no back-off",
+    late?.name === "PreparationTimeout" && lib.isServerNotResolved?.(late) === true,
+    `${late?.name}: ${String(late?.message).slice(0, 60)}`,
+  );
 }
 
 // ---------------------------------------------------------------------------

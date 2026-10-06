@@ -115,25 +115,28 @@ interface AbandonedWork {
 }
 
 /**
- * The paclet's own messages for a `MCP_SERVER_NAME` it cannot resolve to a
- * server, from its `Messages.wl`: a name with no server of that name
- * (`MCPServerNotFound`, `MCPServerFileNotFound`), and a paclet-qualified
- * `Publisher/Server` whose paclet is not installed, has no AgentTools extension,
- * declares no such server, or declares it invalidly.
+ * The kernel's own words for a `MCP_SERVER_NAME` it cannot serve.
  *
- * Watched for because such a kernel does not fail: it prints one of these and
- * runs on as a non-server — or, when `StartMCPServer` itself rejects the name,
- * drops to its REPL and reads the client's JSON as Wolfram Language — so the
- * only thing that ever ended the wait was the start timeout, for an answer the
- * kernel gave in its first second. Only the first two were watched for until a
- * paclet-declared server hit the others (issue #5). `resolveServerName` used to
- * avoid the wait by refusing any name it did not recognise, which silently
- * substituted a different server for every user-defined one. Pinned by
- * `server-not-found-message-is-what-we-watch-for` and
- * `paclet-server-messages-are-what-we-watch-for` in the `.wlt`.
+ * Whatever the cause — no server of that name, a paclet that is not installed,
+ * has no AgentTools extension or lacks the server, a server file that will not
+ * read — `MCPServerObject[name]` fails, `StartMCPServer` is then handed that
+ * failure, matches no definition of its own, and says so as
+ * `StartMCPServer::InvalidArguments`, quoting the cause. Measured on a 15.0
+ * kernel with AgentTools 2.2.7: the cause, then that line, then the kernel's
+ * REPL, which reads the client's JSON as Wolfram Language. So any
+ * `StartMCPServer::` message is the one signal that no server is coming,
+ * whatever the cause; `MCPServerNotFound` is kept for a kernel that printed only
+ * the cause. A list of the causes' own message names missed some and named two
+ * the start path never raises (issue #5).
+ *
+ * Watched for because such a kernel does not exit, so the only thing that ever
+ * ended the wait was the start timeout, for an answer the kernel gave in its
+ * first second. `resolveServerName` used to avoid the wait by refusing any name
+ * it did not recognise, which silently substituted a different server for every
+ * user-defined one. Pinned by `server-not-found-message-is-what-we-watch-for`
+ * and `an-unresolvable-server-says-so-from-StartMCPServer` in the `.wlt`.
  */
-const SERVER_NOT_FOUND =
-  /MCPServerNotFound|MCPServerFileNotFound|No MCPServerObject found for name|PacletNotInstalled|PacletExtensionNotFound|PacletServerNotFound|InvalidPacletServerDefinition|InvalidAgentToolsPacletExtension/;
+const SERVER_NOT_FOUND = /StartMCPServer::|MCPServerNotFound|No MCPServerObject found for name/;
 
 /**
  * A start that ended because the kernel could not resolve its server name.

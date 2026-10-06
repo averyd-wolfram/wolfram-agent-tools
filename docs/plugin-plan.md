@@ -767,9 +767,10 @@ are *traced* in this tree on 2026-10-05 unless marked otherwise.
    through the bundle); a fast, specific failure for a missing paclet carrying the kernel's own
    text; and a not-found that does not start the back-off. The missing-paclet message is
    reproduced on a real kernel first (§7). *Done* (#5, from a real 15.0 kernel's output for a
-   paclet with no AgentTools extension): every server-resolution message in AgentTools'
-   `Messages.wl` fails the start at once, pinned by the `.wlt`, and starts no back-off. The
-   `test:custom` counterpart remains.
+   paclet with no AgentTools extension): any `StartMCPServer::` message — which a real kernel
+   prints for every cause, after the cause itself — fails the start at once, pinned by the
+   `.wlt` against a real kernel, and starts no back-off. The `test:custom` counterpart
+   remains.
 4. **The capability cache and the declaring paclet's version.** *Traced:* the key is the kernel
    path and version, the server name, this package's version and the flavour; no paclet version
    is in it, AgentTools' included. The kernel's own `list_changed` is subscribed and relayed, so

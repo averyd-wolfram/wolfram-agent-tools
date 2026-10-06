@@ -256,23 +256,18 @@ VerificationTest[
 ]
 
 VerificationTest[
-    (* The same watch, for a paclet-qualified Publisher/Server: SERVER_NOT_FOUND
-       also matches these message names, which a real 15.0 kernel printed for a
-       paclet with no AgentTools extension before StartMCPServer dropped it to
-       its REPL (issue #5). A message renamed here would bring back the wait for
-       the whole start timeout, so each name is pinned to the paclet's own
-       Messages.wl. *)
-    With[{messages = Import[FileNameJoin[{PacletObject["Wolfram/AgentTools"]["Location"],
-                                          "Kernel", "Messages.wl"}], "Text"]},
-        Select[
-            {"MCPServerFileNotFound", "PacletNotInstalled", "PacletExtensionNotFound",
-             "PacletServerNotFound", "InvalidPacletServerDefinition",
-             "InvalidAgentToolsPacletExtension"},
-            !StringContainsQ[messages, "AgentTools::" <> # ~~ Whitespace ~~ "="] &
-        ]
-    ],
-    {},
-    TestID -> "paclet-server-messages-are-what-we-watch-for"
+    (* src/kernel.ts SERVER_NOT_FOUND also matches any StartMCPServer:: message.
+       Whatever stops a name resolving - no such server, a paclet missing or
+       without an AgentTools extension, a server file that will not read -
+       MCPServerObject[name] fails, StartMCPServer is handed that failure and
+       says InvalidArguments, and the kernel drops to its REPL (issue #5). That
+       one line is what ends the wait at once for every cause, so it is pinned
+       by asking StartMCPServer for a name nothing can provide. *)
+    FailureQ @ Wolfram`AgentTools`StartMCPServer["NoSuchPublisher/NoSuchServer-contract"],
+    True,
+    {Wolfram`AgentTools`MCPServerObject::MCPServerNotFound,
+     Wolfram`AgentTools`StartMCPServer::InvalidArguments},
+    TestID -> "an-unresolvable-server-says-so-from-StartMCPServer"
 ]
 
 VerificationTest[
