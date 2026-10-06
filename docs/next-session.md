@@ -8,9 +8,10 @@ in `docs/design.md`.
 
 - **M0 and M1 are built**, and M1's acceptance is nearly done (plan §5 M1).
 - **`v0.1.2` is released** (2026-10-06), with the bundle, the plugin archive and
-  `SHA256SUMS.txt`, verified after download. Since #42, v0.1.0–v0.1.2 are normal releases and
-  v0.1.2 is Latest (unflagged 2026-10-06), so `releases/latest/download/…` serves 0.1.2 —
-  checked by downloading through it and verifying `SHA256SUMS.txt`.
+  `SHA256SUMS.txt`, verified after download. #42 made future 0.x releases normal releases;
+  v0.1.0–v0.1.2 were unflagged by hand afterwards (2026-10-06) and v0.1.2 marked Latest, so
+  `releases/latest/download/…` serves 0.1.2 — checked by downloading through it and verifying
+  `SHA256SUMS.txt`.
 - **A release finishes itself, and is a release** (#41, PR #42, merged 2026-10-06; its first
   run on `main` ran `pending`, which found nothing left, as expected). After release-please, failed or
   not, the `pending` job (`scripts/pending-release.mjs`) reads from GitHub what is left: every
@@ -23,8 +24,23 @@ in `docs/design.md`.
   round's answer — marking Latest in a later step — was itself the fault, and it was reverted;
   the third round's Latest-ordering edges were filed as #43 rather than chased (the maintainer's
   call, 2026-10-06).
-- **#7's shape is agreed** (2026-10-06): a `release` branch that the release workflow moves after
-  each verified release, as the marketplace downstream projects follow with auto-update.
+- **#45 is merged** (2026-10-06): every action on Node 24, #44's tidy of the release scripts, and
+  no npm cache restored into the job that publishes. Its own release run used the new actions in
+  `pending` with no Node 20 warning.
+- **The release pipeline was checked against the alternatives** (2026-10-06, recorded in D25):
+  release-please is kept, since semantic-release puts 0.x out of scope and can't commit to a
+  protected `main`, and changesets adds a hand-written file to every PR. Merging the release PR
+  stays the one human step of a release. Four hardening items came out of it: #46 (pin actions
+  to commits), #47 (build-provenance attestations), #48 (immutable releases, needs design) and
+  #49 (ordinary CI on the release PR, unverified, needs design).
+- **Dependabot is PR #50**: weekly npm and Actions updates, and security updates once the
+  repository settings are on, titled so `commit-types` and release-please read them right
+  (`fix(deps):` for a production dependency, which ships inside the bundle). It closes #29.
+- **#7 and #43 are PR #51** (D34): a `release` branch carrying the newest release as the
+  `wolfram-agent-tools` marketplace, which a project follows at `"ref": "release"` with
+  `"autoUpdate": true` or pins at `"ref": "wolfram--v<version>"`. The release run's last job,
+  `advance` (`scripts/release-branch.mjs`), is the one writer of the branch, its tags and GitHub's
+  Latest; builds publish with Latest off.
 - **What 0.1.2 holds:** #9 (a kernel's handshake bounded by the start timeout, not the MCP SDK's
   default), #5 (a server that will not start fails at once, with a short back-off — on the
   shared path only for requests after the first failure; a simultaneous burst is #19), #11 (a
@@ -53,27 +69,20 @@ in `docs/design.md`.
 
 ## What to do next, in order
 
-1. **#42's follow-ups are in PR #45**: every action on Node 24 (checkout v7, setup-node v7, the
-   artifact pair v7/v8, action-semantic-pull-request v6), #44's tidy of the release scripts, and
-   no npm cache in the release jobs. No PR runs `release-please.yml` or `release-build.yml`, and a
-   dispatch runs the dispatched ref's own copy of a workflow — `--ref v0.1.2` would run v0.1.2's,
-   on the old actions — so their new versions are first exercised after merge: `pending` on the
-   merge's own release run, and the build on the next update of the release PR. Check both for
-   Node 20 warnings and failures. Five of #42's review threads are left
-   open on purpose, each answered with evidence and changing nothing: the relabel's token scopes,
-   the release listing's paging, scripts run from the built tag's checkout, the test harness's
-   copies (the suite's split is `docs/plan.md` §12), and `pending` as a job of its own. Resolve
-   them or reopen the questions.
-2. **Downstream projects follow releases** (#7, the agreed shape in its last comment): the
-   release workflow commits the assembled plugin and a `wolfram-agent-tools` marketplace to a
-   `release` branch after each verified release, and only then (the §5 M1 publication order);
-   prime the branch from v0.1.2. The README gives the downstream snippet (`"ref": "release"`,
-   `"autoUpdate": true`) with its first-install and workspace-trust notes, and `test:client`
-   proves #7's acceptance: install at project scope from the snippet alone, then a later release
-   arriving with no downstream edit. Move the branch in the build that publishes the release
-   with `--latest` (#42), so GitHub's Latest, `releases/latest/download/…` and the branch always
-   agree; a release the `pending` job finishes runs the same build. Design it with #43 (a
-   release published out of order can take Latest: four edges #42's reviews found and left).
+1. **Land #50 and #51.** #50's reviews kept tuning the Dependabot config round after round;
+   simplify toward Dependabot's standard setup rather than chase each round, then merge on a
+   reviewed head (the maintainer's approach for #42). After #50 merges, turn on the two
+   settings `docs/releasing.md` lists: `gh api -X PUT repos/<owner>/<repo>/vulnerability-alerts`
+   and `gh api -X PUT repos/<owner>/<repo>/automated-security-fixes`.
+2. **Prime and accept the release branch** after #51 merges. Its own release run's `advance` job
+   should create `release` from v0.1.2 and tag `wolfram--v0.1.2` (check the run, then
+   `git ls-remote origin release 'refs/tags/wolfram--*'`). Then, in a scratch project with a
+   throwaway `CLAUDE_CONFIG_DIR`, commit the README's snippet, trust the folder, and check that
+   `claude plugin list` shows `wolfram@wolfram-agent-tools` at project scope with no install
+   step, and that `"ref": "wolfram--v0.1.2"` pins. Record it as a ledger row (plan §6). The
+   update half of #7's acceptance, a later release arriving with no edit, waits for the next
+   release. Offer the maintainer the rulesets `docs/releasing.md` recommends for `release` and
+   `wolfram--v*`.
 3. **Design the kernel-start cluster before code** (`needs design`, `area: startup` and
    `area: broker`): #22 (back off by what failed — a start refused for lack of time is not a
    broken installation), #20 (any failed start in the pool, and a private restart after idling),

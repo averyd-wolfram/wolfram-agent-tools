@@ -112,12 +112,24 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run release:artifacts
+      # The release branch a release of this commit would leave, from the zip
+      # just built (scripts/release-branch.mjs), for validate-plugin to check
+      # as the marketplace other projects add.
+      # Only where the script exists: a release run calls this on a tag, which
+      # may predate it.
+      - run: |
+          [ -f scripts/release-branch.mjs ] || exit 0
+          version=$(node -p 'require("./package.json").version')
+          node scripts/release-branch.mjs tree "release/wolfram-plugin-$version.zip" release/branch "$version"
       - uses: actions/upload-artifact@v7
         with:
           # One name per commit: a release run can call this twice.
           name: release-artifacts${{ inputs.ref && format('-{0}', inputs.ref) || '' }}
           path: release/
           if-no-files-found: error
+          # upload-artifact leaves out dot-files by default, and a marketplace
+          # or a plugin is nothing without its .claude-plugin/.
+          include-hidden-files: true
 
   validate-plugin:
     # Claude Code's own validator, on the archive a user installs — extracted
@@ -157,6 +169,16 @@ jobs:
         env:
           npm_config_update_notifier: "false"
         run: npx -y @anthropic-ai/claude-code@2.1.75 plugin validate "$RUNNER_TEMP/plugin"
+      # The release branch's marketplace too, which a project adds to follow
+      # releases (#7): at the client floor as well, since that project's
+      # Claude Code may be as old as it.
+      - name: claude plugin validate, the release branch's marketplace
+        env:
+          npm_config_update_notifier: "false"
+        run: |
+          [ -d release/branch ] || exit 0
+          npx -y @anthropic-ai/claude-code@2.1.289 plugin validate release/branch
+          npx -y @anthropic-ai/claude-code@2.1.75 plugin validate release/branch
 
   public-content:
     # The whole tree, on every pull request — prose-only ones above all, since

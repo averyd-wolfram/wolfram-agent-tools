@@ -95,6 +95,36 @@ Off, the launcher answers the LSP handshake itself, serving nothing and starting
 the way `npm run test:wl` checks AgentTools — including that the worked example,
 [`examples/weather.wl`](examples/weather.wl), stays lint-clean.
 
+### In another project
+
+To have the plugin in a project, kept on the latest release with nothing to edit when one comes
+out, commit this to the project's `.claude/settings.json`:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "wolfram-agent-tools": {
+      "source": { "source": "github", "repo": "averyd-wolfram/wolfram-agent-tools", "ref": "release" },
+      "autoUpdate": true
+    }
+  },
+  "enabledPlugins": { "wolfram@wolfram-agent-tools": true }
+}
+```
+
+The `release` branch carries the newest release's plugin, and moves only after a release's
+files are published and verified. To stay on one version instead, set `"ref"` to that version's
+tag, such as `"wolfram--v0.1.2"`, and leave `autoUpdate` out.
+
+- **Nobody installs anything per machine.** Each collaborator gets the plugin in their first
+  session in the project, once they accept Claude Code's trust prompt for the folder. Until then,
+  and in a `claude -p` run in a folder never trusted, Claude Code ignores the marketplace
+  without a message.
+- **Updates arrive in the background,** up to ten minutes after a session's first message. The
+  session says `Plugin updated`; `/reload-plugins` or the next session picks it up.
+- The requirements above apply on every machine: Node 22.13+, a licensed Wolfram 14.3 or
+  newer, and Claude Code 2.1.75 or later.
+
 ## Use from a single file, in any MCP client
 
 `npm run bundle:js` builds `bundle/wolfram-mcp-server.mjs`: the whole CLI — serve, `doctor`,

@@ -20,9 +20,9 @@
  *   pre-release of a version already released ranks below it, and an installed
  *   plugin would still take the changed string as an update.
  * - a `v<version>` tag: that release, a normal GitHub release from 0.x on, and
- *   a pre-release only when its version has a `-` suffix, and marked Latest
- *   when published. A release run never finishes a draft older than the
- *   newest release (scripts/pending-release.mjs), so Latest is the newest.
+ *   a pre-release only when its version has a `-` suffix. It is published
+ *   with Latest off: the release run's advance job marks the newest release
+ *   Latest, with the release branch (scripts/release-branch.mjs).
  *
  * The version is stamped into the CI checkout only, never committed: the
  * branch says what is being prepared, and the build says which build it is.

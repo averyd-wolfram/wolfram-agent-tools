@@ -130,9 +130,9 @@ jobs:
             echo "#$pr: autorelease: pending -> autorelease: tagged"
           done
 
-  # The tag is built and the draft published as Latest. Each tag on its own,
-  # so one that fails does not stop another, and one at a time, oldest first,
-  # so of two the newer is published last and stays Latest.
+  # The tag is built and the draft published, with Latest off: advance, below,
+  # owns Latest. Each tag on its own, so one that fails does not stop another,
+  # and one at a time, oldest first.
   release:
     needs: pending
     if: ${{ !cancelled() && needs.pending.result == 'success' && needs.pending.outputs.finish != '[]' }}
@@ -148,3 +148,92 @@ jobs:
     with:
       ref: ${{ matrix.tag }}
       ref_type: tag
+
+  # The release branch and GitHub's Latest follow the newest published
+  # release (scripts/release-branch.mjs, #7, #43): read from GitHub after
+  # every build in this run, whatever each did. One job writes both, release
+  # runs never overlap, and the next run repeats whatever this one left
+  # undone. Builds publish with Latest off, so a release finished late or
+  # built by hand moves neither until a release run does.
+  advance:
+    needs: [pending, release]
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # No credentials in the checkout while repository code runs: the token
+      # is handed to the pushes below and nowhere else.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - id: plan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/release-branch.mjs plan
+      # The publication order (plugin plan §5 M1): what the branch holds is
+      # the release's own archive, downloaded and checked against its
+      # SHA256SUMS.txt. The zip's line is checked alone, matched exactly, so an
+      # archive missing from the sums fails rather than passing with nothing
+      # checked.
+      - name: Build the branch from the newest release's verified archive
+        if: steps.plan.outputs.move == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEWEST: ${{ steps.plan.outputs.newest }}
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          assets="$RUNNER_TEMP/assets"
+          gh release download "$NEWEST" --dir "$assets" \
+            --pattern "wolfram-plugin-$VERSION.zip" --pattern SHA256SUMS.txt
+          (cd "$assets" && awk -v f="wolfram-plugin-$VERSION.zip" '$2 == f' SHA256SUMS.txt | sha256sum --check --strict)
+          node scripts/release-branch.mjs tree "$assets/wolfram-plugin-$VERSION.zip" "$RUNNER_TEMP/tree" "$VERSION"
+      - name: Move the branch forward, and tag its version
+        if: steps.plan.outputs.move == 'true' || steps.plan.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEWEST: ${{ steps.plan.outputs.newest }}
+          VERSION: ${{ steps.plan.outputs.version }}
+          MOVE: ${{ steps.plan.outputs.move }}
+          TAG: ${{ steps.plan.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          # The token is masked in logs, but this encoding of it isn't.
+          echo "::add-mask::$auth"
+          push() { git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin "$@"; }
+          base=
+          # The full ref: a bare `release` matches any branch ending in /release.
+          if git ls-remote --exit-code --heads origin refs/heads/release >/dev/null; then
+            git fetch -q --depth=1 origin +refs/heads/release:refs/remotes/origin/release
+            base=origin/release
+          fi
+          target=$base
+          if [ "$MOVE" = true ]; then
+            if [ -n "$base" ]; then git switch -q -c advance "$base"; else git switch -q --orphan advance; fi
+            git rm -rq --ignore-unmatch . && git clean -fdxq
+            cp -R "$RUNNER_TEMP/tree/." .
+            git add -A
+            git commit -q -m "wolfram $VERSION, from $NEWEST"
+            # A plain push, refused unless it fast-forwards: the branch only
+            # ever moves forward, and never past a push made meanwhile.
+            push HEAD:refs/heads/release
+            target=HEAD
+          fi
+          # Straight to the remote: no local tag to collide with, and a push
+          # that never replaces a tag already there.
+          if [ -n "$TAG" ]; then
+            push "$(git rev-parse "$target"):refs/tags/$TAG"
+          fi
+      # After the branch, so Latest never names a release the branch doesn't
+      # carry yet.
+      - name: Mark the newest release Latest
+        if: steps.plan.outputs.latest == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEWEST: ${{ steps.plan.outputs.newest }}
+        run: gh release edit "$NEWEST" --latest
