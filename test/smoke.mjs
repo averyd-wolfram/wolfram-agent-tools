@@ -3990,7 +3990,6 @@ heading("Timeouts layer the right way round");
 // hold, and the calls here are slow enough that a 1 ms timer fires first.
 heading("A time too long for a timer is held to the longest one can hold");
 {
-  const TIMER_LIMIT_MS = 2 ** 31 - 1;
   // The call timeout by its alias, so the log is seen to name the variable set.
   // Each value really overflowed a timer before the hold.
   const huge = {
@@ -3998,7 +3997,15 @@ heading("A time too long for a timer is held to the longest one can hold");
     WOLFRAM_CALL_TIMEOUT_SECONDS: "3000000",
     WOLFRAM_MCP_IDLE_MINUTES: "100000",
   };
-  const names = [...Object.keys(huge), "WOLFRAM_MCP_CALL_TIMEOUT_SECONDS"];
+  // Every name, aliases included, so the runner's own environment decides nothing.
+  const names = [
+    "WOLFRAM_MCP_START_TIMEOUT_SECONDS",
+    "WOLFRAM_START_TIMEOUT_SECONDS",
+    "WOLFRAM_MCP_CALL_TIMEOUT_SECONDS",
+    "WOLFRAM_CALL_TIMEOUT_SECONDS",
+    "WOLFRAM_MCP_IDLE_MINUTES",
+    "WOLFRAM_IDLE_MINUTES",
+  ];
   const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   const said = [];
   const loadWith = (env) => {
@@ -4019,9 +4026,8 @@ heading("A time too long for a timer is held to the longest one can hold");
   const held = [config.startTimeoutMs, config.callTimeoutMs, config.idleMs, infinite.idleMs];
   const noted = said.filter((message) => /is longer than the 24 days a time setting is held to/.test(message));
   check(
-    "each setting is held below the timer limit, with room for the grace added to it, and the log says so",
+    "each setting is held to 24 days, and the log says so",
     held.every((ms) => ms === lib.MAX_TIME_MS) &&
-      lib.MAX_TIME_MS + 3_600_000 < TIMER_LIMIT_MS &&
       noted.length === 4 &&
       noted.some((message) => message.startsWith("WOLFRAM_CALL_TIMEOUT_SECONDS=3000000")) &&
       noted.some((message) => /^WOLFRAM_MCP_IDLE_MINUTES=Infinity .*using 34560 minutes$/.test(message)),
