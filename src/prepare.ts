@@ -37,9 +37,15 @@ export const NOT_RESOLVED_BACKOFF_MS = 15_000;
 /**
  * The least a kernel start is handed: below this, the handshake could only
  * time out, so no kernel is spawned and no seat spent on it. A real kernel
- * takes seconds to start; the fake one a fraction of this.
+ * takes seconds to start; the fake one a fraction of this. Capped at half the
+ * start timeout itself (`minStartMs`), so a short one still gets an attempt.
  */
 export const MIN_START_MS = 1_000;
+
+/** The minimum a start of a `totalMs` deadline is handed. */
+export function minStartMs(totalMs: number): number {
+  return Math.min(MIN_START_MS, totalMs / 2);
+}
 
 /** What ends that wait sooner, said by both paths, so they cannot drift apart. */
 export const NOT_RESOLVED_ADVICE =
@@ -184,7 +190,15 @@ export class Deadline {
   handOn(stage: string, minimumMs = 1): number {
     if (this.signal.aborted) throw new PreparationStopped();
     const left = this.remaining();
-    if (left < minimumMs) throw new PreparationTimeout(stage, this.totalMs);
+    if (left < minimumMs) {
+      // Said plainly: nothing was tried, so "ran out while starting" alone
+      // read as though a start had been under way and failed.
+      throw new PreparationTimeout(
+        stage,
+        this.totalMs,
+        left > 0 ? `${left}ms were left, too little to begin, so nothing was started` : undefined,
+      );
+    }
     return left;
   }
 }

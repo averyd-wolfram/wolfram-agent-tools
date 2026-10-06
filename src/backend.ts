@@ -35,7 +35,7 @@ import {
   candidateIdentity,
   Deadline,
   formatWait,
-  MIN_START_MS,
+  minStartMs,
   NOT_RESOLVED_ADVICE,
   NOT_RESOLVED_BACKOFF_MS,
   PreparationStopped,
@@ -191,7 +191,7 @@ export class LocalBackend implements KernelBackend {
    */
   async prepare(deadline: Deadline): Promise<void> {
     // Read once, and not spent on a start too short to succeed.
-    const remainder = deadline.handOn("starting the kernel", MIN_START_MS);
+    const remainder = deadline.handOn("starting the kernel", minStartMs(deadline.totalMs));
     // A beat of grace, so the handshake's own timer fires first: its error
     // carries the kernel's last output, which names the actual cause. That
     // timer is the deadline's remainder, so its expiry is the deadline's.

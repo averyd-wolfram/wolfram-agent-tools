@@ -3209,6 +3209,21 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
   // spawned. Read off the session's own log of what it spawned: one killed by
   // a near-0ms timer dies before it can write a marker.
   const spawnLog = [];
+  const backendLogging = (into) =>
+    new lib.LocalBackend({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "0" },
+      log: (m) => into.push(m),
+    });
+  // First, that a spawn is what this log line says, so a reworded line cannot
+  // make the check below pass by seeing nothing.
+  const witnessLog = [];
+  const witness = backendLogging(witnessLog);
+  await witness.prepare(new lib.Deadline(20_000)).catch(() => {});
+  await witness.stop();
   const unstarted = new lib.LocalBackend({
     bin: fakeKernel,
     serverName: "WolframLanguage",
@@ -3225,8 +3240,28 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
   const spawned = spawnLog.filter((m) => /starting kernel/.test(m)).length;
   check(
     "a deadline too nearly spent for a kernel to start spawns none, and fails as the deadline",
-    spentOutcome?.name === "PreparationTimeout" && spawned === 0,
+    witnessLog.some((m) => /starting kernel/.test(m)) &&
+      spentOutcome?.name === "PreparationTimeout" && /nothing was started/.test(spentOutcome?.message ?? "") &&
+      spawned === 0,
     `${spentOutcome?.name ?? spentOutcome}; ${spawned} kernel(s) spawned`,
+  );
+
+  // But the floor is capped by the start timeout itself: one of a second must
+  // still try, where a fixed second-long floor refused every start.
+  const shortLog = [];
+  const short = backendLogging(shortLog);
+  // 100ms of it spent before the start, as inspection or an attach would.
+  let shortReads = 0;
+  const shortStart = Date.now();
+  const shortClock = () => (++shortReads === 1 ? shortStart : Date.now() + 100);
+  const shortOutcome = await short
+    .prepare(new lib.Deadline(1_000, shortClock))
+    .then(() => "prepared", (e) => e.message);
+  await short.stop();
+  check(
+    "a start timeout of a second still gets an attempt",
+    shortLog.some((m) => /starting kernel/.test(m)),
+    String(shortOutcome).slice(0, 80),
   );
 
   // The window's other end, on a clock the suite controls: once it has passed,
