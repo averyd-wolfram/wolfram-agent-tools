@@ -5576,7 +5576,7 @@ heading("CI runs the tests for anything but prose");
 // builds are GitHub pre-releases: a v<x.y.z> release is a release, 0.x included.
 heading("Every release build is named, and the name is in every file");
 {
-  const { releaseVersion, stamp } = await import(join(root, "scripts", "release-version.mjs"));
+  const { releaseVersion, stamp, compareVersions, latestRelease } = await import(join(root, "scripts", "release-version.mjs"));
   const tags = ["v0.2.0-pre.1", "v0.2.0-pre.3", "v0.3.0-pre.9", "v0.2.0-pre.x", "v0.1.0"];
   const rpBranch = "release-please--branches--main";
   const branch = releaseVersion({ ref: rpBranch, refType: "branch", tags, packageVersion: "0.2.0" });
@@ -5604,19 +5604,26 @@ heading("Every release build is named, and the name is in every file");
       named("v1.0.0", "tag").create === false,
     JSON.stringify(named("v0.2.0", "tag")),
   );
-  // Publishing a draft makes it Latest unless told otherwise, so a release
-  // finished late — a stuck draft completed after the next release — would take
-  // Latest from a newer one, and releases/latest/download/… would serve the
-  // older build. Numeric order, not string order: 0.10.0 follows 0.9.0.
-  const latest = (ref, others) => releaseVersion({ ref, refType: "tag", tags: [...tags, ref, ...others], packageVersion: "0.2.0" }).latest;
+  const ranked = ["0.10.0", "0.9.0-pre.10", "0.9.0", "0.9.0-pre.9", "0.9.0-pre.1", "0.9.0-rc.1"].sort(compareVersions);
   check(
-    "a release is marked Latest unless a later release's tag exists, a suffixed one never",
-    latest("v0.2.0", ["v0.3.0-pre.9", "v0.1.9"]) === true &&
-      latest("v0.9.0", ["v0.10.0"]) === false &&
-      latest("v0.10.0", ["v0.9.0"]) === true &&
-      latest("v1.1.0-rc.1", []) === false &&
-      branch.latest === false,
-    `0.2.0 ${latest("v0.2.0", ["v0.3.0-pre.9"])}, 0.9.0 ${latest("v0.9.0", ["v0.10.0"])}`,
+    "versions rank as semver ranks them: numerically, and a release above its own pre-releases",
+    ranked.join(" ") === "0.9.0-pre.1 0.9.0-pre.9 0.9.0-pre.10 0.9.0-rc.1 0.9.0 0.10.0",
+    ranked.join(" "),
+  );
+  // GitHub makes a newly published release Latest unless told otherwise, so a
+  // release finished late — a stuck draft completed after the next release —
+  // would take Latest from a newer one, and releases/latest/download/… would
+  // serve the older build. So every build publishes with Latest off, then marks
+  // the highest version published: a tag alone, or a draft, is not a release.
+  const rel = (tag, draft = false, prerelease = false) => ({ tag, draft, prerelease });
+  const published = [rel("v0.1.1"), rel("v0.1.2"), rel("v0.1.10"), rel("v0.2.0-pre.1", false, true)];
+  check(
+    "Latest is the highest version published, never a draft or a pre-release",
+    latestRelease(published) === "v0.1.10" &&
+      latestRelease([...published, rel("v0.2.0", true), rel("v1.0.0-rc.1", false, true)]) === "v0.1.10" &&
+      latestRelease([rel("v0.1.1"), rel("v0.1.2", true)]) === "v0.1.1" &&
+      latestRelease([rel("v0.1.0-pre.1", false, true)]) === undefined,
+    String(latestRelease(published)),
   );
   check(
     "a release branch whose version is already released builds nothing",

@@ -8,7 +8,8 @@
  * no outputs, the build that publishes the draft never ran, and the release PR
  * stayed pending — which stops release-please opening the next one.
  */
-import { pendingRelease, tagCommits } from "../scripts/pending-release.mjs";
+import { pendingRelease } from "../scripts/pending-release.mjs";
+import { tagCommits } from "../scripts/release-version.mjs";
 
 let failures = 0;
 let checks = 0;
@@ -76,6 +77,11 @@ check(
   untagged === 'finish=["v0.1.2"] relabel=[]',
   untagged,
 );
+// release-please makes only v<x.y.z>. A pre-release is published as it is
+// made, so a draft on a -pre tag is a person's, and building it would publish
+// a pre-release of a version that may already be released.
+const pre = decide([{ tag: "v0.1.2", draft: false }, { tag: "v0.1.2-pre.6", draft: true }]);
+check("a draft on a suffixed tag is not release-please's, and is left alone", pre === "finish=[] relabel=[]", pre);
 // GitHub publishing one of two drafts of a tag leaves the other; building it
 // would be refused as already released on every later run.
 const twice = decide([

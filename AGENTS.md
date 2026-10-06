@@ -224,7 +224,7 @@ built-ins, which is the bug it exists for.
   which `release-please.yml` calls in the same run, is the one job that builds and publishes:
   each update of that PR runs CI in full on its commit (it calls `ci.yml`) and publishes the
   pre-release `v<x.y.z>-pre.<n>`, and merging the PR makes a draft and tag that the build
-  finishes as the release — a normal GitHub release from 0.x on, marked Latest — found by
+  finishes as the release — a normal GitHub release from 0.x on, the highest one Latest — found by
   `scripts/pending-release.mjs` from what exists, so a run the action failed partway, or a
   retry dispatched by hand, still finishes it —
   `scripts/release-version.mjs` names the build and stamps its version into the checkout, and

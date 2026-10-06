@@ -77,9 +77,7 @@ jobs:
       ref_type: branch
 
   # Whatever release-please did, failed included: what is left to finish is
-  # read from GitHub. A PR is relabelled here, before any build, because that
-  # is when release-please would have done it, and a PR left pending makes its
-  # next run create the release again and refuse to open the next release PR.
+  # read from GitHub.
   pending:
     needs: release-please
     if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
@@ -87,9 +85,10 @@ jobs:
     permissions:
       # GitHub lists a draft only to a token that can push.
       contents: write
-      pull-requests: write
+      pull-requests: read
     outputs:
       finish: ${{ steps.p.outputs.finish }}
+      relabel: ${{ steps.p.outputs.relabel }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -99,15 +98,27 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/pending-release.mjs
+
+  # A PR left pending makes release-please's next run create its release again
+  # and refuse to open the next release PR. Beside the build, not before it:
+  # a label that will not change must not hold back a release, and only the
+  # next run, which waits for this one, reads the labels.
+  relabel:
+    needs: pending
+    if: ${{ !cancelled() && needs.pending.result == 'success' && needs.pending.outputs.relabel != '[]' }}
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
       - name: Label released PRs as release-please would
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELABEL: ${{ steps.p.outputs.relabel }}
+          RELABEL: ${{ needs.pending.outputs.relabel }}
         run: |
           for pr in $(jq -r '.[]' <<<"$RELABEL"); do
             gh api "repos/$GITHUB_REPOSITORY/issues/$pr/labels" -f "labels[]=autorelease: tagged" >/dev/null
             # A label already gone is the state this sets, so only a 404 is
-            # success; anything else stops the run.
+            # success; anything else fails the run.
             if ! gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/$pr/labels/autorelease:%20pending" \
               >/dev/null 2>unlabel.err; then
               grep -q "HTTP 404" unlabel.err || { cat unlabel.err; exit 1; }

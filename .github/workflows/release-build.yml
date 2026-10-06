@@ -10,9 +10,8 @@ name: Release build
 # - a v<version> tag: that release. release-please opened it as a draft, so
 #   nobody meets a release without its files: the assets go up first, and only
 #   then is it published — a normal release, 0.x included, and a pre-release
-#   only when its version has a suffix. It is marked Latest unless a later
-#   release's tag exists, so a draft finished late cannot take Latest from a
-#   newer release.
+#   only when its version has a suffix. Latest then goes to the highest version
+#   published, so a draft finished late cannot take it from a newer release.
 #
 # The build is named before anything else runs, so a ref that names no release
 # fails at once. Then CI runs in full on the exact commit, the Node floor and
@@ -59,7 +58,6 @@ jobs:
       tag: ${{ steps.v.outputs.tag }}
       prerelease: ${{ steps.v.outputs.prerelease }}
       create: ${{ steps.v.outputs.create }}
-      latest: ${{ steps.v.outputs.latest }}
       sha: ${{ steps.v.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
@@ -124,15 +122,15 @@ jobs:
           SHA: ${{ needs.name.outputs.sha }}
           PRERELEASE: ${{ needs.name.outputs.prerelease }}
           CREATE: ${{ needs.name.outputs.create }}
-          LATEST: ${{ needs.name.outputs.latest }}
         run: |
           mapfile -t assets < <(find release -maxdepth 1 -type f | sort)
           pre=()
           [ "$PRERELEASE" = true ] && pre=(--prerelease)
-          # Said either way: GitHub makes a release it newly publishes Latest
-          # unless told otherwise, and a pre-release can never be.
+          # Off when published: GitHub makes a newly published release Latest
+          # unless told otherwise, and a release finished late would take it
+          # from a newer one. Set after, below. A pre-release is never Latest.
           latest=()
-          [ "$PRERELEASE" = true ] || latest=("--latest=$LATEST")
+          [ "$PRERELEASE" = true ] || latest=(--latest=false)
           if [ "$CREATE" = true ]; then
             # Asked again here, not only when the build was named: the version
             # may have been released while CI ran, and a pre-release after its
@@ -176,4 +174,11 @@ jobs:
           else
             cat view.err
             exit 1
+          fi
+          # The highest version published, read after this one was: of two
+          # builds, the one that publishes last sees both. Assigned on its own
+          # line, so a failure to read it stops the step.
+          if [ "$PRERELEASE" != true ]; then
+            newest=$(node scripts/release-version.mjs --latest)
+            gh release edit "$newest" --latest
           fi

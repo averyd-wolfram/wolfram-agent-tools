@@ -15,12 +15,14 @@
  * release again. So every release run asks what exists, whatever the action
  * did (release-please.yml):
  *
- * - `finish`: every draft whose `v<version>` tag exists and that has no
+ * - `finish`: every draft whose `v<x.y.z>` tag exists and that has no
  *   published release beside it, for release-build.yml to publish. A draft
- *   without its tag is someone's notes for a version not yet released. The
- *   same rule rebuilds a release whose build failed, on the next run.
+ *   without its tag is someone's notes for a version not yet released, and one
+ *   on a suffixed tag is not release-please's: it makes only `v<x.y.z>`, and a
+ *   pre-release is published as it is made. The same rule rebuilds a release
+ *   whose build failed, on the next run.
  * - `relabel`: every merged PR still labelled pending whose merge commit
- *   carries a tag that has a release, draft or published — the state in which
+ *   carries such a tag with a release, draft or published — the state in which
  *   release-please would have relabelled it. A tag with no release yet keeps
  *   its PR pending: release-please's next run makes the release only for a PR
  *   still labelled pending.
@@ -30,8 +32,7 @@
 import { execFileSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-
-const RELEASE_TAG = /^v(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?$/;
+import { compareVersions, listReleases, tagCommits, tagVersion } from "./release-version.mjs";
 
 /**
  * @param {{
@@ -43,81 +44,56 @@ const RELEASE_TAG = /^v(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?$/;
  * @returns {{ finish: string[], relabel: number[] }}
  */
 export function pendingRelease({ releases, tags, pulls }) {
-  const released = new Set(releases.filter((release) => !release.draft).map((release) => release.tag));
-  const finish = [
-    ...new Set(
-      releases
-        .filter(({ tag, draft }) => draft && RELEASE_TAG.test(tag) && tags.has(tag) && !released.has(tag))
-        .map((release) => release.tag),
-    ),
-  ].sort(byVersion);
-  const withRelease = new Set(
-    releases.filter(({ tag }) => RELEASE_TAG.test(tag) && tags.has(tag)).map(({ tag }) => tags.get(tag)),
-  );
-  const relabel = pulls.filter((pull) => withRelease.has(pull.sha)).map((pull) => pull.number);
+  const ours = releases.filter(({ tag }) => tagVersion(tag, { core: true }) && tags.has(tag));
+  const published = new Set(ours.filter((release) => !release.draft).map((release) => release.tag));
+  const finish = [...new Set(ours.filter((release) => release.draft && !published.has(release.tag)).map(({ tag }) => tag))]
+    .sort((a, b) => compareVersions(a.slice(1), b.slice(1)));
+  const released = new Set(ours.map(({ tag }) => tags.get(tag)));
+  const relabel = pulls.filter((pull) => released.has(pull.sha)).map((pull) => pull.number);
   return { finish, relabel };
 }
 
-/** Oldest version first, numerically: v0.9.0 before v0.10.0. */
-function byVersion(a, b) {
-  const [x, y] = [a, b].map((tag) => (RELEASE_TAG.exec(tag) ?? []).slice(1, 4).map(Number));
-  const i = x.findIndex((part, k) => part !== y[k]);
-  return i < 0 ? a.localeCompare(b) : x[i] - y[i];
-}
-
-/**
- * Each tag's commit from `git ls-remote --tags`. An annotated tag is listed
- * twice, as the tag object and peeled (`^{}`) as the commit it points at, and
- * a merge commit is matched against the commit.
- */
-export function tagCommits(lsRemote) {
-  const commits = new Map();
-  for (const line of lsRemote.split("\n")) {
-    const [sha, ref] = line.split("\t");
-    if (!sha || !ref?.startsWith("refs/tags/")) continue;
-    const name = ref.slice("refs/tags/".length);
-    if (name.endsWith("^{}")) commits.set(name.slice(0, -3), sha);
-    else if (!commits.has(name)) commits.set(name, sha);
+// The repository's own list of pull requests, filtered by label, rather than
+// `gh pr list --label`, which goes through search, whose index lags: it could
+// still show pending a PR release-please relabelled seconds before. One call
+// returns each merge commit too.
+const PENDING_PULLS = `query($owner: String!, $name: String!, $endCursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(first: 100, after: $endCursor, states: MERGED, labels: ["autorelease: pending"]) {
+      nodes { number mergeCommit { oid } }
+      pageInfo { hasNextPage endCursor }
+    }
   }
-  return commits;
-}
+}`;
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   try {
     const repo = process.env.GITHUB_REPOSITORY;
     if (!repo) throw new Error("GITHUB_REPOSITORY names no repository");
-    const run = (command, args) => execFileSync(command, args, { encoding: "utf8" });
-    // A draft is listed only to a token that can push, which the job has.
-    const releases = run("gh", [
-      "api",
-      "--paginate",
-      `repos/${repo}/releases?per_page=100`,
-      "--jq",
-      ".[] | {tag: .tag_name, draft: .draft}",
-    ])
+    const [owner, name] = repo.split("/");
+    // From the remote: the job's checkout fetched no tags.
+    const tags = tagCommits(execFileSync("git", ["ls-remote", "--tags", "origin"], { encoding: "utf8" }));
+    const pulls = execFileSync(
+      "gh",
+      [
+        "api",
+        "graphql",
+        "--paginate",
+        "-f",
+        `query=${PENDING_PULLS}`,
+        "-f",
+        `owner=${owner}`,
+        "-f",
+        `name=${name}`,
+        "--jq",
+        ".data.repository.pullRequests.nodes[] | {number, sha: .mergeCommit.oid}",
+      ],
+      { encoding: "utf8" },
+    )
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line));
-    // From the remote: the job's checkout fetched no tags.
-    const tags = tagCommits(run("git", ["ls-remote", "--tags", "origin"]));
-    // The issues endpoint, not `gh pr list --label`, which goes through search:
-    // its index lags, and would still show pending a PR release-please had
-    // relabelled seconds before, in the very run that released it.
-    const label = encodeURIComponent("autorelease: pending");
-    const pulls = run("gh", [
-      "api",
-      "--paginate",
-      `repos/${repo}/issues?state=closed&labels=${label}&per_page=100`,
-      "--jq",
-      ".[] | select(.pull_request.merged_at != null) | .number",
-    ])
-      .split("\n")
-      .filter(Boolean)
-      .map((number) => ({
-        number: Number(number),
-        sha: run("gh", ["api", `repos/${repo}/pulls/${number}`, "--jq", ".merge_commit_sha"]).trim(),
-      }));
-    const { finish, relabel } = pendingRelease({ releases, tags, pulls });
+    const { finish, relabel } = pendingRelease({ releases: listReleases(repo), tags, pulls });
     const lines = `finish=${JSON.stringify(finish)}\nrelabel=${JSON.stringify(relabel)}\n`;
     if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, lines);
     process.stdout.write(lines);
