@@ -153,8 +153,9 @@ built-ins, which is the bug it exists for.
   - `lib.ts`: the public API surface, `"."` → `dist/lib.js`
   - `version.ts`: `PKG`, resolved correctly in every packaging mode
 - `test/`: `smoke.mjs` (the suite), `fake-kernel.mjs` (a stand-in kernel),
-  `public-content.mjs` (the public-content check's own tests), and `agenttools-contract.wlt`
-  (what this package assumes about the paclet)
+  `public-content.mjs` (the public-content check's own tests), `pending-release.mjs` (what a
+  release run finishes), and `agenttools-contract.wlt` (what this package assumes about the
+  paclet)
 - `scripts/`: `mcp-server.mjs` is the launcher `.mcp.json` invokes via `npm run mcp`;
   `run-contract.wls` runs the `.wlt`; `custom-server.mjs` is `npm run test:custom`;
   `on-edit.mjs` is the PostToolUse hook behind every Write and Edit — prettier, eslint and
@@ -183,6 +184,8 @@ built-ins, which is the bug it exists for.
   prepare script; `test/public-content.mjs`, part of `npm test`, tests the check itself;
   `metrics.mjs` derives the figures the docs no longer assert;
   `release-version.mjs` names a release build from its ref and stamps the version into the tree;
+  `pending-release.mjs` reads from GitHub what a release run must finish — a draft whose tag
+  exists, a release PR still labelled pending — whatever release-please's action reported;
   `ci-changes.mjs` decides whether a pull request needs CI's test and build jobs — not when
   it changed only markdown outside `plugin/`, `test/`, `src/`, `scripts/` and `examples/`
 - `examples/`: `weather.wl`, a worked example against a public API — sessions here lint it
@@ -221,7 +224,9 @@ built-ins, which is the bug it exists for.
   which `release-please.yml` calls in the same run, is the one job that builds and publishes:
   each update of that PR runs CI in full on its commit (it calls `ci.yml`) and publishes the
   pre-release `v<x.y.z>-pre.<n>`, and merging the PR makes a draft and tag that the build
-  finishes as the release, a pre-release below 1.0.0 —
+  finishes as the release — a normal GitHub release from 0.x on, marked Latest — found by
+  `scripts/pending-release.mjs` from what exists, so a run the action failed partway, or a
+  retry dispatched by hand, still finishes it —
   `scripts/release-version.mjs` names the build and stamps its version into the checkout, and
   `pr-title.yml`'s `commit-types` job (`scripts/commit-types.mjs`) refuses a commit that changes what
   ships under a type that bumps nothing; `pr-title.yml` fails a PR whose title is not a Conventional Commit, because under

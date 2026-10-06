@@ -7,9 +7,13 @@ name: Release
 #
 # - when it opened or updated that PR, the PR's branch is built and published
 #   as the next pre-release of the computed version, v<x.y.z>-pre.<n>;
-# - when merging the PR released it — a draft GitHub release and its tag
+# - when a draft GitHub release's tag exists — the state merging the PR leaves
 #   (release-please-config.json: draft, force-tag-creation) — the tag is built
-#   and the draft published.
+#   and the draft published. That is read from GitHub, not from the action's
+#   outputs (scripts/pending-release.mjs): for 0.1.2 the action made the tag
+#   and the draft, then failed relabelling the PR, so it reported no release
+#   and the build never ran. The next run, or a dispatch from the Actions tab,
+#   finishes whatever a run left undone.
 #
 # One run, because everything here acts with GITHUB_TOKEN, and by GitHub's
 # rule against recursive runs nothing that token does — opening the PR,
@@ -25,6 +29,8 @@ name: Release
 on:
   push:
     branches: [main]
+  # To retry a failed run without waiting for another merge.
+  workflow_dispatch:
 
 # One release run at a time, never cancelled once running. GitHub keeps only
 # the newest pending run, so pushes that land meanwhile collapse into one,
@@ -38,16 +44,17 @@ permissions:
 
 jobs:
   release-please:
+    # A dispatch on any other branch would have release-please open a release
+    # PR against that branch.
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
     outputs:
-      release_created: ${{ steps.rp.outputs.release_created }}
-      tag_name: ${{ steps.rp.outputs.tag_name }}
       pr_branch: ${{ steps.rp.outputs.pr && fromJSON(steps.rp.outputs.pr).headBranchName }}
     steps:
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@v5
         id: rp
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -69,13 +76,58 @@ jobs:
       ref: ${{ needs.release-please.outputs.pr_branch }}
       ref_type: branch
 
-  release:
+  # Whatever release-please did, failed included: what is left to finish is
+  # read from GitHub. A PR is relabelled here, before any build, because that
+  # is when release-please would have done it, and a PR left pending makes its
+  # next run create the release again and refuse to open the next release PR.
+  pending:
     needs: release-please
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    permissions:
+      # GitHub lists a draft only to a token that can push.
+      contents: write
+      pull-requests: write
+    outputs:
+      finish: ${{ steps.p.outputs.finish }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - id: p
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/pending-release.mjs
+      - name: Label released PRs as release-please would
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELABEL: ${{ steps.p.outputs.relabel }}
+        run: |
+          for pr in $(jq -r '.[]' <<<"$RELABEL"); do
+            gh api "repos/$GITHUB_REPOSITORY/issues/$pr/labels" -f "labels[]=autorelease: tagged" >/dev/null
+            # A label already gone is the state this sets, so only a 404 is
+            # success; anything else stops the run.
+            if ! gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/$pr/labels/autorelease:%20pending" \
+              >/dev/null 2>unlabel.err; then
+              grep -q "HTTP 404" unlabel.err || { cat unlabel.err; exit 1; }
+            fi
+            echo "#$pr: autorelease: pending -> autorelease: tagged"
+          done
+
+  # The tag is built and the draft published. Each tag on its own, so one that
+  # fails does not stop another.
+  release:
+    needs: pending
+    if: ${{ !cancelled() && needs.pending.result == 'success' && needs.pending.outputs.finish != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: ${{ fromJSON(needs.pending.outputs.finish) }}
     permissions:
       contents: write
       statuses: write
     uses: ./.github/workflows/release-build.yml
     with:
-      ref: ${{ needs.release-please.outputs.tag_name }}
+      ref: ${{ matrix.tag }}
       ref_type: tag

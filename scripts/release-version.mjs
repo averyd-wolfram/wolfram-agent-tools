@@ -19,8 +19,11 @@
  *   version to it. Once `v<x.y.z>` itself exists the branch builds nothing: a
  *   pre-release of a version already released ranks below it, and an installed
  *   plugin would still take the changed string as an update.
- * - a `v<version>` tag: that release. Below 1.0.0, or with a `-` suffix, it is
- *   marked a pre-release on GitHub: nothing before 1.0.0 is a supported release.
+ * - a `v<version>` tag: that release, a normal GitHub release from 0.x on, and
+ *   a pre-release only when its version has a `-` suffix. It is marked Latest
+ *   unless a later release's tag exists: publishing a draft makes it Latest
+ *   unless told otherwise, so a release finished late would take Latest, and
+ *   `releases/latest/download/…`, from the newer one.
  *
  * The version is stamped into the CI checkout only, never committed: the
  * branch says what is being prepared, and the build says which build it is.
@@ -41,7 +44,7 @@ export const RELEASE_BRANCH = /^release-please--branches--.+/;
  * @param {{ ref: string, refType: string, tags: string[], packageVersion: string }} input
  *   the ref being built (`GITHUB_REF_NAME`, `GITHUB_REF_TYPE`), every tag that
  *   exists, and the version in the built commit's package.json
- * @returns {{ version: string, tag: string, prerelease: boolean, create: boolean }}
+ * @returns {{ version: string, tag: string, prerelease: boolean, create: boolean, latest: boolean }}
  *   `create` is true when the build makes its own tag; a tag build releases
  *   the tag that started it
  */
@@ -51,12 +54,9 @@ export function releaseVersion({ ref, refType, tags, packageVersion }) {
     if (!ref.startsWith("v") || !SEMVER.test(version)) {
       throw new Error(`tag ${ref} is not v<semver>, so it names no release`);
     }
-    return {
-      version,
-      tag: ref,
-      prerelease: version.startsWith("0.") || version.includes("-"),
-      create: false,
-    };
+    const prerelease = version.includes("-");
+    const later = tags.some((tag) => tag.startsWith("v") && CORE.test(tag.slice(1)) && newer(tag.slice(1), version));
+    return { version, tag: ref, prerelease, create: false, latest: !prerelease && !later };
   }
   if (!RELEASE_BRANCH.test(ref)) {
     throw new Error(`branch ${ref} is not release-please's release branch, so it names no release`);
@@ -78,7 +78,14 @@ export function releaseVersion({ ref, refType, tags, packageVersion }) {
     .filter((n) => Number.isInteger(n) && n > 0);
   const n = Math.max(0, ...built) + 1;
   const version = `${target}-pre.${n}`;
-  return { version, tag: `v${version}`, prerelease: true, create: true };
+  return { version, tag: `v${version}`, prerelease: true, create: true, latest: false };
+}
+
+/** Is x.y.z `a` a later version than `b`'s x.y.z? Numerically: 0.10.0 follows 0.9.0. */
+function newer(a, b) {
+  const [x, y] = [a, b].map((v) => v.replace(/-.*$/, "").split(".").map(Number));
+  const i = x.findIndex((part, k) => part !== y[k]);
+  return i >= 0 && x[i] > y[i];
 }
 
 /**
