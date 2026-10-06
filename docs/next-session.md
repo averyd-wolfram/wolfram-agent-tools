@@ -15,8 +15,8 @@ in `docs/design.md`.
   not the MCP SDK's default), #5 (a server that will not start fails at once, with a short
   back-off — on the shared path only for requests after the first failure; a simultaneous burst
   is #19), #11 (a start deadline handed on from one read, so a spent one starts nothing), #26
-  (`fast-uri` past its advisory, and the release build holding a release while an advisory
-  covers a production dependency; PR #27). Still in it: #15 and #10.
+  (`fast-uri` past its advisory, PR #27). Still in it: #15 (PR #28) and #10. How to hear of the
+  next advisory is #29 (`needs design`): an audit gate tried in #27 was reverted.
 - **#21's fix returns to #17 with the next merge to `main`.** release-please could not parse
   #21's squash commit, whose body was its PR description, so #17's changelog lacks #11 and no
   pre-release with it was built. #21's description now carries a `BEGIN_COMMIT_OVERRIDE` block
