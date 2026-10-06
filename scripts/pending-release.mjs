@@ -36,7 +36,7 @@
 import { execFileSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { compareTags, latestRelease, listReleases, tagCommits, tagVersion } from "./release-version.mjs";
+import { compareTags, ghJsonLines, latestRelease, listReleases, tagCommits, tagVersion } from "./release-version.mjs";
 
 /**
  * @param {{
@@ -54,8 +54,12 @@ export function pendingRelease({ releases, tags, pulls }) {
   const drafts = [...new Set(ours.filter(({ tag, draft }) => draft && !published.has(tag)).map(({ tag }) => tag))].sort(
     compareTags,
   );
-  const finish = drafts.filter((tag) => !newest || compareTags(tag, newest) > 0);
-  const left = drafts.filter((tag) => !finish.includes(tag)).map((tag) => ({ tag, newest: newest ?? "" }));
+  const finish = [];
+  const left = [];
+  for (const tag of drafts) {
+    if (!newest || compareTags(tag, newest) > 0) finish.push(tag);
+    else left.push({ tag, newest });
+  }
   const released = new Set(ours.map(({ tag }) => tags.get(tag)));
   const relabel = pulls.filter((pull) => released.has(pull.sha)).map((pull) => pull.number);
   return { finish, relabel, left };
@@ -81,26 +85,19 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const [owner, name] = repo.split("/");
     // From the remote: the job's checkout fetched no tags.
     const tags = tagCommits(execFileSync("git", ["ls-remote", "--tags", "origin"], { encoding: "utf8" }));
-    const pulls = execFileSync(
-      "gh",
-      [
-        "api",
-        "graphql",
-        "--paginate",
-        "-f",
-        `query=${PENDING_PULLS}`,
-        "-f",
-        `owner=${owner}`,
-        "-f",
-        `name=${name}`,
-        "--jq",
-        ".data.repository.pullRequests.nodes[] | {number, sha: .mergeCommit.oid}",
-      ],
-      { encoding: "utf8" },
-    )
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line));
+    const pulls = ghJsonLines([
+      "api",
+      "graphql",
+      "--paginate",
+      "-f",
+      `query=${PENDING_PULLS}`,
+      "-f",
+      `owner=${owner}`,
+      "-f",
+      `name=${name}`,
+      "--jq",
+      ".data.repository.pullRequests.nodes[] | {number, sha: .mergeCommit.oid}",
+    ]);
     const { finish, relabel, left } = pendingRelease({ releases: listReleases(repo), tags, pulls });
     const lines = `finish=${JSON.stringify(finish)}\nrelabel=${JSON.stringify(relabel)}\n`;
     if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, lines);
