@@ -23,7 +23,8 @@
  *   as it is made. The same rule rebuilds a release whose build failed, on the
  *   next run — until a newer release is out: then finishing it would take
  *   Latest from that one, and a build that fails every time would fail every
- *   run, so it is a person's to finish or delete.
+ *   run, so it is a person's to finish or delete, and `left` names it for the
+ *   run to warn of.
  * - `relabel`: every merged PR still labelled pending whose merge commit
  *   carries such a tag with a release, draft or published — the state in which
  *   release-please would have relabelled it. A tag with no release yet keeps
@@ -35,7 +36,7 @@
 import { execFileSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { compareVersions, latestRelease, listReleases, tagCommits, tagVersion } from "./release-version.mjs";
+import { compareTags, latestRelease, listReleases, tagCommits, tagVersion } from "./release-version.mjs";
 
 /**
  * @param {{
@@ -44,19 +45,20 @@ import { compareVersions, latestRelease, listReleases, tagCommits, tagVersion } 
  *   pulls: { number: number, sha: string }[],
  * }} input every release, drafts included; every tag and the commit it is on;
  *   every merged PR still labelled `autorelease: pending`, with its merge commit
- * @returns {{ finish: string[], relabel: number[] }}
+ * @returns {{ finish: string[], relabel: number[], left: { tag: string, newest: string }[] }}
  */
 export function pendingRelease({ releases, tags, pulls }) {
   const ours = releases.filter(({ tag }) => tagVersion(tag, { core: true }) && tags.has(tag));
   const published = new Set(ours.filter((release) => !release.draft).map((release) => release.tag));
-  const latest = latestRelease(releases);
-  const newer = (tag) => !latest || compareVersions(tag.slice(1), latest.slice(1)) > 0;
-  const finish = [
-    ...new Set(ours.filter(({ tag, draft }) => draft && !published.has(tag) && newer(tag)).map(({ tag }) => tag)),
-  ].sort((a, b) => compareVersions(a.slice(1), b.slice(1)));
+  const newest = latestRelease(releases);
+  const drafts = [...new Set(ours.filter(({ tag, draft }) => draft && !published.has(tag)).map(({ tag }) => tag))].sort(
+    compareTags,
+  );
+  const finish = drafts.filter((tag) => !newest || compareTags(tag, newest) > 0);
+  const left = drafts.filter((tag) => !finish.includes(tag)).map((tag) => ({ tag, newest: newest ?? "" }));
   const released = new Set(ours.map(({ tag }) => tags.get(tag)));
   const relabel = pulls.filter((pull) => released.has(pull.sha)).map((pull) => pull.number);
-  return { finish, relabel };
+  return { finish, relabel, left };
 }
 
 // The repository's own list of pull requests, filtered by label, rather than
@@ -99,10 +101,19 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line));
-    const { finish, relabel } = pendingRelease({ releases: listReleases(repo), tags, pulls });
+    const { finish, relabel, left } = pendingRelease({ releases: listReleases(repo), tags, pulls });
     const lines = `finish=${JSON.stringify(finish)}\nrelabel=${JSON.stringify(relabel)}\n`;
     if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, lines);
     process.stdout.write(lines);
+    // A workflow command: shown on the run's summary, where the person it is
+    // left to will see it.
+    for (const { tag, newest } of left) {
+      process.stdout.write(
+        `::warning::${tag} is still a draft, older than the newest release, ${newest}, so no release run ` +
+          `finishes it. Delete it, or build it (gh workflow run release-build.yml --ref ${tag}) and then ` +
+          `mark ${newest} Latest again (gh release edit ${newest} --latest): a build publishes as Latest\n`,
+      );
+    }
   } catch (err) {
     process.stderr.write(`pending-release: ${err instanceof Error ? err.message : err}\n`);
     process.exit(1);

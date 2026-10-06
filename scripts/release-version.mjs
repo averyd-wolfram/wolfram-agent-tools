@@ -115,6 +115,11 @@ export function compareVersions(a, b) {
   return 0;
 }
 
+/** `compareVersions` for release tags: `v0.9.0` before `v0.10.0`. */
+export function compareTags(a, b) {
+  return compareVersions(a.replace(/^v/, ""), b.replace(/^v/, ""));
+}
+
 /**
  * The newest release: the highest `v<x.y.z>` among the published releases
  * that are not pre-releases — what GitHub marks Latest. A tag alone, or a
@@ -127,7 +132,7 @@ export function latestRelease(releases) {
   return releases
     .filter(({ tag, draft, prerelease }) => !draft && !prerelease && tagVersion(tag, { core: true }))
     .map(({ tag }) => tag)
-    .sort((a, b) => compareVersions(a.slice(1), b.slice(1)))
+    .sort(compareTags)
     .at(-1);
 }
 

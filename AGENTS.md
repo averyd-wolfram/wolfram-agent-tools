@@ -66,7 +66,8 @@ for what the fake cannot answer: paclet behaviour, licence text, `$BaseDirectory
 ## Writing and Running Tests
 
 `npm test` runs `test/smoke.mjs`, which drives the built server against `test/fake-kernel.mjs`
-over a real stdio transport. It must stay hermetic: nothing new may reach `fromWolframScript` or
+over a real stdio transport, then `test/public-content.mjs` and `test/pending-release.mjs`, which
+test those two scripts on their own. It must stay hermetic: nothing new may reach `fromWolframScript` or
 a real binary, and a full run must start no Wolfram kernel.
 
 Two rules for adding checks:
