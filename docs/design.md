@@ -509,8 +509,8 @@ guards the whole design — if dispatch ever becomes concurrent, all of this nee
 Nothing about tools. The remaining wart is the SDK's unchosen 60 s default on every op that
 carries no deadline of its own (`listTools`, `capabilities`, `getPrompt`, …). Those now flow
 through the same abandonment machinery when they time out, so the damage is bounded, but the
-number is still nobody's choice. The handshake's `initialize` is no longer among them: it was cut
-off at that 60 s inside a 120 s start timeout, so `KernelSession` now sends it with the start
+number is still nobody's choice. The handshake's `initialize` is no longer among them: the SDK's default
+cut it off below the default start timeout, so `KernelSession` now sends it with the start
 timeout plus a beat, and the handshake's own timer, which names the cause, is what fires.
 
 ## Teardown reaps the kernel's descendants

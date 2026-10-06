@@ -973,7 +973,6 @@ heading("An unfilled WOLFRAMINIT is no entitlement to the broker either");
       spawnCommand: join(home, "definitely-not-a-binary"),
       spawnArgs: [],
       spawnEnv: {},
-      startTimeoutMs: 120_000,
       log: () => {},
     });
     const status = client ? await client.status(5_000) : null;
@@ -1711,7 +1710,6 @@ heading("A spawn that lost the bind race is not mistaken for the winner");
     spawnCommand: process.execPath,
     spawnArgs: ["-e", ""],
     spawnEnv: { ...process.env },
-    startTimeoutMs: 120_000,
     log: (m) => said.push(m),
   });
   // The winner: another session's broker, bound only after open() has looked,
@@ -2012,7 +2010,6 @@ heading("Regression — an unspawnable broker must not crash the server");
     spawnCommand: join(home, "definitely-not-a-binary"),
     spawnArgs: [],
     spawnEnv: {},
-    startTimeoutMs: 120_000,
     log: () => {},
   });
   check("an unspawnable broker gives up rather than throwing", backend === null);
@@ -2049,7 +2046,6 @@ heading("Unit — when a broker may serve this session");
       spawnCommand: join(home, "definitely-not-a-binary"),
       spawnArgs: [],
       spawnEnv: {},
-      startTimeoutMs: 120_000,
       log: (m) => noted.push(m),
     });
 
