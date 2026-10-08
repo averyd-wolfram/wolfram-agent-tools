@@ -69,6 +69,13 @@ export interface BrokerOptions {
   allowInspect: boolean;
   clientInfo: { name: string; version: string };
   log: Logger;
+  /**
+   * For the suite: called the moment a socket is bound, before its identity is
+   * read, which is where another broker's removal of a stale socket can land
+   * (#32). A check replaces the address here, as that broker would, to show
+   * that whatever is put there meanwhile is never taken for this broker's own.
+   */
+  onBound?: ((path: string) => void) | undefined;
 }
 
 /**
@@ -713,6 +720,7 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
     rmSync(staging, { force: true });
     const server = await listenAt(staging, 1);
     if (!server) return null;
+    options.onBound?.(staging);
     const identity = socketIdentity(staging);
     let unlinkable = false;
     try {
@@ -774,6 +782,7 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
       removeStaleSocket(address, judged, log);
       const server = await listenAt(address, attempt);
       if (server) {
+        options.onBound?.(address);
         return {
           server,
           identity: process.platform === "win32" ? null : socketIdentity(address),

@@ -2171,9 +2171,16 @@ heading("Two brokers claiming at once in one process each take their own address
       clientInfo: { name: "smoke", version: "1.0.0" },
       log: (message) => logs[i].push(message),
     });
-  const maskBefore = process.umask();
+  // Read by setting and putting back, which is all umask() without an
+  // argument does, and which Node has deprecated as a way to read it.
+  const umask = () => {
+    const mask = process.umask(0o022);
+    process.umask(mask);
+    return mask;
+  };
+  const maskBefore = umask();
   const brokers = await Promise.all([start(0), start(1)]);
-  const maskAfter = process.umask();
+  const maskAfter = umask();
   const reached = [];
   for (let i = 0; i < 2; i++) {
     const seen = logs.map((l) => l.length);
@@ -2201,6 +2208,66 @@ heading("Two brokers claiming at once in one process each take their own address
     `${maskBefore.toString(8)} before, ${maskAfter.toString(8)} after`,
   );
   for (const broker of brokers) await broker?.stop();
+}
+
+// ---------------------------------------------------------------------------
+// The narrower half of #32. A broker that bound at its address and then read
+// the address's identity as its own took whatever was there by then: if
+// another broker's removal of a stale socket landed between the two, it took
+// that broker's socket. The two then each believed one socket theirs, and the
+// orphan's address watch, comparing that socket with itself, never noticed.
+// Under the address watch alone, with the gap widened, that left two brokers 1
+// round in 10. onBound is that moment, and the check plays the other broker in it.
+heading("A socket put at the address the moment a broker binds is never taken for its own");
+{
+  const dir = privateDir(join(home, "run-replaced-at-bind"));
+  const address = join(dir, "broker.sock");
+  const logs = [];
+  let decoy = null;
+  let boundAt = null;
+  let decoyConnections = 0;
+  const broker = await lib.startBroker({
+    address,
+    bin: fakeKernel,
+    serverName: "WolframLanguage",
+    idleMs: 60_000,
+    startTimeoutMs: 10_000,
+    reserveSeats: 0,
+    allowInspect: false,
+    clientInfo: { name: "smoke", version: "1.0.0" },
+    log: (message) => logs.push(message),
+    // The other broker, at the one moment it can do harm: whatever is at the
+    // address goes, and its own socket is bound there. listen() makes the file
+    // before it returns, so the replacement is complete when this does.
+    onBound: (path) => {
+      if (decoy) return;
+      boundAt = path;
+      rmSync(address, { force: true });
+      decoy = createServer((c) => {
+        decoyConnections++;
+        c.end();
+      });
+      decoy.listen(address);
+    },
+  });
+  const decoyBefore = decoyConnections;
+  const probe = connectSocket(address);
+  probe.on("error", () => {});
+  const reached = await until(
+    () => decoyConnections > decoyBefore || logs.some((m) => /proxy connected/.test(m)),
+    3_000,
+  ).then(() =>
+    decoyConnections > decoyBefore ? "the other broker" : logs.some((m) => /proxy connected/.test(m)) ? "itself" : "nothing",
+  );
+  probe.destroy();
+  check(
+    "a broker either stands down or is the one at its address",
+    boundAt !== null && (broker === null || reached === "itself"),
+    `bound at ${boundAt === null ? "nothing (the hook never ran)" : boundAt.slice(dir.length + 1)}; ` +
+      `${broker ? "running" : "stood down"}; its address reached ${reached}`,
+  );
+  await broker?.stop();
+  await new Promise((resolve) => (decoy ? decoy.close(() => resolve()) : resolve()));
 }
 
 // ---------------------------------------------------------------------------
