@@ -78,15 +78,40 @@ in `docs/design.md`.
   typescript-eslint 8.71, all dev-only) was rebased onto it so CI tested the pair, then merged.
   Both went through the merge process now under *Working here*: Codex's review, then the
   maintainer's approval. Neither changes what ships, so neither makes a release.
-- **0.1.4 is being held for a batch of fixes** (milestone `0.1.4`, chosen 2026-10-08; release
-  PR #64 collects them, and each merge publishes a `v0.1.4-pre.N`). Merged: #63 (fixes #39:
-  every kernel request carries this server's deadline, prompts and resource reads take the call
-  ceiling and can be cancelled, a request cancelled before it reaches the kernel stops none),
-  #65 (fixes #62: a kernel's error on any request is relayed with its prefix once, with its
-  `data`, on both paths; `BROKER_PROTOCOL` is 6 for the new field) and #66 (fixes #35: a
-  numeric setting written with a unit is ignored, and logged, rather than misread). Each went
-  through two or three `/code-review high` rounds and Codex, with CI green and the suite run
-  locally on `main` combined with it before merging.
+- **0.1.4 is released** (2026-10-08, #64, `32e326d`), the first batch held in a milestone
+  (`0.1.4`, now closed). It holds #63 (fixes #39: every kernel request carries this server's
+  deadline, prompts and resource reads take the call ceiling and can be cancelled, a request
+  cancelled before it reaches the kernel stops none), #65 (fixes #62: a kernel's error on any
+  request is relayed with its prefix once, with its `data`, on both paths; `BROKER_PROTOCOL` is
+  6 for the new field), #66 (fixes #35: a numeric setting written with a unit is ignored, and
+  logged, rather than misread) and #67 (fixes #33: a time is held at each timer it reaches, a
+  caller's deadline to `MAX_TIME_MS` so it stays inside the SDK's request timeout, and the
+  broker client sends the held value). `v0.1.4` is Latest; `release` moved to it, tagged
+  `wolfram--v0.1.4`; the bundle and the plugin archive, fetched through
+  `releases/latest/download/…`, match `SHA256SUMS.txt` and say 0.1.4. Each PR had two or three
+  `/code-review high` rounds and Codex, with CI green; #66 and #67, merged after `main` had
+  moved, also had the suite run on `main` combined with them first. Codex's findings were real
+  each time: the protocol bump on #65, and on #67 the deadline's tie with the SDK and a NaN
+  reaching the broker as `null`.
+- **0.1.5 is two fixes in, one under review** (2026-10-08, milestone `0.1.5`).
+  - **#68 is merged** (`136b59f`, fixes #31). A kernel's client is a `RelayClient` whose
+    `listTools` is a plain request, so no `outputSchema` is compiled and the relay judges no
+    result. `listAllTools` drains every page, so doctor now shows them all. Claude Code 2.1.290
+    was measured listing a server whose tool carries a schema ajv refuses. AgentTools 2.2.7 can
+    emit neither field, so `test:custom` cannot pin it.
+  - **#71 is merged** (`3a6448f`, fixes #38). `src/duration.ts` says every duration:
+    `budgetText` rounds down, `waitText` up, `elapsedText` down, and `idleText` covers the idle
+    setting. Units fit the size, `400ms` to `24d`.
+  - **#73 is under review** (fixes #32). The cause was reproduced by widening the stat-to-unlink
+    gap: one broker unlinked a winner's fresh socket. A follow-on was measured too: libuv's
+    close unlinked a successor's socket. Now a broker binds under `.b<pid>-<n>`, links it into
+    place and watches its address. It binds at the address directly when it can't link, as for
+    an over-long address on Linux. It also fixes the umask and the empty-grace timer for two
+    brokers in one process. The suite now fails if anything ends it early.
+  - **Release PR #72** is in the milestone.
+  - **Filed from the reviews, both `needs design`:** #69 (a non-object schema still fails the
+    whole list, in zod) and #70 (the lists read after a kernel start keep the SDK's 60 s
+    timeout).
 - **The backlog is GitHub issues** (`gh issue list`), labelled by type, `needs design` and area
   (*Working here* below). Other agents file there too, notably the downstream plugin's.
 - **The release pipeline versions itself** from the commit types on `main`. `docs/releasing.md`
@@ -96,27 +121,32 @@ in `docs/design.md`.
 
 ## What to do next, in order
 
-1. **Finish 0.1.4.** PR #67 (fixes #33, the milestone's last issue) holds a time at each timer
-   it reaches: an option a library caller builds or a `timeoutMs` off the broker's socket could
-   overflow a Node timer and fire it at once, and a NaN one too. `timerDelay` holds a delay to
-   `MAX_TIMER_MS`, and `deadlineDelay` holds a caller's deadline to `MAX_TIME_MS`, so it stays
-   inside the SDK's request timeout; the broker client sends the held value, since a NaN in a
-   frame arrived as `null` and took the broker's default. Both were Codex's P2s. This handoff is
-   its last commit; once the review and Codex's are done on the head, CI is green, and the
-   maintainer approves, run the suite on `main` merged with it and squash-merge it. Then:
-   - check that #64's `CHANGELOG.md` lists #39, #62, #35 and #33 and that its run's CI is green,
-     and ask the maintainer to merge #64, which is the release;
-   - after it, verify the assets through `releases/latest/download/…` and `SHA256SUMS.txt`, as
-     for 0.1.3, close the milestone, and observe #7's last link (item 2) on this release;
-   - #40's third point (overlap the long-call minute with an earlier section) is all that is
-     left of it; it changes no shipped code, so it can wait for any later PR.
+1. **Finish 0.1.5** (milestone `0.1.5`).
+   - **#73**: once CI passes on its head, comment `@codex review`, answer anything Codex finds,
+     and ask the maintainer to approve the merge. If `main` moved meanwhile, run the suite on the
+     combination first.
+   - **Release PR #72**: merge it once its changelog lists #68, #71 and #73.
+   - **Then verify the release as 0.1.4 was**: `v0.1.5` is Latest, `release` has moved and is
+     tagged `wolfram--v0.1.5`, and the assets fetched through `releases/latest/download/…`
+     match `SHA256SUMS.txt` and say 0.1.5.
+   - **#40's third point** (overlap the long-call minute with an earlier section) didn't ride
+     with any of the three. It goes with the next PR that touches the suite's timing; it changes
+     nothing shipped.
 2. **The one link of #7 left unobserved**: Claude Code running the auto-update pass itself, in
    an interactive session up to ten minutes after the first message, and saying `Plugin updated:
-   wolfram`. Check it at the next release, in a project following `release`; and try the route at
-   the 2.1.75 client floor, unmeasured for it. `docs/releasing.md` has the headless check.
+   wolfram`. 0.1.4 is that next release (2026-10-08): in a project following `release`, still on
+   0.1.3, an interactive session should now update itself; the maintainer runs it, since it needs
+   a signed-in client. Try the route at the 2.1.75 client floor too, unmeasured for it.
+   `docs/releasing.md` has the headless check.
 3. **Dependabot's one open PR, #56** (TypeScript 7), which waits: typescript-eslint 8.71.1
-   accepts TypeScript `<6.1.0` (checked 2026-10-08). It will also need `"types": ["node"]` in
-   `tsconfig.json`, since TypeScript 7 no longer includes `@types/*` by default; with it, 7.0.2
+   accepts TypeScript `<6.1.0` (checked 2026-10-08), and #56's CI is red. It stays open as the
+   reminder rather than closed with an ignore rule, which would hide TypeScript 7 until someone
+   remembered to lift it; Dependabot updates it in place as 7.x moves. It carries the `blocked`
+   label (new, "waiting on a change outside this repository"; 2026-10-08), and a comment saying
+   what unblocks it and what it will need. The signal to revisit is Dependabot's own
+   typescript-eslint PR: read its `typescript` peer range. #56
+   will also need `"types": ["node"]` in `tsconfig.json`, since TypeScript 7 no longer includes
+   `@types/*` by default; with it, 7.0.2
    compiles `src/` on either typings (measured, noted on #56). `tsconfig.json` ships, so that
    change is a `fix:`. The maintainer wants Dependabot's PRs assessed, not merged by default;
    one that merges cleanly but was tested on an older `main` gets `@dependabot rebase` first, so
@@ -132,16 +162,17 @@ in `docs/design.md`.
    record what #21 and #18 tried, why each attempt was reverted, and the constraints a design
    must keep. Write it up in `docs/plugin-plan.md` first — the one plan; the pool shapes every
    session's latency and licence use. A minimum start timeout (#15's other half) is part of it.
-   #32 (two brokers left after a concurrent recovery, intermittently) may be the same pool's
-   race. It recurred on 2026-10-08, on Node 22.13 this time (#63's handoff head, noted on #32),
-   so it is not Node 26's alone: investigate it next time it fails, rather than re-running.
+   #32 turned out to be the broker's bind, not the pool, and is fixed in #73 (item 1).
    #3 (warm kernels serve a paclet's old server after an upgrade) wants the same treatment, with
-   #4 and #6 (`area: paclet`), and so does #31 (one tool whose `outputSchema` ajv cannot
-   compile fails the whole `tools/list`). #29 (how to hear of the next advisory against what
+   #4 and #6 (`area: paclet`), and so does #69 (a tool whose schema isn't `type: "object"`
+   fails the whole list in the SDK's parse: leave it out with a logged reason, or relay it).
+   #70 (the lists read after a kernel start, `DirectOps` and `announceKernel`, keep the SDK's
+   60 s timeout, which forgets the request) belongs with #12 and #16: a refresh isn't a caller,
+   so who waits on it has to be decided first. #29 (how to hear of the next advisory against what
    the bundle inlines) needs a design too; an audit gate tried in #27 was reverted. Smaller,
-   from 0.1.2's reviews: #38 (durations read three ways across the private path, the broker
-   client and `wolfram_status`); #33 and #35 are 0.1.4's (item 1). From #37's review: #40
-   (tighten #37's long-call check), whose third point is all #63 leaves of it.
+   from 0.1.2's reviews: #38 (durations read three ways) is fixed in #71, and #33 and #35
+   shipped in 0.1.4. From #37's review: #40 (tighten #37's long-call check), whose third point is
+   all #63 leaves of it.
 5. **Restructure the agent instructions** (#36, `needs design`): a trimmed `AGENTS.md`, the
    handoff's durable rules moved out of it, and the project rules now in the maintainer's
    private Claude Code memory moved into the repository. Agree the design first.
@@ -225,8 +256,9 @@ in `docs/design.md`.
   about imitating GitHub, and ended when the squash setting turned out to contradict D16.
 - **Issues and labels.** Label every issue and PR as it is filed: a type where one fits (`bug`,
   `enhancement`, `documentation`, `refactor`, `ci`; release-please's PRs carry its own
-  `autorelease:` labels), `needs design` when the approach must be agreed before code, and its
-  areas (`area: startup` — deadlines, handshake, back-off;
+  `autorelease:` labels), `needs design` when the approach must be agreed before code, `blocked`
+  when it waits on a change outside this repository (#56), and its areas (`area: startup` —
+  deadlines, handshake, back-off;
   `area: broker` — the shared broker and its pool; `area: paclet` — paclet-declared servers and
   the capability cache; `area: distribution` — install, packaging, release). File issues in the
   existing ones' shape: what happens, repro, expected, suggested fix.
