@@ -78,6 +78,15 @@ in `docs/design.md`.
   typescript-eslint 8.71, all dev-only) was rebased onto it so CI tested the pair, then merged.
   Both went through the merge process now under *Working here*: Codex's review, then the
   maintainer's approval. Neither changes what ships, so neither makes a release.
+- **0.1.4 is being held for a batch of fixes** (milestone `0.1.4`, chosen 2026-10-08; release
+  PR #64 collects them, and each merge publishes a `v0.1.4-pre.N`). Merged: #63 (fixes #39:
+  every kernel request carries this server's deadline, prompts and resource reads take the call
+  ceiling and can be cancelled, a request cancelled before it reaches the kernel stops none),
+  #65 (fixes #62: a kernel's error on any request is relayed with its prefix once, with its
+  `data`, on both paths; `BROKER_PROTOCOL` is 6 for the new field) and #66 (fixes #35: a
+  numeric setting written with a unit is ignored, and logged, rather than misread). Each went
+  through two or three `/code-review high` rounds and Codex, with CI green and the suite run
+  locally on `main` combined with it before merging.
 - **The backlog is GitHub issues** (`gh issue list`), labelled by type, `needs design` and area
   (*Working here* below). Other agents file there too, notably the downstream plugin's.
 - **The release pipeline versions itself** from the commit types on `main`. `docs/releasing.md`
@@ -87,31 +96,20 @@ in `docs/design.md`.
 
 ## What to do next, in order
 
-1. **PR #63 (fixes #39) waits on the maintainer's approval** (2026-10-08).
-   Every kernel request now carries this server's deadline. `KernelSession.run` hands the work
-   it runs the SDK options from one helper (`requestOptions`, a timeout that cannot fire
-   first) and gives every run a deadline: the call timeout for a tool call, a prompt and a
-   resource read — the proxy passes it, and it crosses the socket as `timeoutMs` — and
-   `DEFAULT_DEADLINE_MS`, the SDK's old minute, for the lists. An SDK timeout that still
-   fires, from a library caller's own options, leaves the kernel presumed busy for the next
-   request to reclaim. Prompts and resource reads are cancellable as tool calls are, since
-   waiting the call ceiling a cancelled one would otherwise hold the kernel for five minutes.
-   Three `/code-review high` rounds added: a request cancelled before it reaches the kernel
-   is dropped (`RequestDropped`) without stopping or starting one, the pool makes no room for
-   it, and the broker registers an evaluation for `cancel` as its frame is read. The third
-   round and Codex both found nothing on `3b7a0cf`, with CI green there.
-   - **The maintainer's call.** Prompts and resource reads take the call ceiling, not a
-     minute of their own: the setting is documented as giving up on a single evaluation, and
-     the paclet's prompts run its searches. The PR description puts it, and the round-two
-     thread on `proxy.ts` says the alternative is a one-line change.
-   - **Left.** This handoff, committed last, is a new head and gets its own review round and
-     Codex's, as every push does; then the maintainer's approval and the squash-merge. Then
-     comment on #40 that #63 did its first, second and fourth points, leaving the third
-     (overlap the minute with an earlier section).
-   - **From this work.** Filed #62: a kernel's own error on `prompts/get` or `resources/read`
-     reaches the client with its prefix doubled, on the private path only. Noted on #16 that
-     prompts and resource reads now share `callTool`'s broker ceiling, and on #33 that the
-     proxy's two new ceilings are not held to `MAX_TIME_MS` for a library-built `Config`.
+1. **Finish 0.1.4.** PR #67 (fixes #33, the milestone's last issue) holds a time at each timer
+   it reaches: an option a library caller builds or a `timeoutMs` off the broker's socket could
+   overflow a Node timer and fire it at once, and a NaN one too. `timerDelay` holds a delay to
+   `MAX_TIMER_MS`, and `deadlineDelay` holds a caller's deadline to `MAX_TIME_MS`, so it stays
+   inside the SDK's request timeout; the broker client sends the held value, since a NaN in a
+   frame arrived as `null` and took the broker's default. Both were Codex's P2s. This handoff is
+   its last commit; once the review and Codex's are done on the head, CI is green, and the
+   maintainer approves, run the suite on `main` merged with it and squash-merge it. Then:
+   - check that #64's `CHANGELOG.md` lists #39, #62, #35 and #33 and that its run's CI is green,
+     and ask the maintainer to merge #64, which is the release;
+   - after it, verify the assets through `releases/latest/download/…` and `SHA256SUMS.txt`, as
+     for 0.1.3, close the milestone, and observe #7's last link (item 2) on this release;
+   - #40's third point (overlap the long-call minute with an earlier section) is all that is
+     left of it; it changes no shipped code, so it can wait for any later PR.
 2. **The one link of #7 left unobserved**: Claude Code running the auto-update pass itself, in
    an interactive session up to ten minutes after the first message, and saying `Plugin updated:
    wolfram`. Check it at the next release, in a project following `release`; and try the route at
@@ -134,17 +132,16 @@ in `docs/design.md`.
    record what #21 and #18 tried, why each attempt was reverted, and the constraints a design
    must keep. Write it up in `docs/plugin-plan.md` first — the one plan; the pool shapes every
    session's latency and licence use. A minimum start timeout (#15's other half) is part of it.
-   #32 (two brokers left after a concurrent recovery, intermittently, on CI's Node 26) may be
-   the same pool's race; re-run once if it fails a PR, and investigate if it recurs.
+   #32 (two brokers left after a concurrent recovery, intermittently) may be the same pool's
+   race. It recurred on 2026-10-08, on Node 22.13 this time (#63's handoff head, noted on #32),
+   so it is not Node 26's alone: investigate it next time it fails, rather than re-running.
    #3 (warm kernels serve a paclet's old server after an upgrade) wants the same treatment, with
    #4 and #6 (`area: paclet`), and so does #31 (one tool whose `outputSchema` ajv cannot
    compile fails the whole `tools/list`). #29 (how to hear of the next advisory against what
    the bundle inlines) needs a design too; an audit gate tried in #27 was reverted. Smaller,
-   from 0.1.2's reviews: #33 (timers fed by library-built options can still overflow; clamp at
-   each timer), #35 (a numeric setting with a unit suffix is misread silently) and #38
-   (durations read three ways across the private path, the broker client and
-   `wolfram_status`). From #37's review: #40 (tighten #37's long-call check), whose third
-   point is all #63 leaves of it.
+   from 0.1.2's reviews: #38 (durations read three ways across the private path, the broker
+   client and `wolfram_status`); #33 and #35 are 0.1.4's (item 1). From #37's review: #40
+   (tighten #37's long-call check), whose third point is all #63 leaves of it.
 5. **Restructure the agent instructions** (#36, `needs design`): a trimmed `AGENTS.md`, the
    handoff's durable rules moved out of it, and the project rules now in the maintainer's
    private Claude Code memory moved into the repository. Agree the design first.
