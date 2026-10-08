@@ -114,6 +114,13 @@ export interface BrokerResponse {
    * from the kernel arrived at the client as an isError result.
    */
   code?: number;
+  /**
+   * That error's `data`, when it carried any. Dropped, the same kernel error
+   * reached a client with its data privately and without it when shared (#62).
+   * Optional, and read only beside `code`, so peers that differ in it still
+   * understand each other: not a change of shape that `BROKER_PROTOCOL` marks.
+   */
+  data?: unknown;
 }
 
 /**

@@ -454,6 +454,15 @@ export function createWolframServer(
 
   const backend = makeBackend(install);
 
+  // The one way a handler the kernel answers is registered, so each relays a
+  // kernel's protocol error once. Wrapped one by one, a handler added later
+  // could forget, and its errors would arrive doubled again (#62). `tools/call`
+  // is the exception: it alone has an `isError` form, and decides for itself.
+  const fromKernel: typeof server.setRequestHandler = (schema, handler) =>
+    server.setRequestHandler(schema, (request, extra) =>
+      relayed(Promise.resolve(handler(request, extra))),
+    );
+
   let toolCache: Tool[] | null = usableCache?.tools ?? null;
   let promptCache: Prompt[] | null = usableCache?.prompts ?? null;
   // When the list above was last taken from a kernel: the cache file's own
@@ -538,7 +547,7 @@ export function createWolframServer(
 
   backend.onKernelReady((ops) => reload(ops));
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
+  fromKernel(ListToolsRequestSchema, async () => {
     // Deliberately no cursor handling, and none advertised: see `fullToolList`.
     // A cursor is upstream paging state belonging to one kernel, and the pool
     // hands out whichever kernel is free — so page 2 could be asked of a kernel
@@ -559,7 +568,7 @@ export function createWolframServer(
     // `STATUS_TOOL` is added here rather than stored, so that what the cache
     // holds is exactly what the kernel reported and a refresh compares like
     // with like.
-    const live = await relayed(backend.listTools());
+    const live = await backend.listTools();
     return { tools: [...(live.tools ?? []), STATUS_TOOL] };
   });
 
@@ -648,37 +657,30 @@ export function createWolframServer(
   });
 
   if (capabilities.prompts) {
-    server.setRequestHandler(ListPromptsRequestSchema, async () => {
+    fromKernel(ListPromptsRequestSchema, async () => {
       // No cursor handling, for the reason tools/list has none: the backends
       // drain inside one hold on a kernel and answer complete lists, so there is
       // no upstream paging state for anyone to page through.
       if (promptCache) return { prompts: promptCache };
-      return relayed(backend.listPrompts());
+      return backend.listPrompts();
     });
     // A prompt runs its own function in the kernel, so it waits as long as a
     // tool call would, and a cancel stops it as one does. Given no ceiling, it
     // was cut at the SDK's minute (#39).
-    server.setRequestHandler(GetPromptRequestSchema, async (request, extra) =>
-      relayed(
-        backend.getPrompt(request.params, {
-          timeoutMs: config.callTimeoutMs,
-          signal: extra.signal,
-        }),
-      ),
+    fromKernel(GetPromptRequestSchema, async (request, extra) =>
+      backend.getPrompt(request.params, { timeoutMs: config.callTimeoutMs, signal: extra.signal }),
     );
   }
 
   if (capabilities.resources) {
-    server.setRequestHandler(ListResourcesRequestSchema, async (request) =>
-      relayed(backend.listResources(request.params)),
+    fromKernel(ListResourcesRequestSchema, async (request) =>
+      backend.listResources(request.params),
     );
-    server.setRequestHandler(ReadResourceRequestSchema, async (request, extra) =>
-      relayed(
-        backend.readResource(request.params, {
-          timeoutMs: config.callTimeoutMs,
-          signal: extra.signal,
-        }),
-      ),
+    fromKernel(ReadResourceRequestSchema, async (request, extra) =>
+      backend.readResource(request.params, {
+        timeoutMs: config.callTimeoutMs,
+        signal: extra.signal,
+      }),
     );
   }
 

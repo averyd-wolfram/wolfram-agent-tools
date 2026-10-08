@@ -8,7 +8,7 @@
  *
  * FAKE_MODE
  *   normal          banner noise, then well-behaved MCP            (default)
- *   fail-list-once  tools/list errors in the first process only
+ *   fail-list-once  tools/list and resources/list error in the first process only
  *   mute            spawns, never speaks (activation deadlock)
  *   extra-tool      serves an additional tool, to exercise refresh
  *   no-agenttools   prints the paclet-missing message, never speaks
@@ -58,6 +58,9 @@
  *                     AgentTools 2.2.7 answers resources/list and resources/read,
  *                     for MCP Apps' UI resources, but declares no resources
  *                     capability, so without this a session never offers them
+ * FAKE_ERROR_DATA     JSON to send as the `data` of each error the fake answers
+ *                     with, for a list, a prompt or a resource, as a server whose
+ *                     errors carry data would; AgentTools 2.2.7's carry none
  * FAKE_METHOD_LOG     append every method received, to see what reaches a kernel,
  *                     and "(replied tools/call)" as each call is answered — or
  *                     prompts/get, or resources/read — so a check can wait for a
@@ -292,6 +295,17 @@ function run() {
     });
   }
 
+  /** An error response, carrying FAKE_ERROR_DATA as its `data` when set. */
+  const fail = (msg, code, message) =>
+    send({
+      jsonrpc: "2.0",
+      id: msg.id,
+      error: {
+        code,
+        message,
+        ...(process.env.FAKE_ERROR_DATA ? { data: JSON.parse(process.env.FAKE_ERROR_DATA) } : {}),
+      },
+    });
   let announced = false;
   let callsSeen = 0;
   // Calls accepted and not yet answered. A real kernel is not reading its
@@ -377,11 +391,7 @@ function run() {
         return;
       }
       if (mode === "fail-list-once" && firstProcess) {
-        send({
-          jsonrpc: "2.0",
-          id: msg.id,
-          error: { code: -32603, message: "transient upstream hiccup" },
-        });
+        fail(msg, -32603, "transient upstream hiccup");
         return;
       }
       if (mode === "paged-tools") {
@@ -417,7 +427,7 @@ function run() {
       // A name it does not have fails as AgentTools 2.2.7's does: getPrompt's
       // Enclose fails, and processRequest answers its catch-all.
       if (msg.params?.name !== "Search") {
-        send({ jsonrpc: "2.0", id: msg.id, error: { code: -32603, message: "Internal error" } });
+        fail(msg, -32603, "Internal error");
         return;
       }
       evaluate(msg, Number(process.env.FAKE_PROMPT_DELAY_MS ?? "0"), () => ({
@@ -434,6 +444,10 @@ function run() {
       return;
     }
     if (msg.method === "resources/list" && process.env.FAKE_RESOURCES) {
+      if (mode === "fail-list-once" && firstProcess) {
+        fail(msg, -32603, "transient upstream hiccup");
+        return;
+      }
       send({
         jsonrpc: "2.0",
         id: msg.id,
@@ -446,11 +460,7 @@ function run() {
     if (msg.method === "resources/read" && process.env.FAKE_RESOURCES) {
       // As 2.2.7's resourceReadError answers a URI it has not registered.
       if (msg.params?.uri !== "ui://fake/view") {
-        send({
-          jsonrpc: "2.0",
-          id: msg.id,
-          error: { code: -32602, message: `UI resource not found: ${msg.params?.uri}` },
-        });
+        fail(msg, -32602, `UI resource not found: ${msg.params?.uri}`);
         return;
       }
       evaluate(msg, Number(process.env.FAKE_RESOURCE_DELAY_MS ?? "0"), () => ({

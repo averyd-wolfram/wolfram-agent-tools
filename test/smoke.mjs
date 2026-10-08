@@ -2603,46 +2603,63 @@ heading("An unknown tool is an MCP error on both paths, not a failed evaluation"
 
 // ---------------------------------------------------------------------------
 // The same doubling, everywhere but tools/call: only its handler relayed a
-// kernel's protocol error in the shape the SDK sends once, so a cold tools/list
-// or prompts/list, a prompt and a resource request all reached the client as
-// "MCP error -32603: MCP error -32603: …", on both paths (#62). The fake fails
-// each as AgentTools 2.2.7 does: a list in a first kernel that fails them, an
-// unknown prompt with its catch-all -32603, an unknown resource with -32602.
-heading("A kernel's error on any request reaches the client once, with its code, on either path");
+// kernel's protocol error in the shape the SDK sends once, so a cold tools/list,
+// a resource list, a prompt and a resource read all reached the client as
+// "MCP error -32603: MCP error -32603: …", on both paths — and the broker's
+// frame carried no `data`, so an error that had some lost it when shared (#62).
+// The fake fails each as AgentTools 2.2.7 does — a list in a first kernel that
+// fails them, an unknown prompt with its catch-all -32603, an unknown resource
+// with -32602 — with `data` added, as a server whose errors carry it would.
+heading("A kernel's error on any request reaches the client once, with its code and data, on either path");
 {
+  const data = { reason: "fake", detail: [1, 2] };
   const once = (text, code) => text.startsWith(`MCP error ${code}: `) && !text.includes("MCP error", 10);
+  const said = (request) =>
+    request.then(() => ({ text: "answered" }), (err) => ({ code: err.code, text: err.message, data: err.data }));
   for (const sharing of ["0", "1"]) {
     const label = sharing === "1" ? "shared" : "private";
-    const runtime = privateDir(join(home, `run-relay-${sharing}`));
-    const said = async (request) =>
-      request.then(() => ({ text: "answered" }), (err) => ({ code: err.code, text: err.message }));
+    // A runtime directory per session, so a broker still exiting cannot serve
+    // the next session with the last one's fake environment.
+    const runtime = (stage) => privateDir(join(home, `run-relay-${stage}-${sharing}`));
     const requests = [];
-    // Lists go to a kernel only when no cache answers them, and the fake fails
-    // every list its first process is asked for.
+    // A tool list goes to a kernel only when no cache answers it, and the fake
+    // fails every list its first process is asked for.
     wipeCache();
+    const coldRuntime = runtime("cold");
     const cold = await connect({
       WOLFRAM_MCP_SHARE: sharing,
-      XDG_RUNTIME_DIR: runtime,
+      XDG_RUNTIME_DIR: coldRuntime,
       WOLFRAM_MCP_CACHE: "0",
       FAKE_MODE: "fail-list-once",
+      FAKE_ERROR_DATA: JSON.stringify(data),
     });
     requests.push(["tools/list", -32603, await said(cold.client.listTools())]);
     await cold.client.close();
-    signalOwnBrokers("SIGTERM", runtime);
-    await new Promise((r) => setTimeout(r, 300));
+    signalOwnBrokers("SIGTERM", coldRuntime);
+    // Resources are offered only once a kernel has been seen to offer them;
+    // then a kernel that is a first process again fails the resource list.
     wipeCache();
     await warmCache({ FAKE_RESOURCES: "1" });
-    const s = await connect({ WOLFRAM_MCP_SHARE: sharing, XDG_RUNTIME_DIR: runtime, FAKE_RESOURCES: "1" });
+    rmSync(join(home, "fake-state"), { force: true });
+    const warmRuntime = runtime("warm");
+    const s = await connect({
+      WOLFRAM_MCP_SHARE: sharing,
+      XDG_RUNTIME_DIR: warmRuntime,
+      FAKE_RESOURCES: "1",
+      FAKE_MODE: "fail-list-once",
+      FAKE_ERROR_DATA: JSON.stringify(data),
+    });
+    requests.push(["resources/list", -32603, await said(s.client.listResources())]);
     requests.push(["prompts/get", -32603, await said(s.client.getPrompt({ name: "NoSuchPrompt", arguments: {} }))]);
     requests.push(["resources/read", -32602, await said(s.client.readResource({ uri: "ui://fake/none" }))]);
     await s.client.close();
-    signalOwnBrokers("SIGTERM", runtime);
+    signalOwnBrokers("SIGTERM", warmRuntime);
     await new Promise((r) => setTimeout(r, 300));
-    for (const [method, code, { code: got, text }] of requests) {
+    for (const [method, code, { code: got, text, data: carried }] of requests) {
       check(
-        `${label} ${method}: the kernel's error, with its code, prefixed once`,
-        got === code && once(text, code),
-        `${got}: ${text}`.slice(0, 110),
+        `${label} ${method}: the kernel's error, with its code and data, prefixed once`,
+        got === code && once(text, code) && JSON.stringify(carried) === JSON.stringify(data),
+        `${got}: ${text} data=${JSON.stringify(carried)}`.slice(0, 130),
       );
     }
   }
