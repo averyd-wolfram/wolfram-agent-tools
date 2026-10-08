@@ -4781,6 +4781,209 @@ heading("A call, a prompt or a resource read longer than a minute is answered, o
 }
 
 // ---------------------------------------------------------------------------
+// #28 held every time that comes from the environment or a tool call to what a
+// timer can hold. A time that reaches a timer another way still went straight
+// through: an option a library caller builds for a session, a pool, a
+// preparation or a broker client, or a timeoutMs read off the broker's socket.
+// Past 2^31-1 ms Node fires a timer after 1 ms, so a start failed at once, a
+// call was answered at once with "no answer", a kernel was shut down as idle
+// after each call, and a shared call gave up on its broker at once (#33). Each
+// is given a time past that, for work that takes a few hundred milliseconds.
+heading("A time an option or the broker's socket hands a timer is held there too");
+{
+  const huge = 3_000_000_000;
+  const clientInfo = { name: "smoke", version: "1.0.0" };
+  const overflowed = [];
+  const onWarning = (warning) => {
+    if (warning.name === "TimeoutOverflowWarning") overflowed.push(warning.message);
+  };
+  process.on("warning", onWarning);
+  const knobs = { FAKE_CALL_DELAY_MS: "300" };
+  const savedKnobs = Object.fromEntries(Object.keys(knobs).map((name) => [name, process.env[name]]));
+  try {
+    // A session: its start, a call's deadline, and its idle timer.
+    const marker = join(home, "starts-huge-options.log");
+    const session = new lib.KernelSession({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: huge,
+      startTimeoutMs: huge,
+      clientInfo,
+      log: () => {},
+      extraEnv: { FAKE_CALL_DELAY_MS: "300", FAKE_MARKER: marker },
+    });
+    try {
+      const call = (client, request) =>
+        client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, request);
+      const answered = await session.run(call, { deadlineMs: huge }).then(answeredByFake, (err) => err.message);
+      await new Promise((r) => setTimeout(r, 200));
+      check(
+        "a session given huge times starts, answers a 300 ms call, and keeps its kernel after",
+        answered === true && session.running && starts(marker) === 1,
+        `answered=${answered}; running=${session.running}; starts=${starts(marker)}`,
+      );
+    } finally {
+      await session.stop();
+    }
+    // NaN, which Node also runs as 1 ms, and which a `<= 0` guard lets through:
+    // an option computed from a setting that was never there.
+    const nanMarker = join(home, "starts-nan-options.log");
+    const nanSession = new lib.KernelSession({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: Number.NaN,
+      startTimeoutMs: 10_000,
+      clientInfo,
+      log: () => {},
+      extraEnv: { FAKE_CALL_DELAY_MS: "300", FAKE_MARKER: nanMarker },
+    });
+    try {
+      const call = (client, request) =>
+        client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, request);
+      const answered = await nanSession.run(call, { deadlineMs: Number.NaN }).then(answeredByFake, (err) => err.message);
+      await new Promise((r) => setTimeout(r, 200));
+      check(
+        "and one given NaN for its deadline and idle time answers, and keeps its kernel, as for a huge one",
+        answered === true && nanSession.running && starts(nanMarker) === 1,
+        `answered=${answered}; running=${nanSession.running}`,
+      );
+    } finally {
+      await nanSession.stop();
+    }
+    // Held, a deadline must still fire before the SDK's own request timeout,
+    // the timer outside it, or the SDK forgets the request and a late reply
+    // can prove nothing. Held to the same 2^31-1 ms, the SDK's timer, armed
+    // first, won the tie. Read off the timers themselves, which both arm.
+    const armed = [];
+    const realSetTimeout = globalThis.setTimeout;
+    const orderMarker = join(home, "starts-deadline-order.log");
+    const ordered = new lib.KernelSession({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 0,
+      startTimeoutMs: 10_000,
+      clientInfo,
+      log: () => {},
+      extraEnv: { FAKE_CALL_DELAY_MS: "100", FAKE_MARKER: orderMarker },
+    });
+    try {
+      await ordered.ensure();
+      globalThis.setTimeout = (fn, ms, ...rest) => {
+        if (ms > 1e9) armed.push(ms);
+        return realSetTimeout(fn, ms, ...rest);
+      };
+      const call = (client, request) =>
+        client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, request);
+      await ordered.run(call, { deadlineMs: huge });
+      await ordered.run(call, { deadlineMs: Number.NaN });
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+      await ordered.stop();
+    }
+    const sdk = Math.max(...armed);
+    const deadlines = armed.filter((ms) => ms < sdk);
+    check(
+      "a held deadline is armed short of the SDK's request timeout, huge or NaN",
+      deadlines.length === 2 && deadlines.every((ms) => ms === lib.MAX_TIME_MS),
+      `armed: ${armed.join(", ")}`,
+    );
+    // A preparation's deadline.
+    const prepared = await new lib.Deadline(huge)
+      .within("waiting", new Promise((r) => setTimeout(() => r("done"), 100)))
+      .catch((err) => err.message);
+    check("a preparation given a huge budget waits for its work", prepared === "done", String(prepared));
+    // A shared call: the ceiling the client waits, and the deadline the broker
+    // reads off the socket, both from the call's own timeoutMs.
+    Object.assign(process.env, knobs);
+    const address = join(privateDir(join(home, "run-huge-options")), "broker.sock");
+    let broker = null;
+    let client = null;
+    try {
+      broker = await lib.startBroker({
+        address,
+        bin: fakeKernel,
+        serverName: "WolframLanguage",
+        idleMs: 60_000,
+        startTimeoutMs: 10_000,
+        reserveSeats: 0,
+        allowInspect: false,
+        clientInfo,
+        log: () => {},
+      });
+      client = await lib.BrokerBackend.attachIfRunning({
+        address,
+        flavour: lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" }),
+        spawnCommand: join(home, "definitely-not-a-binary"),
+        spawnArgs: [],
+        spawnEnv: {},
+        log: () => {},
+      });
+      const shared = client
+        ? await client
+            .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, { timeoutMs: huge })
+            .then(answeredByFake, (err) => err.message)
+        : "could not attach";
+      check("a shared call given a huge ceiling is answered, not given up on at once", shared === true, String(shared));
+    } finally {
+      await client?.stop();
+      await broker?.stop?.();
+    }
+    // NaN on the shared path: JSON has no NaN, so a NaN written into the frame
+    // arrived as null, which the broker read as unset and replaced with its own
+    // five-minute default, where a private kernel waits the 24 days. A stub
+    // broker records the frame it is sent.
+    const stubAddress = join(privateDir(join(home, "run-nan-frame")), "broker.sock");
+    const frames = [];
+    const stub = createServer((socket) => {
+      socket.setEncoding("utf8");
+      socket.on("error", () => socket.destroy());
+      let buffered = "";
+      socket.on("data", (chunk) => {
+        buffered += chunk;
+        for (let at; (at = buffered.indexOf("\n")) !== -1; buffered = buffered.slice(at + 1)) {
+          const frame = JSON.parse(buffered.slice(0, at));
+          frames.push(frame);
+          const reply =
+            frame.op === "hello"
+              ? { id: frame.id, ok: true, result: { flavours: true, flavour: frame.params?.digest } }
+              : { id: frame.id, ok: true, result: { content: [{ type: "text", text: "evaluated" }] } };
+          if (socket.writable) socket.write(`${JSON.stringify(reply)}\n`);
+        }
+      });
+    });
+    await new Promise((resolve) => stub.listen(stubAddress, resolve));
+    let stubClient = null;
+    try {
+      stubClient = await lib.BrokerBackend.attachIfRunning({
+        address: stubAddress,
+        flavour: lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" }),
+        spawnCommand: join(home, "definitely-not-a-binary"),
+        spawnArgs: [],
+        spawnEnv: {},
+        log: () => {},
+      });
+      await stubClient?.callTool({ name: "WolframLanguageEvaluator", arguments: {} }, { timeoutMs: Number.NaN });
+    } finally {
+      await stubClient?.stop();
+      stub.close();
+    }
+    const sent = frames.find((frame) => frame.op === "callTool");
+    check(
+      "a NaN timeout reaches the broker as the deadline a private kernel holds, not as null",
+      sent?.timeoutMs === lib.MAX_TIME_MS,
+      `timeoutMs=${JSON.stringify(sent?.timeoutMs)}`,
+    );
+    check("and no timer overflowed", overflowed.length === 0, overflowed.join(" | ").slice(0, 160));
+  } finally {
+    process.off("warning", onWarning);
+    for (const [name, value] of Object.entries(savedKnobs)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Everything before a kernel receives its first request — the broker's
 // preparation, the handshake, and once an installation probe kernel — used to
 // carry its own bound: the probe 120s, the handshake

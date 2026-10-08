@@ -40,7 +40,7 @@ import {
   type BrokerResponse,
   socketFault,
 } from "./broker-protocol.js";
-import { DEFAULT_START_TIMEOUT_MS } from "./config.js";
+import { deadlineDelay, DEFAULT_START_TIMEOUT_MS, timerDelay } from "./config.js";
 import type { KernelFlavour } from "./flavour.js";
 import { DEFAULT_DEADLINE_MS } from "./kernel.js";
 import { bareMcpText, errorText, type Logger } from "./log.js";
@@ -543,15 +543,21 @@ export class BrokerBackend implements KernelBackend {
     // the broker applied its own 300s default while `0 ?? DEFAULT` kept 0 here
     // and made the ceiling 2s. The same configuration therefore meant "wait as
     // long as it takes" privately and "give up after two seconds" when shared.
+    //
+    // Held as the broker's session will hold it, and so always a number. JSON
+    // has no NaN: a NaN written into the frame arrived as null, which the broker
+    // read as unset and replaced with its own default, five minutes for a call
+    // where a private kernel waits the 24 days `deadlineDelay` holds it to.
+    const sent = timeoutMs === undefined ? undefined : deadlineDelay(timeoutMs);
     const frame = {
       id,
       op,
       ...(params === undefined ? {} : { params }),
-      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      ...(sent === undefined ? {} : { timeoutMs: sent }),
     };
     const ceiling = brokerCeilingMs(
       op,
-      timeoutMs,
+      sent,
       this.#options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS,
     );
     return new Promise<T>((resolve, reject) => {
@@ -566,7 +572,7 @@ export class BrokerBackend implements KernelBackend {
               // session: give up on it so the next call can choose again.
               this.#closed = true;
               reject(new Error(`the Wolfram broker did not answer ${op} within ${ceiling}ms`));
-            }, ceiling);
+            }, timerDelay(ceiling));
       timer?.unref?.();
       const settle = {
         resolve: (v: unknown) => {

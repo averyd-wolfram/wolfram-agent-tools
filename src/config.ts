@@ -63,9 +63,45 @@ export const DEFAULT_START_TIMEOUT_MS = 120_000;
  * start timeout made huge to mean "never" failed every start at once, a call
  * timeout every call, and an idle timeout shut the kernel down after each call
  * (#15). The margin below the limit is for what is added to a setting on its
- * way to a timer — a grace, an op's own ceiling — which is seconds.
+ * way to a timer — a grace, an op's own ceiling — which is seconds. The limit
+ * itself is `MAX_TIMER_MS`.
  */
 export const MAX_TIME_MS = 24 * 86_400_000;
+
+/**
+ * The longest delay a Node timer holds: 2^31-1 ms, about 24.8 days. Not
+ * `MAX_TIME_MS`, which holds a setting a margin below this, for the grace added
+ * to it on its way to a timer; this is the timer's own limit, which
+ * `timerDelay` holds every delay to.
+ */
+export const MAX_TIMER_MS = 2 ** 31 - 1;
+
+/**
+ * A delay a timer can hold, for every timer fed by something other than this
+ * package's own configuration: an option a library caller builds, a `timeoutMs`
+ * read off the broker's socket. #28 held what comes from the environment and a
+ * tool call; a longer time reaching a timer another way fired after 1 ms, so a
+ * start failed at once, a shared call gave up on its broker at once, and a
+ * kernel was stopped as idle after each call (#33). Held rather than refused,
+ * as #28's settings are: a delay that long means "as long as it can be". NaN,
+ * which Node also runs as 1 ms and which a `<= 0` guard lets through, is held
+ * the same way: it is an option computed from a setting that was never there.
+ */
+export function timerDelay(ms: number): number {
+  return Number.isNaN(ms) ? MAX_TIMER_MS : Math.min(ms, MAX_TIMER_MS);
+}
+
+/**
+ * A caller's deadline, held as `timerDelay` holds a delay but to `MAX_TIME_MS`,
+ * so it stays inside every timer outside it: the SDK's request timeout, which
+ * must never fire first (#34), and the broker client's ceiling, which waits the
+ * deadline plus a grace. Held to `MAX_TIMER_MS` like the rest, the deadline tied
+ * the SDK's timer, and the SDK's, armed first, won: it forgot the request, so a
+ * late reply could no longer prove the kernel alive (#67's review).
+ */
+export function deadlineDelay(ms: number): number {
+  return Number.isNaN(ms) ? MAX_TIME_MS : Math.min(ms, MAX_TIME_MS);
+}
 
 /** The units the time settings are given in, for reading and for saying. */
 const SECONDS = { ms: 1000, name: "seconds" };
