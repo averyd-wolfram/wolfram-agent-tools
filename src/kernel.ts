@@ -24,7 +24,8 @@ import { deadlineDelay, MAX_TIMER_MS, timerDelay } from "./config.js";
 import { FilteringStdioTransport } from "./transport.js";
 import { applyFlavour, type KernelFlavour } from "./flavour.js";
 import { FACTS_EXPRESSION, isFactsLine, parseFacts, type KernelFacts } from "./inspect.js";
-import { budgetText, errorText, type Logger } from "./log.js";
+import { budgetText } from "./duration.js";
+import { errorText, type Logger } from "./log.js";
 
 /**
  * Wolfram/AgentTools' own `$defaultCommandLineArguments`, verbatim — pinned by

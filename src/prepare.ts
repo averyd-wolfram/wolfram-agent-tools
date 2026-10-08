@@ -18,7 +18,8 @@
  */
 import { statSync } from "node:fs";
 import { timerDelay } from "./config.js";
-import { budgetText, errorText } from "./log.js";
+import { budgetText } from "./duration.js";
+import { errorText } from "./log.js";
 
 /** How long a failed preparation is not retried, unless the binary changes. */
 export const PREPARATION_BACKOFF_MS = 10 * 60_000;
@@ -209,7 +210,7 @@ export class Deadline {
       throw new PreparationTimeout(
         stage,
         this.totalMs,
-        `${Math.floor(left)}ms were left, too little for this to begin`,
+        `${budgetText(left)} were left, too little for this to begin`,
         undefined,
         { began: false },
       );
@@ -329,12 +330,4 @@ export class Backoff {
       advice: failure.advice,
     };
   }
-}
-
-/** "4m 05s", for a wait a person reads. */
-export function formatWait(ms: number): string {
-  const total = Math.ceil(ms / 1000);
-  const minutes = Math.floor(total / 60);
-  const seconds = total % 60;
-  return minutes > 0 ? `${minutes}m ${String(seconds).padStart(2, "0")}s` : `${seconds}s`;
 }

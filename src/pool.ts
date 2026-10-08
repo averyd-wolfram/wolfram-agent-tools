@@ -25,7 +25,8 @@ import {
 } from "./kernel.js";
 import { baseDirectoryEnv, type KernelFacts } from "./inspect.js";
 import { errorText, type Logger } from "./log.js";
-import { formatWait, NOT_RESOLVED_ADVICE, NOT_RESOLVED_BACKOFF_MS } from "./prepare.js";
+import { waitText } from "./duration.js";
+import { NOT_RESOLVED_ADVICE, NOT_RESOLVED_BACKOFF_MS } from "./prepare.js";
 
 /**
  * The `SHAPING_VARS` a licence can depend on: `$BaseDirectory` and
@@ -557,9 +558,9 @@ export class KernelPool {
       return null;
     }
     return new ServerNotResolved(
-      `a kernel for this server could not start it ${formatWait(age)} ago, so ` +
+      `a kernel for this server could not start it ${waitText(age)} ago, so ` +
         `none was started for this request; it is tried again in ` +
-        `${formatWait(NOT_RESOLVED_BACKOFF_MS - age)}; ${NOT_RESOLVED_ADVICE}.` +
+        `${waitText(NOT_RESOLVED_BACKOFF_MS - age)}; ${NOT_RESOLVED_ADVICE}.` +
         `\n\nThe failure was: ${known.reason}`,
     );
   }

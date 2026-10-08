@@ -27,7 +27,8 @@ import { MAX_TIME_MS, type Config, type UpstreamCapabilities } from "./config.js
 import type { DirectOps, KernelBackend } from "./backend.js";
 import type { BrokerBackend } from "./broker-client.js";
 import { doctorCommand } from "./doctor.js";
-import { formatWait, type BackoffState } from "./prepare.js";
+import { budgetText, waitText } from "./duration.js";
+import type { BackoffState } from "./prepare.js";
 import { readFacts } from "./inspect.js";
 import { drainPages } from "./kernel.js";
 import { exampleKernelPath, listKernels, locateKernel, type KernelInstall } from "./locate.js";
@@ -247,7 +248,7 @@ async function describeSharing(
   clearTimeout(timer);
   if (outcome === expired) {
     void attaching.then((late) => late?.stop());
-    return `on — a broker is listening but did not answer within ${ceilingMs / 1000}s`;
+    return `on — a broker is listening but did not answer within ${budgetText(ceilingMs)}`;
   }
   if (!outcome) {
     return declined === null
@@ -309,7 +310,7 @@ function describeStatus(
   // and this is the line that says why and for how long.
   if (backoff) {
     lines.push(
-      `preparing   the last attempt failed; retried in ${formatWait(backoff.remainingMs)}` +
+      `preparing   the last attempt failed; retried in ${waitText(backoff.remainingMs)}` +
         // The same pointer the failed call gave: for a server that would not
         // start, the server, not the installation.
         (backoff.advice ? `; ${backoff.advice}` : `, or as soon as the installation changes`),
@@ -321,8 +322,9 @@ function describeStatus(
     `sharing     ${config.share ? (sharing ?? "on — kernels are shared with other sessions") : "off — this session has its own kernel"}`,
     `tool list   ${describeToolList(config, cache, age)}`,
     `logs        ${process.env["WOLFRAM_MCP_LOG"] ?? "stderr, captured by your MCP client"}`,
-    `timeouts    start ${config.startTimeoutMs / 1000}s, call ${config.callTimeoutMs / 1000}s, idle ${config.idleMs / 60_000} min`,
-    `evaluation  the evaluator stops itself at ${KERNEL_TIME_CONSTRAINT_S}s unless ` +
+    `timeouts    start ${budgetText(config.startTimeoutMs)}, call ${budgetText(config.callTimeoutMs)}, ` +
+      `idle ${config.idleMs > 0 ? budgetText(config.idleMs) : "disabled"}`,
+    `evaluation  the evaluator stops itself at ${budgetText(KERNEL_TIME_CONSTRAINT_S * 1000)} unless ` +
       `MCP_TOOL_OPTIONS or a timeConstraint argument says otherwise`,
     `            past the call timeout this server stops waiting but leaves the kernel ` +
       `running, so a long call keeps its session`,
@@ -428,15 +430,15 @@ export function createWolframServer(
   log(`kernel: ${install.bin} (version=${install.version ?? "unknown"}, via ${install.source})`);
   if (config.callTimeoutMs < KERNEL_TIME_CONSTRAINT_S * 1000) {
     log(
-      `call timeout is ${config.callTimeoutMs / 1000}s, below the evaluator's default ` +
-        `${KERNEL_TIME_CONSTRAINT_S}s time constraint: this server will stop waiting first, so ` +
+      `call timeout is ${budgetText(config.callTimeoutMs)}, below the evaluator's default ` +
+        `${budgetText(KERNEL_TIME_CONSTRAINT_S * 1000)} time constraint: this server will stop waiting first, so ` +
         `a slow evaluation is reported here rather than ending in the kernel's own ` +
         `"time constraint exceeded", which says more. The kernel is left running either way. ` +
         `Prompts and resource reads wait this same ceiling`,
     );
   }
   log(
-    `profile=${config.serverName} idle=${config.idleMs / 60_000}min ` +
+    `profile=${config.serverName} idle=${config.idleMs > 0 ? budgetText(config.idleMs) : "disabled"} ` +
       `cache=${usableCache ? "hit" : "miss"}`,
   );
 

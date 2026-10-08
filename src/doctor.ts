@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { cacheKey, capabilityFile, readCache } from "./cache.js";
 import { loadConfig, MCP_SERVERS } from "./config.js";
+import { budgetText } from "./duration.js";
 import { installationEnv, readFacts, recordFacts, type KernelFacts } from "./inspect.js";
 import { KernelSession, listAllTools } from "./kernel.js";
 import {
@@ -192,9 +193,9 @@ export async function runDoctor(): Promise<number> {
     `  serverName            ${config.serverName}   (valid: ${Object.keys(MCP_SERVERS).join(", ")})`,
   );
   out(`  minimum version    ${config.minVersion}`);
-  out(`  idle shutdown      ${config.idleMs > 0 ? `${config.idleMs / 60_000} min` : "disabled"}`);
-  out(`  start timeout      ${config.startTimeoutMs / 1000}s`);
-  out(`  call timeout       ${config.callTimeoutMs / 1000}s`);
+  out(`  idle shutdown      ${config.idleMs > 0 ? budgetText(config.idleMs) : "disabled"}`);
+  out(`  start timeout      ${budgetText(config.startTimeoutMs)}`);
+  out(`  call timeout       ${budgetText(config.callTimeoutMs)}`);
   out(`  tools/list cache   ${config.cacheEnabled ? "enabled" : "disabled"}`);
   const set = CONFIG_VARS.filter((name) => process.env[name]);
   out(`  environment        ${set.length ? set.join(", ") : "(nothing set, using defaults)"}`);
