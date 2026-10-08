@@ -785,13 +785,15 @@ are *traced* in this tree on 2026-10-05 unless marked otherwise.
    back to today's key when that cannot be read.
 5. **`structuredContent` and `outputSchema` intact.** *Done* (#31): this server passes tool
    definitions and results through without rebuilding them, on both paths and through the cache,
-   and judges none of them — it reads a kernel's tool list as a plain request, never with
-   `Client.listTools`, whose compile of every `outputSchema` failed the whole list on one schema
-   ajv refused, and whose cached validators made `Client.callTool` turn a result without
-   `structuredContent` into a protocol error. The client a session serves validates against the
+   and judges none of them — a kernel's client lists tools as a plain request, not as the SDK's
+   `Client.listTools` does, whose compile of every `outputSchema` failed the whole list on one
+   schema ajv refused, and whose cached validators made `Client.callTool` turn a result its
+   schema refused into a protocol error. The client a session serves validates against the
    schemas relayed to it; measured, Claude Code 2.1.290 lists a server whose tool carries a
    schema ajv refuses. Checked through the private path, the broker, a warm cache and `doctor`,
-   with the fake emitting both. *Traced:* AgentTools 2.2.7 emits neither — a tool's entry is
+   with the fake emitting both. A schema that is not `type: "object"` still fails the whole list,
+   in the SDK's parse rather than ajv, and is non-conformant (#69). *Traced:* AgentTools 2.2.7
+   emits neither — a tool's entry is
    built from five fixed keys (`createMCPToolData`, `Kernel/Server/Shared.wl`), and its results
    leave `structuredContent` out on purpose — so `test:custom` cannot pin this until a paclet
    lets a tool declare an output schema.

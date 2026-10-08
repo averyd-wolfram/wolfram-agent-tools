@@ -55,10 +55,12 @@
  *                     last stage of a preparation, that does eventually answer
  * FAKE_EMPTY_TOOLS    report zero tools, successfully
  * FAKE_OUTPUT_SCHEMA  JSON: serve one more tool, Structured, declaring this as its
- *                     outputSchema and answering with structuredContent. None of
- *                     AgentTools 2.2.7's built-ins declares one; a custom server's
- *                     tool can, and one ajv cannot compile — a malformed `$id` —
- *                     failed the whole tools/list in the SDK's client (#31)
+ *                     outputSchema and answering with structuredContent. No server
+ *                     AgentTools 2.2.7 serves can: it builds a tool's entry from
+ *                     five fixed keys and leaves structuredContent out. A paclet
+ *                     that allows one could send a schema ajv cannot compile — a
+ *                     malformed `$id` — which failed the whole tools/list in the
+ *                     SDK's client (#31)
  * FAKE_RESOURCES      declare the resources capability and serve one resource.
  *                     AgentTools 2.2.7 answers resources/list and resources/read,
  *                     for MCP Apps' UI resources, but declares no resources

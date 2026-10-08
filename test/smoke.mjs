@@ -2830,6 +2830,40 @@ heading("A tool whose output schema cannot be compiled costs only itself, on eit
     `${JSON.stringify(served)?.slice(0, 80)}, kernels started: ${startCount() - startsBefore}`,
   );
   await warm.client.close();
+
+  // And the relay judges no result. A schema that compiles gave the kernel's
+  // client a validator once it had listed the tools, and then a result that did
+  // not match became this server's protocol error in place of the kernel's
+  // answer. Judging it is for the client a session serves, against the schema
+  // relayed to it.
+  const strict = { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] };
+  for (const sharing of ["0", "1"]) {
+    const path = sharing === "1" ? "shared" : "private";
+    wipeCache();
+    const runtime = join(home, `run-outschema-strict-${sharing}`);
+    privateDir(runtime);
+    const s = await connect({
+      WOLFRAM_MCP_SHARE: sharing,
+      XDG_RUNTIME_DIR: runtime,
+      WOLFRAM_MCP_LICENSE_LIMIT: "4",
+      FAKE_OUTPUT_SCHEMA: JSON.stringify(strict),
+    });
+    // Listed first, as a client does, so the kernel's client has listed too.
+    await s.client.request({ method: "tools/list" }, ListToolsResultSchema, { timeout: 20_000 });
+    const called = await s.client
+      .callTool({ name: "Structured", arguments: {} }, undefined, { timeout: 20_000 })
+      .then(
+        (r) => r,
+        (err) => ({ error: err.message }),
+      );
+    check(
+      `a result its own schema would refuse is relayed for the client to judge (${path})`,
+      isDeepStrictEqual(called.structuredContent, { answer: 42 }),
+      called.error ?? JSON.stringify(called).slice(0, 100),
+    );
+    await s.client.close();
+    await new Promise((r) => setTimeout(r, 300));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -6976,6 +7010,14 @@ heading("doctor runs, and says what is wrong when something is");
       .filter((l) => /tools\s|malformed/.test(l))
       .join(" | ")
       .slice(0, 120)}`,
+  );
+  // doctor read the first page of a paged list and printed it as the kernel's
+  // tools, so a kernel that pages showed fewer than it offered.
+  const paged = doctor({ FAKE_MODE: "paged-tools" });
+  check(
+    "doctor lists every page of the kernel's tools",
+    /tools\s+WolframLanguageEvaluator, PagedTwo, PagedThree\n/.test(paged.stdout),
+    paged.stdout.split("\n").find((l) => /^\s+tools\s/.test(l))?.trim(),
   );
 
   // The state a stuck user is actually in. Every install on the machine is below
