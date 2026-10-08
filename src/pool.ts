@@ -14,6 +14,7 @@
  * a probe and then the serving kernel was the cold start's whole budget.
  */
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { KernelFlavour } from "./flavour.js";
 import {
   isServerNotResolved,
@@ -489,7 +490,7 @@ export class KernelPool {
    */
   async run<T>(
     flavour: KernelFlavour,
-    fn: (client: Client) => Promise<T>,
+    fn: (client: Client, request: RequestOptions) => Promise<T>,
     options: RunOptions = {},
   ): Promise<T> {
     const refusal = this.#refusal(flavour);

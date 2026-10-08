@@ -25,7 +25,6 @@ import {
   SOCKET_MODE,
 } from "./broker-protocol.js";
 import { settingValue, type KernelFlavour } from "./flavour.js";
-import { CALL_REQUEST_TIMEOUT_MS } from "./kernel.js";
 import { errorText, type Logger } from "./log.js";
 
 /** How long to linger with no connections before exiting. */
@@ -314,6 +313,18 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
       ...declared,
       names: [...new Set([...declared.names, ...declaredNames])],
     };
+    // An evaluation is registered so a later `cancel` frame can reach it. A
+    // kernel that ignores the cancellation still ends up stopped: the rejection
+    // retires it rather than returning it to the pool.
+    const cancellable = async <T>(evaluate: (signal: AbortSignal) => Promise<T>): Promise<T> => {
+      const controller = new AbortController();
+      inFlight.set(request.id, controller);
+      try {
+        return await evaluate(controller.signal);
+      } finally {
+        inFlight.delete(request.id);
+      }
+    };
     try {
       // The first request may arrive before the licence is known; it waits here
       // rather than the proxy waiting to attach.
@@ -327,60 +338,71 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
         // that never issued page 1. Nothing outside this process ever sees one.
         case "listTools":
           return reply({
-            tools: await pool.run(flavour, (c) =>
+            tools: await pool.run(flavour, (c, options) =>
               drain(async (cursor) => {
-                const page = await c.listTools(cursor ? { cursor } : undefined);
+                const page = await c.listTools(cursor ? { cursor } : undefined, options);
                 return { items: page.tools ?? [], nextCursor: page.nextCursor };
               }),
             ),
           });
         case "listPrompts":
           return reply({
-            prompts: await pool.run(flavour, (c) =>
+            prompts: await pool.run(flavour, (c, options) =>
               drain(async (cursor) => {
-                const page = await c.listPrompts(cursor ? { cursor } : undefined);
+                const page = await c.listPrompts(cursor ? { cursor } : undefined, options);
                 return { items: page.prompts ?? [], nextCursor: page.nextCursor };
               }),
             ),
           });
+        // The session's own call ceiling, and its cancel, as for a tool call: a
+        // prompt runs its function in the kernel. Without a ceiling, the kernel
+        // session's default.
         case "getPrompt":
-          return reply(await pool.run(flavour, (c) => c.getPrompt(request.params as never)));
+          return reply(
+            await cancellable((signal) =>
+              pool.run(flavour, (c, options) => c.getPrompt(request.params as never, options), {
+                deadlineMs: request.timeoutMs,
+                signal,
+              }),
+            ),
+          );
         case "listResources":
-          return reply(await pool.run(flavour, (c) => c.listResources(request.params as never)));
+          return reply(
+            await pool.run(flavour, (c, options) =>
+              c.listResources(request.params as never, options),
+            ),
+          );
         case "readResource":
-          return reply(await pool.run(flavour, (c) => c.readResource(request.params as never)));
-        case "callTool": {
-          // Registered so a later `cancel` frame can reach this evaluation. A
-          // kernel that ignores the cancellation still ends up stopped: the
-          // rejection retires it rather than returning it to the pool.
-          const controller = new AbortController();
-          inFlight.set(request.id, controller);
-          try {
-            return reply(
-              await pool.run(
+          return reply(
+            await cancellable((signal) =>
+              pool.run(flavour, (c, options) => c.readResource(request.params as never, options), {
+                deadlineMs: request.timeoutMs,
+                signal,
+              }),
+            ),
+          );
+        case "callTool":
+          return reply(
+            await cancellable((signal) =>
+              pool.run(
                 flavour,
-                (c) =>
+                (c, options) =>
                   c.callTool(request.params as never, undefined, {
-                    // One that cannot fire first: unset, the SDK's 60 s
-                    // default cut every longer call (#34).
-                    timeout: CALL_REQUEST_TIMEOUT_MS,
-                    signal: controller.signal,
-                    onprogress: (progress) =>
-                      emit({ event: "progress", target: request.id, progress }),
+                    // The session's: the signal below, and an SDK timeout that
+                    // cannot fire first (#34).
+                    ...options,
                     // Measured: AgentTools never sends progress, so this only
                     // ever fires for a kernel that is not the real one. Kept
                     // because it costs nothing and the paclet may gain it.
-                    resetTimeoutOnProgress: true,
+                    onprogress: (progress) =>
+                      emit({ event: "progress", target: request.id, progress }),
                   }),
                 // The deadline belongs to the session, not to the SDK request:
                 // see LocalBackend.callTool.
-                { deadlineMs: request.timeoutMs ?? 300_000, signal: controller.signal },
+                { deadlineMs: request.timeoutMs ?? 300_000, signal },
               ),
-            );
-          } finally {
-            inFlight.delete(request.id);
-          }
-        }
+            ),
+          );
         case "status":
           return reply({
             kernels: pool.size,

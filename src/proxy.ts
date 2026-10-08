@@ -640,8 +640,11 @@ export function createWolframServer(
       if (promptCache) return { prompts: promptCache };
       return backend.listPrompts();
     });
-    server.setRequestHandler(GetPromptRequestSchema, async (request) =>
-      backend.getPrompt(request.params),
+    // A prompt runs its own function in the kernel, so it waits as long as a
+    // tool call would, and a cancel stops it as one does. Given no ceiling, it
+    // was cut at the SDK's minute (#39).
+    server.setRequestHandler(GetPromptRequestSchema, async (request, extra) =>
+      backend.getPrompt(request.params, { timeoutMs: config.callTimeoutMs, signal: extra.signal }),
     );
   }
 
@@ -649,8 +652,11 @@ export function createWolframServer(
     server.setRequestHandler(ListResourcesRequestSchema, async (request) =>
       backend.listResources(request.params),
     );
-    server.setRequestHandler(ReadResourceRequestSchema, async (request) =>
-      backend.readResource(request.params),
+    server.setRequestHandler(ReadResourceRequestSchema, async (request, extra) =>
+      backend.readResource(request.params, {
+        timeoutMs: config.callTimeoutMs,
+        signal: extra.signal,
+      }),
     );
   }
 

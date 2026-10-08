@@ -77,7 +77,8 @@ Environment
                                      failed preparation is not retried for 10
                                      minutes, or until the binary changes
                                      (default: 120)
-  WOLFRAM_MCP_CALL_TIMEOUT_SECONDS   give up on a single evaluation
+  WOLFRAM_MCP_CALL_TIMEOUT_SECONDS   give up on a single evaluation: a tool
+                                     call, a prompt or a resource read
                                      (default: 300)
   WOLFRAM_MCP_CACHE                  0 to always ask a kernel for the tool list
                                      (default: 1)

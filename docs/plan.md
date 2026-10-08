@@ -192,8 +192,9 @@ of this as absent: `proxy.ts` forwards `progressToken`, `kernel.ts` handles both
    `AbortSignal` is honoured and the slot freed, but `notifications/cancelled` is *not*
    forwarded, because a serial kernel cannot read it until the work it would cancel has
    finished. What stops a kernel is stopping the process. See `docs/design.md`, *The call timeout*.
-2. **Progress.** Done. `proxy.ts` forwards `progressToken` and sets `resetTimeoutOnProgress`,
-   and the broker relays progress over the socket. Note measurement 2 in
+2. **Progress.** Done. `proxy.ts` forwards `progressToken`, and the broker relays progress
+   over the socket. It no longer sets `resetTimeoutOnProgress`, which reset an SDK timeout that
+   cannot fire first (#39). Note measurement 2 in
    `docs/design.md`, *The call timeout*: the paclet never sends progress, so this plumbing is correct and
    idle.
 3. **Upstream change notifications.** Done — `kernel.ts` sets handlers for both

@@ -370,9 +370,9 @@ export async function runDoctor(): Promise<number> {
   let code: number;
   try {
     const startedAt = Date.now();
-    const result = await session.run(async (client: Client) => {
+    const result = await session.run(async (client: Client, request) => {
       const caps = client.getServerCapabilities() ?? {};
-      const tools = await client.listTools();
+      const tools = await client.listTools(undefined, request);
       return { caps, tools: tools.tools ?? [], info: client.getServerVersion() };
     });
     const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);

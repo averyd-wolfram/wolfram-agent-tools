@@ -59,8 +59,8 @@ Not everything is a knob. These are the numbers the code holds on its own — no
 variable moves them — and they are here because each one is visible from outside when it
 fires, so "why did it do that?" has an answer that does not require reading the source.
 
-The value column is the source expression verbatim; a check in the suite fails if the code
-and this table stop agreeing.
+The value column is the source expression verbatim. Nothing checks this table against the
+code, so whoever changes a constant changes its row.
 
 | Constant | Value | Where | What it decides |
 |---|---|---|---|
@@ -74,7 +74,8 @@ and this table stop agreeing.
 | `CONNECT_RETRY_MS` | `100` | `broker-client.ts` | Gap between those attempts. |
 | `REQUEST_GRACE_MS` | `2_000` | `broker-client.ts` | How long a broker may take *beyond* the call's own ceiling before this side stops waiting. |
 | `PING_DEADLINE_MS` | `REQUEST_GRACE_MS` | `broker-client.ts` | How long a broker gets to say it is running, and to accept this session's kernel environment. |
-| `DEFAULT_OP_TIMEOUT_MS` | `60_000` | `broker-client.ts` | Ceiling for broker operations that carry no deadline of their own — `listTools`, `capabilities`, `getPrompt` — once a kernel is up. Since the broker may first have to start one, a session waits the start timeout plus this plus the grace for those (`brokerCeilingMs`); `status`, answered from memory, gets only this plus the grace. Nobody chose this number; it is the SDK's, and it is the one remaining wart in the timeout design. |
+| `DEFAULT_DEADLINE_MS` | `60_000` | `kernel.ts`, `broker-client.ts` | How long a caller waits for a kernel request with no ceiling of its own — the tool, prompt and resource lists — once a kernel is up; a tool call, a prompt and a resource read wait the call timeout instead. Shared, the broker may first have to start a kernel, so a session waits the start timeout plus this plus the grace for those (`brokerCeilingMs`); `status`, answered from memory, gets only this plus the grace. It is the minute the MCP SDK gave every request, kept as this server's own deadline: the SDK's forgot the request, so the kernel went on working out of sight and the next request queued behind it (#39). |
+| `SDK_REQUEST_TIMEOUT_MS` | `2 ** 31 - 1` | `kernel.ts` | The MCP SDK's timeout on every request to a kernel: the longest delay a timer holds, so it never fires before this server's deadline, and a late reply still arrives as proof of life. |
 | `HANDSHAKE_SDK_GRACE_MS` | `1_000` | `kernel.ts` | How far past a start's own handshake timer the MCP SDK's `initialize` timeout is set, so the handshake's timer, which names the cause, is the one that fires. |
 | `EMPTY_GRACE_MS` | `60_000` | `broker-server.ts` | How long a broker keeps running, and keeps its kernels, after its last session detaches. |
 | `BIND_ATTEMPTS` | `4` | `broker-server.ts` | Attempts to claim the socket when several brokers start at once. |
@@ -191,8 +192,8 @@ the canonical `wolfram` is reported, matching Wolfram's own generated configurat
 | Variable | Default | Meaning |
 |---|---|---|
 | `WOLFRAM_MCP_IDLE_MINUTES` | `10` | Shut a kernel down after this long without a call. `0` keeps it resident. |
-| `WOLFRAM_MCP_START_TIMEOUT_SECONDS` | `120` | One deadline for everything before a kernel takes its first request: the kernel's handshake on a private kernel; attaching to the broker and waiting for the broker's own preparation when shared. The error names the stage it ran out in. A shared kernel's handshake happens when a slot is granted, which a session cannot tell from waiting for one, so the broker bounds each of its kernel starts by this same value instead, and a session's wait for an op the broker answers from a kernel allows for that start (`brokerCeilingMs`). A cold broker can therefore take two of these, plus that op's own ceiling, before a shared session sees an error (D19); `callTool` is bounded by the call's ceiling alone, which a cold start eats into (#16). |
-| `WOLFRAM_MCP_CALL_TIMEOUT_SECONDS` | `300` | Answer the caller with an error after this long. The kernel is left running — see below. |
+| `WOLFRAM_MCP_START_TIMEOUT_SECONDS` | `120` | One deadline for everything before a kernel takes its first request: the kernel's handshake on a private kernel; attaching to the broker and waiting for the broker's own preparation when shared. The error names the stage it ran out in. A shared kernel's handshake happens when a slot is granted, which a session cannot tell from waiting for one, so the broker bounds each of its kernel starts by this same value instead, and a session's wait for an op the broker answers from a kernel allows for that start (`brokerCeilingMs`). A cold broker can therefore take two of these, plus that op's own ceiling, before a shared session sees an error (D19); a tool call, a prompt and a resource read are bounded by the call's ceiling alone, which a cold start eats into (#16). |
+| `WOLFRAM_MCP_CALL_TIMEOUT_SECONDS` | `300` | Answer the caller with an error after this long: a tool call, a prompt (which runs its own function in the kernel) or a resource read. The kernel is left running — see below. |
 | `WOLFRAM_IDLE_MINUTES`, `WOLFRAM_START_TIMEOUT_SECONDS`, `WOLFRAM_CALL_TIMEOUT_SECONDS` | — | Aliases for the above. |
 
 Each of the three is held to 24 days (`MAX_TIME_MS`), `Infinity` included, and the log says so
