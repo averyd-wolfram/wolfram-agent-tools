@@ -44,7 +44,13 @@ import {
   type BackoffState,
   type CandidateIdentity,
 } from "./prepare.js";
-import { HandshakeTimeout, isServerNotResolved, KernelSession } from "./kernel.js";
+import {
+  drainPages,
+  HandshakeTimeout,
+  isServerNotResolved,
+  KernelSession,
+  listAllTools,
+} from "./kernel.js";
 import type { KernelInstall } from "./locate.js";
 import { errorText, type Logger } from "./log.js";
 import { PKG } from "./version.js";
@@ -66,26 +72,6 @@ export interface DirectOps {
 }
 
 export type KernelReadyHandler = (ops: DirectOps) => void | Promise<void>;
-
-/**
- * Every page of something, gathered under whatever hold the caller already has.
- *
- * Bounded because a broken upstream that always returns a cursor would
- * otherwise loop forever holding a kernel.
- */
-async function drainPages<T>(
-  page: (cursor?: string) => Promise<{ items: T[]; nextCursor?: string | undefined }>,
-): Promise<T[]> {
-  const all: T[] = [];
-  let cursor: string | undefined;
-  for (let guard = 0; guard < 50; guard++) {
-    const result = await page(cursor);
-    all.push(...result.items);
-    cursor = result.nextCursor;
-    if (!cursor) break;
-  }
-  return all;
-}
 
 /**
  * How a request the kernel evaluates is to be run: a tool call, a prompt or a
@@ -241,13 +227,7 @@ export class LocalBackend implements KernelBackend {
    * complete lists and neither ever returns a `nextCursor`.
    */
   async listTools(): Promise<ToolPage> {
-    const tools = await this.#session.run((c, request) =>
-      drainPages(async (cursor) => {
-        const page = await c.listTools(cursor ? { cursor } : undefined, request);
-        return { items: page.tools ?? [], nextCursor: page.nextCursor };
-      }),
-    );
-    return { tools };
+    return { tools: await this.#session.run((c, request) => listAllTools(c, request)) };
   }
 
   async listPrompts(): Promise<PromptPage> {

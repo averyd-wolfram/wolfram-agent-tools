@@ -783,12 +783,19 @@ are *traced* in this tree on 2026-10-05 unless marked otherwise.
    schemas until a kernel runs. *Work:* key a paclet-declared server's entry on its paclet's
    version, read without a kernel — from the installed paclet's `PacletInfo` on disk — and fall
    back to today's key when that cannot be read.
-5. **`structuredContent` and `outputSchema` intact.** *Traced:* this server passes tool
-   definitions and results through without rebuilding them, on both paths and through the cache.
-   The SDK keeps both fields, but `Client.callTool` validates: a tool that declares
-   `outputSchema` and returns no `structuredContent` becomes a protocol error. *Work:* a check
-   through the private path, the broker and a warm cache, with the fake emitting both; then
-   whether AgentTools 2.2.7 emits them, on a real kernel (§7).
+5. **`structuredContent` and `outputSchema` intact.** *Done* (#31): this server passes tool
+   definitions and results through without rebuilding them, on both paths and through the cache,
+   and judges none of them — a kernel's client lists tools as a plain request, not as the SDK's
+   `Client.listTools` does, whose compile of every `outputSchema` failed the whole list on one
+   schema ajv refused, and whose cached validators made `Client.callTool` turn a result its
+   schema refused into a protocol error. The client a session serves validates against the
+   schemas relayed to it; measured, Claude Code 2.1.290 lists a server whose tool carries a
+   schema ajv refuses. Checked through the private path, the broker, a warm cache and `doctor`,
+   with the fake emitting both. A schema that is not `type: "object"` still fails the whole list,
+   in the SDK's parse rather than ajv, and is non-conformant (#69). *Traced:* AgentTools 2.2.7
+   emits neither — a tool's entry is built from five fixed keys (`createMCPToolData`,
+   `Kernel/Server/Shared.wl`), and its results leave `structuredContent` out on purpose — so
+   `test:custom` cannot pin this until a paclet lets a tool declare an output schema.
 6. **A locked server name for packagers.** *Traced:* the server reads `MCP_SERVER_NAME` first,
    then `WOLFRAM_MCP_SERVER_NAME`, then `WOLFRAM_MCP_DEFAULT_SERVER`; the plugin sets only the
    last, so a user may override it. *Work:* document `MCP_SERVER_NAME` in a package's own

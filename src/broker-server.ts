@@ -9,7 +9,7 @@
  * falls back to its own kernel, so a broker failure degrades rather than breaks.
  */
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { McpError, type Prompt, type Tool } from "@modelcontextprotocol/sdk/types.js";
+import { McpError, type Prompt } from "@modelcontextprotocol/sdk/types.js";
 import { createServer, type Server, type Socket } from "node:net";
 import { statSync, unlinkSync } from "node:fs";
 import { connect } from "node:net";
@@ -26,6 +26,7 @@ import {
   SOCKET_MODE,
 } from "./broker-protocol.js";
 import { settingValue, type KernelFlavour } from "./flavour.js";
+import { drainPages, listAllTools } from "./kernel.js";
 import { errorText, type Logger } from "./log.js";
 
 /** How long to linger with no connections before exiting. */
@@ -37,22 +38,6 @@ const EVALUATIONS: ReadonlySet<BrokerOp> = new Set<BrokerOp>([
   "getPrompt",
   "readResource",
 ]);
-const MAX_PAGES = 50;
-
-/** Follow `nextCursor` so a broadcast carries the whole list, not page one. */
-async function drain<T>(
-  page: (cursor?: string) => Promise<{ items: T[]; nextCursor?: string | undefined }>,
-): Promise<T[]> {
-  const all: T[] = [];
-  let cursor: string | undefined;
-  for (let i = 0; i < MAX_PAGES; i++) {
-    const result = await page(cursor);
-    all.push(...result.items);
-    cursor = result.nextCursor;
-    if (!cursor) break;
-  }
-  return all;
-}
 
 export interface BrokerOptions {
   address: string;
@@ -261,12 +246,10 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
     if (audience.length === 0) return; // nobody to tell; the cache will do
     try {
       const capabilities = client.getServerCapabilities() ?? {};
-      const tools = await drain<Tool>(async (cursor) => {
-        const page = await client.listTools(cursor ? { cursor } : undefined);
-        return { items: page.tools ?? [], nextCursor: page.nextCursor };
-      });
+      // Whole lists, so a broadcast carries every page, not page one.
+      const tools = await listAllTools(client);
       const prompts = capabilities.prompts
-        ? await drain<Prompt>(async (cursor) => {
+        ? await drainPages<Prompt>(async (cursor) => {
             const page = await client.listPrompts(cursor ? { cursor } : undefined);
             return { items: page.prompts ?? [], nextCursor: page.nextCursor };
           })
@@ -343,17 +326,12 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
         // that never issued page 1. Nothing outside this process ever sees one.
         case "listTools":
           return reply({
-            tools: await pool.run(flavour, (c, options) =>
-              drain(async (cursor) => {
-                const page = await c.listTools(cursor ? { cursor } : undefined, options);
-                return { items: page.tools ?? [], nextCursor: page.nextCursor };
-              }),
-            ),
+            tools: await pool.run(flavour, (c, options) => listAllTools(c, options)),
           });
         case "listPrompts":
           return reply({
             prompts: await pool.run(flavour, (c, options) =>
-              drain(async (cursor) => {
+              drainPages(async (cursor) => {
                 const page = await c.listPrompts(cursor ? { cursor } : undefined, options);
                 return { items: page.prompts ?? [], nextCursor: page.nextCursor };
               }),

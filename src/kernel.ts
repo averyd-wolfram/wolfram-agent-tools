@@ -12,9 +12,13 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import {
   ErrorCode,
+  ListToolsResultSchema,
   McpError,
   PromptListChangedNotificationSchema,
   ToolListChangedNotificationSchema,
+  type ListToolsRequest,
+  type ListToolsResult,
+  type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { deadlineDelay, MAX_TIMER_MS, timerDelay } from "./config.js";
 import { FilteringStdioTransport } from "./transport.js";
@@ -120,6 +124,64 @@ export const DEFAULT_DEADLINE_MS = 60_000;
  */
 function requestOptions(signal: AbortSignal | undefined): RequestOptions {
   return { timeout: SDK_REQUEST_TIMEOUT_MS, ...(signal ? { signal } : {}) };
+}
+
+/**
+ * The SDK's client, except that it lists tools without compiling their output
+ * schemas. Every kernel's client is one, so no caller can reach the SDK's own
+ * `listTools`, however it asks.
+ *
+ * That one compiles every tool's `outputSchema` with ajv, to validate later
+ * `tools/call` results, and a schema ajv refuses throws out of the whole list.
+ * So one tool took every tool of its server with it — on a cold list, in the
+ * refresh that keeps the cache, at the broker and in `doctor` (#31); fast-uri
+ * 3.1.8 made a malformed `$id` such a schema.
+ *
+ * This server relays results and judges none: the client it serves validates
+ * each against the schema relayed to it. With nothing cached from a listing,
+ * `callTool` no longer refuses a result its tool's schema would, nor a call to
+ * a tool that requires task-based execution, which the kernel answers itself.
+ * It did either only once this client had happened to list the tools.
+ */
+class RelayClient extends Client {
+  override listTools(
+    params?: ListToolsRequest["params"],
+    options?: RequestOptions,
+  ): Promise<ListToolsResult> {
+    return this.request({ method: "tools/list", params }, ListToolsResultSchema, options);
+  }
+}
+
+/**
+ * Every page of something, gathered under whatever hold the caller already has.
+ *
+ * Bounded because a broken upstream that always returns a cursor would
+ * otherwise loop forever holding a kernel.
+ */
+export async function drainPages<T>(
+  page: (cursor?: string) => Promise<{ items: T[]; nextCursor?: string | undefined }>,
+): Promise<T[]> {
+  const all: T[] = [];
+  let cursor: string | undefined;
+  for (let guard = 0; guard < 50; guard++) {
+    const result = await page(cursor);
+    all.push(...result.items);
+    cursor = result.nextCursor;
+    if (!cursor) break;
+  }
+  return all;
+}
+
+/**
+ * A kernel's whole tool list, under the hold the caller has. Every page, so
+ * nothing reports page one as the list: `doctor` did, and showed a kernel that
+ * pages fewer tools than it offered.
+ */
+export function listAllTools(client: Client, options?: RequestOptions): Promise<Tool[]> {
+  return drainPages(async (cursor) => {
+    const page = await client.listTools(cursor ? { cursor } : undefined, options);
+    return { items: page.tools ?? [], nextCursor: page.nextCursor };
+  });
 }
 
 /** The SDK's own timeout, which a request given `requestOptions` never meets. */
@@ -402,7 +464,7 @@ export class KernelSession {
       onFatal: (error) => reportFatal(error),
     });
 
-    const client = new Client(clientInfo, { capabilities: {} });
+    const client = new RelayClient(clientInfo, { capabilities: {} });
     this.#handshaking = { transport, abort: (error) => reportFatal(error) };
     client.onerror = (err) => log(`upstream error: ${errorText(err)}`);
     client.onclose = () => {

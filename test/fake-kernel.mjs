@@ -54,6 +54,13 @@
  * FAKE_INIT_DELAY_MS  delay before answering initialize: a slow handshake, the
  *                     last stage of a preparation, that does eventually answer
  * FAKE_EMPTY_TOOLS    report zero tools, successfully
+ * FAKE_OUTPUT_SCHEMA  JSON: serve one more tool, Structured, declaring this as its
+ *                     outputSchema and answering with structuredContent. No server
+ *                     AgentTools 2.2.7 serves can: it builds a tool's entry from
+ *                     five fixed keys and leaves structuredContent out. A paclet
+ *                     that allows one could send a schema ajv cannot compile — a
+ *                     malformed `$id` — which failed the whole tools/list in the
+ *                     SDK's client (#31)
  * FAKE_RESOURCES      declare the resources capability and serve one resource.
  *                     AgentTools 2.2.7 answers resources/list and resources/read,
  *                     for MCP Apps' UI resources, but declares no resources
@@ -292,6 +299,16 @@ function run() {
       title: "Wolfram Alpha",
       description: "Answers a natural-language query.",
       inputSchema: { type: "object", properties: { query: { type: "string" } } },
+    });
+  }
+  if (process.env.FAKE_OUTPUT_SCHEMA) {
+    // Last, so a client that compiles schemas in order has listed every other
+    // tool before it reaches this one, and still fails the list.
+    tools.push({
+      name: "Structured",
+      description: "Answers with structured content.",
+      inputSchema: { type: "object", properties: {} },
+      outputSchema: JSON.parse(process.env.FAKE_OUTPUT_SCHEMA),
     });
   }
 
@@ -539,6 +556,9 @@ function run() {
               ` toolOptions=${process.env.MCP_TOOL_OPTIONS ?? "(unset)"}`,
           },
         ],
+        // A tool that declares an output schema owes its caller structured
+        // content, as the spec says.
+        ...(msg.params?.name === "Structured" ? { structuredContent: { answer: 42 } } : {}),
       }));
       return;
     }

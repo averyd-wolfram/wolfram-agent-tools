@@ -13,8 +13,10 @@ import { connect as connectSocket, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { ListToolsResultSchema } from "@modelcontextprotocol/sdk/types.js";
 // The derivation the docs now point at, imported rather than repeated so the
 // suite and the script can never disagree about what src/ contains.
 
@@ -2741,6 +2743,124 @@ for (const sharing of ["1", "0"]) {
         s.stderr().split("\n").filter((l) => /abandon/.test(l)).join(" | ").slice(0, 100),
       );
     }
+    await s.client.close();
+    await new Promise((r) => setTimeout(r, 300));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The SDK's Client.listTools compiles every tool's outputSchema with ajv, to
+// validate later results, and a schema ajv refuses throws out of the whole list
+// (#31). fast-uri 3.1.8 made a malformed `$id` such a schema: "URI scheme is
+// malformed." So one tool took every tool of its server with it — on a cold
+// list, in the refresh after a kernel start that keeps the cache, and at the
+// broker. A proxy has no use for those validators: its own client judges each
+// result against the schema relayed to it, and measured, Claude Code 2.1.290
+// lists every tool of a server that serves this one.
+heading("A tool whose output schema cannot be compiled costs only itself, on either path");
+{
+  const schema = { $id: "Wolfram Tool:out", type: "object", properties: { answer: { type: "number" } } };
+  for (const sharing of ["0", "1"]) {
+    const path = sharing === "1" ? "shared" : "private";
+    wipeCache();
+    const runtime = join(home, `run-outschema-${sharing}`);
+    privateDir(runtime);
+    const s = await connect({
+      WOLFRAM_MCP_SHARE: sharing,
+      XDG_RUNTIME_DIR: runtime,
+      WOLFRAM_MCP_LICENSE_LIMIT: "4",
+      FAKE_OUTPUT_SCHEMA: JSON.stringify(schema),
+    });
+    // Not s.client.listTools(): this suite's client is the SDK's as well, and
+    // would compile the schema and throw by itself, whatever the server sent.
+    const listed = await s.client
+      .request({ method: "tools/list" }, ListToolsResultSchema, { timeout: 20_000 })
+      .then(
+        (r) => ({ tools: upstreamTools(r.tools) }),
+        (err) => ({ error: err.message }),
+      );
+    const names = listed.tools?.map((t) => t.name).join(", ");
+    check(
+      `a cold list holds every tool, the uncompilable one included (${path})`,
+      names === "WolframLanguageEvaluator, Structured",
+      listed.error ?? names,
+    );
+    check(
+      `with its schema relayed as the kernel gave it (${path})`,
+      // Deeply, not as JSON: the SDK's parse puts the keys it knows first.
+      isDeepStrictEqual(listed.tools?.find((t) => t.name === "Structured")?.outputSchema, schema),
+      JSON.stringify(listed.tools?.find((t) => t.name === "Structured")?.outputSchema)?.slice(0, 80),
+    );
+    // Read again by the refresh a kernel start triggers — the session's own on
+    // a private kernel, the broker's announcement on a shared one — and that
+    // read is what keeps the cache; it failed and kept nothing.
+    const cached = await until(() => lib.readCache(suiteKey)?.tools?.length === 2, 5_000);
+    check(
+      `and the refresh after a kernel start caches them all (${path})`,
+      cached,
+      `cached: ${lib.readCache(suiteKey)?.tools?.map((t) => t.name).join(", ") ?? "nothing"}`,
+    );
+    const called = await s.client
+      .callTool({ name: "Structured", arguments: {} }, undefined, { timeout: 20_000 })
+      .then(
+        (r) => r,
+        (err) => ({ error: err.message }),
+      );
+    check(
+      `the tool answers, its structured content relayed as the kernel gave it (${path})`,
+      isDeepStrictEqual(called.structuredContent, { answer: 42 }),
+      called.error ?? JSON.stringify(called).slice(0, 100),
+    );
+    await s.client.close();
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  // The cache is the third route a list takes: what the last refresh wrote is
+  // served to the next session without a kernel, and has to be the same list.
+  const startsBefore = startCount();
+  const warm = await connect({ FAKE_OUTPUT_SCHEMA: JSON.stringify(schema) });
+  const served = await warm.client
+    .request({ method: "tools/list" }, ListToolsResultSchema, { timeout: 20_000 })
+    .then(
+      (r) => upstreamTools(r.tools).find((t) => t.name === "Structured")?.outputSchema,
+      (err) => err.message,
+    );
+  check(
+    "and a session served from the warm cache relays the schema intact, starting no kernel",
+    isDeepStrictEqual(served, schema) && startCount() === startsBefore,
+    `${JSON.stringify(served)?.slice(0, 80)}, kernels started: ${startCount() - startsBefore}`,
+  );
+  await warm.client.close();
+
+  // And the relay judges no result. A schema that compiles gave the kernel's
+  // client a validator once it had listed the tools, and then a result that did
+  // not match became this server's protocol error in place of the kernel's
+  // answer. Judging it is for the client a session serves, against the schema
+  // relayed to it.
+  const strict = { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] };
+  for (const sharing of ["0", "1"]) {
+    const path = sharing === "1" ? "shared" : "private";
+    wipeCache();
+    const runtime = join(home, `run-outschema-strict-${sharing}`);
+    privateDir(runtime);
+    const s = await connect({
+      WOLFRAM_MCP_SHARE: sharing,
+      XDG_RUNTIME_DIR: runtime,
+      WOLFRAM_MCP_LICENSE_LIMIT: "4",
+      FAKE_OUTPUT_SCHEMA: JSON.stringify(strict),
+    });
+    // Listed first, as a client does, so the kernel's client has listed too.
+    await s.client.request({ method: "tools/list" }, ListToolsResultSchema, { timeout: 20_000 });
+    const called = await s.client
+      .callTool({ name: "Structured", arguments: {} }, undefined, { timeout: 20_000 })
+      .then(
+        (r) => r,
+        (err) => ({ error: err.message }),
+      );
+    check(
+      `a result its own schema would refuse is relayed for the client to judge (${path})`,
+      isDeepStrictEqual(called.structuredContent, { answer: 42 }),
+      called.error ?? JSON.stringify(called).slice(0, 100),
+    );
     await s.client.close();
     await new Promise((r) => setTimeout(r, 300));
   }
@@ -6876,6 +6996,28 @@ heading("doctor runs, and says what is wrong when something is");
   check(
     "and the tools the kernel really offered, not a cached list",
     said.includes("WolframLanguageEvaluator"),
+  );
+  // doctor lists through the SDK's client too, so one tool whose output schema
+  // ajv cannot compile failed the whole diagnosis of a kernel that answered (#31).
+  const structured = doctor({
+    FAKE_OUTPUT_SCHEMA: JSON.stringify({ $id: "Wolfram Tool:out", type: "object" }),
+  });
+  check(
+    "doctor lists a tool whose output schema cannot be compiled, with the rest",
+    structured.status === 0 && /tools\s+WolframLanguageEvaluator, Structured/.test(structured.stdout),
+    `status=${structured.status} ${`${structured.stdout}${structured.stderr}`
+      .split("\n")
+      .filter((l) => /tools\s|malformed/.test(l))
+      .join(" | ")
+      .slice(0, 120)}`,
+  );
+  // doctor read the first page of a paged list and printed it as the kernel's
+  // tools, so a kernel that pages showed fewer than it offered.
+  const paged = doctor({ FAKE_MODE: "paged-tools" });
+  check(
+    "doctor lists every page of the kernel's tools",
+    /tools\s+WolframLanguageEvaluator, PagedTwo, PagedThree\n/.test(paged.stdout),
+    paged.stdout.split("\n").find((l) => /^\s+tools\s/.test(l))?.trim(),
   );
 
   // The state a stuck user is actually in. Every install on the machine is below

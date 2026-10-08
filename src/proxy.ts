@@ -29,12 +29,10 @@ import type { BrokerBackend } from "./broker-client.js";
 import { doctorCommand } from "./doctor.js";
 import { formatWait, type BackoffState } from "./prepare.js";
 import { readFacts } from "./inspect.js";
+import { drainPages } from "./kernel.js";
 import { exampleKernelPath, listKernels, locateKernel, type KernelInstall } from "./locate.js";
 import { bareMcpText, errorText, type Logger } from "./log.js";
 import { PKG } from "./version.js";
-
-/** Upper bound on pages drained while rebuilding the cache. */
-const MAX_PAGES = 50;
 
 /**
  * Upstream failures that are about the request rather than the evaluation.
@@ -59,28 +57,18 @@ export interface WolframServer {
 }
 
 /** Follow `nextCursor` so the cache holds a complete list, not just page one. */
-async function drainTools(ops: DirectOps): Promise<Tool[]> {
-  const tools: Tool[] = [];
-  let cursor: string | undefined;
-  for (let page = 0; page < MAX_PAGES; page++) {
-    const result = await ops.listTools(cursor);
-    tools.push(...(result.tools ?? []));
-    cursor = result.nextCursor;
-    if (!cursor) break;
-  }
-  return tools;
+function drainTools(ops: DirectOps): Promise<Tool[]> {
+  return drainPages(async (cursor) => {
+    const page = await ops.listTools(cursor);
+    return { items: page.tools ?? [], nextCursor: page.nextCursor };
+  });
 }
 
-async function drainPrompts(ops: DirectOps): Promise<Prompt[]> {
-  const prompts: Prompt[] = [];
-  let cursor: string | undefined;
-  for (let page = 0; page < MAX_PAGES; page++) {
-    const result = await ops.listPrompts(cursor);
-    prompts.push(...(result.prompts ?? []));
-    cursor = result.nextCursor;
-    if (!cursor) break;
-  }
-  return prompts;
+function drainPrompts(ops: DirectOps): Promise<Prompt[]> {
+  return drainPages(async (cursor) => {
+    const page = await ops.listPrompts(cursor);
+    return { items: page.prompts ?? [], nextCursor: page.nextCursor };
+  });
 }
 
 /**
