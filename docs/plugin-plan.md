@@ -320,7 +320,8 @@ go-ahead.
   depends on it; those scenarios stay.
 - **Node floor: 22.13.0**, for both runtime and toolchain. ESLint 10.9.1 in the lockfile needs
   at least that on the 22 line. Update `engines`, both launcher guards, the bundle banner and
-  target, the CI matrix and the docs together.
+  target, the CI matrix, the `@types/node` range and Dependabot's ignore for it, and the docs
+  together.
 - **Re-run the real-kernel suites against stable AgentTools 2.2.0:**
   `test:wl`, `test:custom`, `test:lsp`. Disable 2.2.7 (`PacletDisable`, reversible) or use a
   kernel that loads 2.2.0 explicitly, and record the resolved version.

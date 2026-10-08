@@ -36,6 +36,11 @@ updates:
         dependency-type: development
         update-types: [minor, patch]
         exclude-patterns: [esbuild]
+    # Node's typings stay on the floor's line, or the compiler accepts APIs
+    # the floor lacks (#52). Move this bound with engines.
+    ignore:
+      - dependency-name: "@types/node"
+        versions: [">=22.14.0"]
     labels: [dependencies]
 
   - package-ecosystem: github-actions

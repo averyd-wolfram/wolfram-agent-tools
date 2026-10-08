@@ -5821,6 +5821,26 @@ heading("Packaging matches the not-published decision");
 }
 
 // ---------------------------------------------------------------------------
+// Node's typings are all the compiler knows of Node, so they decide which APIs
+// it accepts. Declared ^22.10.0, they resolved to 22.20, and a call to an API
+// added after 22.13 compiled, passed CI on newer Node, and failed at runtime on
+// the floor the package promises, wherever the 22.13.0 leg's hermetic run did
+// not happen to go (#52). So the installed typings must be the floor's own
+// line. The floor is engines' to state, as for the launchers' guards, and the
+// typings are read as installed, since that is what tsc compiles against.
+heading("The compiler knows the Node the package promises, not a newer one");
+{
+  const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  const floor = /(\d+)\.(\d+)\.\d+/.exec(pkg.engines.node);
+  const typings = createRequire(join(root, "package.json"))("@types/node/package.json").version;
+  check(
+    `Node's typings are the floor's line, ${floor[1]}.${floor[2]}`,
+    typings.split(".").slice(0, 2).join(".") === `${floor[1]}.${floor[2]}`,
+    `@types/node ${typings}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 heading("CLI");
 {
   const { spawnSync } = await import("node:child_process");
