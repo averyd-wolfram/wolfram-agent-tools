@@ -1905,6 +1905,7 @@ heading("Regression — several sessions recovering at once produce one broker")
   wipeCache();
   const runtime = join(home, "run-race");
   privateDir(runtime);
+  const raceLog = join(home, "race-broker.log");
   const shared = {
     WOLFRAM_MCP_SHARE: "1",
     XDG_RUNTIME_DIR: runtime,
@@ -1913,6 +1914,7 @@ heading("Regression — several sessions recovering at once produce one broker")
     WOLFRAM_MCP_IDLE_MINUTES: "5",
     // Slow enough that the recoveries genuinely overlap.
     FAKE_CALL_DELAY_MS: "250",
+    WOLFRAM_MCP_LOG: raceLog,
   };
   const sessions = [];
   for (let i = 0; i < 3; i++) sessions.push(await connect(shared));
@@ -1937,12 +1939,124 @@ heading("Regression — several sessions recovering at once produce one broker")
   // three brokers ran, each deriving a full pool budget from one licence.
   const recovered = await Promise.all(sessions.map((s, i) => evaluate(s, i + 10)));
   check("every session recovers", recovered.every(Boolean), `${recovered.filter(Boolean).length}/3`);
-  await new Promise((r) => setTimeout(r, 2000));
-  const brokers = ownBrokers(runtime).length;
-  check("and exactly one broker is left holding the licence", brokers === 1, `brokers: ${brokers}`);
+  // Waited for rather than read at 2s: a broker the race below orphans now
+  // leaves by itself, once its work is done. On failure the brokers' own log
+  // says which broker bound, which stood down and which removed what — two CI
+  // failures went unexplained for want of it (#32).
+  const one = await until(() => ownBrokers(runtime).length === 1, 10_000);
+  check(
+    "and exactly one broker is left holding the licence",
+    one,
+    `brokers: ${ownBrokers(runtime).length}; ${
+      existsSync(raceLog)
+        ? readFileSync(raceLog, "utf8")
+            .split("\n")
+            .filter((l) => /listening|stale|replaced|standing down|attempt|address|socket/.test(l))
+            .join(" | ")
+        : "(no broker log)"
+    }`,
+  );
 
   for (const s of sessions) await s.client.close();
   await new Promise((r) => setTimeout(r, 400));
+}
+
+// ---------------------------------------------------------------------------
+// The race above, made to happen. Two brokers judge the same dead socket; one
+// removes it and binds, and the other — descheduled between checking the
+// file's identity and unlinking it — unlinks the winner's fresh socket and
+// binds its own (#32; reproduced by widening that gap, 3 rounds in 10). The
+// winner kept serving its sessions and holding its pool's seats on a socket no
+// new session could find. Removing a live broker's socket file makes the same
+// state at will.
+//
+// Worse, a broker in that state that stopped — its proxies gone, or SIGTERM —
+// closed its server, and libuv unlinks a Unix socket's path on close: whatever
+// is there by then, the other broker's socket included. That broker was
+// orphaned in turn, and the next session started a third.
+heading("A broker no longer at its address hands its sessions over and leaves");
+{
+  wipeCache();
+  const runtime = join(home, "run-orphan");
+  privateDir(runtime);
+  const shared = {
+    WOLFRAM_MCP_SHARE: "1",
+    XDG_RUNTIME_DIR: runtime,
+    WOLFRAM_MCP_LICENSE_LIMIT: "4",
+    WOLFRAM_MCP_IDLE_MINUTES: "5",
+    WOLFRAM_MCP_LOG: join(home, "orphan-broker.log"),
+  };
+  const call = (s, code) =>
+    s.client
+      .callTool({ name: "WolframLanguageEvaluator", arguments: { code } }, undefined, { timeout: 30_000 })
+      .then((r) => !r.isError && answeredByFake(r), () => false);
+  const socketPath = () => readdirSync(runtime).filter((f) => f.endsWith(".sock")).map((f) => join(runtime, f))[0];
+  const inode = (path) => {
+    try {
+      return statSync(path).ino;
+    } catch {
+      return null;
+    }
+  };
+
+  const first = await connect(shared);
+  check("a first session starts a broker", await call(first, "1+1"));
+  const [orphan] = ownBrokers(runtime);
+  const address = socketPath();
+  rmSync(address); // the race's outcome: the first broker's socket unlinked under it
+
+  const second = await connect(shared);
+  check("a second session finds no broker and starts another", await call(second, "2+2"));
+  const successor = ownBrokers(runtime).find((pid) => pid !== orphan);
+  const successorInode = inode(address);
+
+  const left = await until(() => !ownBrokers(runtime).includes(orphan), 10_000);
+  check(
+    "the broker that lost its address leaves, while its session is still attached",
+    left && ownBrokers(runtime).length === 1,
+    `brokers: ${ownBrokers(runtime).join(", ")}, orphan ${orphan}`,
+  );
+  check(
+    "and its session's next call is served by the broker at the address",
+    (await call(first, "3+3")) && ownBrokers(runtime).join() === String(successor),
+    `brokers: ${ownBrokers(runtime).join(", ")}, successor ${successor}`,
+  );
+  check(
+    "whose socket it left where it was",
+    successorInode !== null && inode(address) === successorInode,
+    `inode ${successorInode} then ${inode(address)}`,
+  );
+  await first.client.close();
+  await second.client.close();
+  signalOwnBrokers("SIGKILL", runtime);
+  await new Promise((r) => setTimeout(r, 300));
+
+  // The cascade on its own: an orphan with nobody attached, told to stop.
+  wipeCache();
+  const lone = await connect(shared);
+  await call(lone, "4+4");
+  const [lonely] = ownBrokers(runtime);
+  rmSync(socketPath());
+  await lone.client.close();
+  const next = await connect(shared);
+  await call(next, "5+5");
+  const liveInode = inode(socketPath());
+  // Told to stop, unless it has already left by itself: either way through
+  // stop(), which is where the close that unlinks the path lives.
+  try {
+    process.kill(lonely, "SIGTERM");
+  } catch {
+    /* gone already */
+  }
+  await until(() => !ownBrokers(runtime).includes(lonely), 10_000);
+  check(
+    "an orphaned broker that stops leaves the live broker's socket alone",
+    liveInode !== null && inode(socketPath()) === liveInode,
+    `live inode ${liveInode}, now ${inode(socketPath())}`,
+  );
+  await next.client.close();
+  signalOwnBrokers("SIGKILL", runtime);
+  await new Promise((r) => setTimeout(r, 300));
 }
 
 // ---------------------------------------------------------------------------

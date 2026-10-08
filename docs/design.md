@@ -279,10 +279,19 @@ the one it was started with; uid because a socket in a shared temp directory wou
 be reachable across accounts. The digest is short because a macOS `sockaddr_un` path is
 capped at 104 bytes.
 
-**Startup race.** Whoever binds the socket wins. A loser sees `EADDRINUSE`, tries to
-connect, and stands down if something answers. A leftover socket from a killed broker is
-indistinguishable from a live one by inspection, so the liveness check *is* a connection
-attempt; only a socket that refuses connections is unlinked.
+**Startup race.** Whoever takes the address wins, and a loser connects instead. A
+leftover socket from a killed broker is indistinguishable from a live one by inspection, so
+the liveness check *is* a connection attempt; only a socket that refuses connections is
+unlinked, and only if it is still the file that was judged. A broker binds under a name of
+its own beside the address and then links it into place, which fails if anything is
+there. That way it knows exactly which socket is its own, and its server's close unlinks
+only that name, never a successor's socket at the address.
+
+Removing a dead socket is still a check followed by an unlink, and nothing makes that
+pair atomic. A broker descheduled between the two can unlink a winner's fresh socket and
+take the address itself (#32). So every broker checks regularly that the address
+still holds its socket. One that finds it gone or replaced tells its sessions to choose
+again, answers what they had already asked, and leaves.
 
 **Budget.** Only a kernel can read `$MaxLicenseProcesses`, so the pool starts at one and
 asks the first kernel it starts, then caches the answer. `deriveBudget` is a pure
