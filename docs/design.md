@@ -536,9 +536,11 @@ kernel-ready hook reads: inside a start, and again outside the queue whenever th
 list changed. Neither has a caller to answer, and a failure is logged and ignored.
 
 A cancel stops the kernel only once the kernel has the work. A request cancelled while it
-waited — in the session's queue, the pool's, or a kernel's start — is dropped before it is sent;
-sent on, the SDK refused it unsent, and `#fate`, seeing the cancel, stopped a kernel that never
-had it.
+waited — in the session's queue, the pool's, while abandoned work was taken back, or during a
+kernel's start — is dropped before it is sent (`RequestDropped`); sent on, the SDK refused it
+unsent, and `#fate`, seeing the cancel, stopped a kernel that never had it. The pool turns such a
+request away before its tiers run, and a waiter cancelled in its queue leaves it, so no kernel is
+grown, and no other session's retired, to make room for a request nobody wants.
 
 ## Teardown reaps the kernel's descendants
 

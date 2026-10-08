@@ -129,6 +129,21 @@ function isRequestTimeout(err: unknown): boolean {
   return err instanceof McpError && err.code === REQUEST_TIMEOUT;
 }
 
+/**
+ * A request dropped before it reached the kernel, because its caller cancelled
+ * while it waited: for its turn, for a kernel to be taken back, or for one to
+ * start. Typed so that a pool can tell it from a failure the kernel had a part
+ * in, and hand the kernel straight back rather than ask after its health.
+ */
+export class RequestDropped extends Error {
+  constructor(reason: unknown) {
+    super(`the request was cancelled before it reached the kernel (${errorText(reason)})`, {
+      cause: reason,
+    });
+    this.name = "RequestDropped";
+  }
+}
+
 /** How a single unit of work is to be run. */
 export interface RunOptions {
   /**
@@ -490,18 +505,21 @@ export class KernelSession {
       // is nothing to stop, and no reason to start one. Sent on, the SDK
       // refused it unsent and `#fate`, seeing the cancel, stopped a kernel that
       // had never had the work — or one just started to receive it.
-      options.signal?.throwIfAborted();
+      if (options.signal?.aborted) throw new RequestDropped(options.signal.reason);
       this.#clearIdle();
+      // Cancelled while abandoned work was taken back, or during the start:
+      // the same, and the kernel, if there is one, idles out like any other.
+      const dropIfCancelled = (): void => {
+        if (!options.signal?.aborted) return;
+        this.#scheduleIdle();
+        throw new RequestDropped(options.signal.reason);
+      };
       // Someone needs the kernel now, so this is the moment abandoned work
       // stops being free to finish.
       await this.#reclaim();
+      dropIfCancelled();
       const client = await this.ensure();
-      if (options.signal?.aborted) {
-        // Cancelled during the start: the same, and the new kernel is kept,
-        // to idle out like any other.
-        this.#scheduleIdle();
-        options.signal.throwIfAborted();
-      }
+      dropIfCancelled();
       const work = fn(client, requestOptions(options.signal));
       try {
         return await this.#awaitWithin(work, options.deadlineMs ?? DEFAULT_DEADLINE_MS);

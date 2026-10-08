@@ -429,7 +429,8 @@ export function createWolframServer(
       `call timeout is ${config.callTimeoutMs / 1000}s, below the evaluator's default ` +
         `${KERNEL_TIME_CONSTRAINT_S}s time constraint: this server will stop waiting first, so ` +
         `a slow evaluation is reported here rather than ending in the kernel's own ` +
-        `"time constraint exceeded", which says more. The kernel is left running either way`,
+        `"time constraint exceeded", which says more. The kernel is left running either way. ` +
+        `Prompts and resource reads wait this same ceiling`,
     );
   }
   log(

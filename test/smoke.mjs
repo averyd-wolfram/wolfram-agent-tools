@@ -2176,6 +2176,130 @@ heading("A cancel read with its own request still reaches it, at the broker");
 }
 
 // ---------------------------------------------------------------------------
+// A cancelled request must cost nobody a kernel. The session drops one that
+// never reached its kernel, but the pool let it in first: a request cancelled
+// before it got there, or while it queued, was still served by the pool's
+// tiers — a kernel grown, or another session's idle one retired to make room —
+// for a request then dropped. And the session started a kernel for a request
+// cancelled while it was taking back abandoned work. One seat each, so making
+// room means retiring the other project's kernel, which a second start shows.
+heading("A cancelled request makes no room for itself, in the pool or the session");
+{
+  const savedEnv = { ...process.env };
+  const evaluate = (client, request) =>
+    client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, request);
+  const project = (marker, server, timings = {}) =>
+    lib.kernelFlavour({
+      MCP_SERVER_NAME: server,
+      FAKE_MARKER: marker,
+      ...timings,
+      WOLFRAM_MCP_KERNEL_ENV: ["FAKE_MARKER", ...Object.keys(timings)].join(","),
+    });
+  const onePool = () =>
+    new lib.KernelPool({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 1, type: null },
+      learnFromKernels: false,
+    });
+  const cancelled = () => {
+    const controller = new AbortController();
+    controller.abort(new Error("cancelled by the caller"));
+    return controller.signal;
+  };
+  const outcome = (promise) => promise.then(() => "served", (err) => err.message);
+  try {
+    // Before the pool: project B's kernel idles in the only seat.
+    {
+      const marker = join(home, "starts-cancel-before-pool.log");
+      const pool = onePool();
+      const b = project(marker, "WolframAlpha");
+      await pool.run(b, evaluate);
+      const early = await outcome(pool.run(project(marker, "WolframLanguage"), evaluate, { signal: cancelled() }));
+      await pool.run(b, evaluate);
+      await pool.stop();
+      check(
+        "a request cancelled before it reaches the pool is turned away there",
+        /cancelled before it reached the kernel/.test(early),
+        early.slice(0, 90),
+      );
+      check(
+        "and the idle kernel it would have displaced is kept",
+        starts(marker) === 1,
+        `${starts(marker)} kernel start(s)`,
+      );
+    }
+    // While it queues: project A's 2 s call holds the only seat, and B waits.
+    {
+      const marker = join(home, "starts-cancel-in-queue.log");
+      const pool = onePool();
+      const a = project(marker, "WolframLanguage", { FAKE_CALL_DELAY_MS: "2000", FAKE_DELAY_FIRST_ONLY: "1" });
+      const call = pool.run(a, evaluate);
+      await new Promise((r) => setTimeout(r, 300));
+      const controller = new AbortController();
+      const queuedAt = Date.now();
+      const queued = outcome(pool.run(project(marker, "WolframAlpha"), evaluate, { signal: controller.signal }));
+      await new Promise((r) => setTimeout(r, 200));
+      controller.abort(new Error("cancelled by the caller"));
+      const left = await queued;
+      const leftMs = Date.now() - queuedAt;
+      await call;
+      await pool.run(a, evaluate);
+      await pool.stop();
+      check(
+        "a request cancelled while it queues leaves the queue at once",
+        /cancelled before it reached the kernel/.test(left) && leftMs < 1_500,
+        `${leftMs}ms behind a 2000ms call: ${left.slice(0, 70)}`,
+      );
+      check(
+        "and the kernel it would have displaced is kept",
+        starts(marker) === 1,
+        `${starts(marker)} kernel start(s)`,
+      );
+    }
+    // While the session takes back a kernel holding abandoned work. Cancelled
+    // from the session's own log line as the taking back begins, so the timing
+    // is the session's, not this check's.
+    {
+      const marker = join(home, "starts-cancel-in-reclaim.log");
+      const controller = new AbortController();
+      const session = new lib.KernelSession({
+        bin: fakeKernel,
+        serverName: "WolframLanguage",
+        idleMs: 0,
+        startTimeoutMs: 10_000,
+        clientInfo: { name: "smoke", version: "1.0.0" },
+        log: (line) => {
+          if (/abandoned call has not finished; stopping it/.test(line)) {
+            controller.abort(new Error("cancelled by the caller"));
+          }
+        },
+        extraEnv: { FAKE_CALL_DELAY_MS: "-1", FAKE_MARKER: marker },
+      });
+      try {
+        await outcome(session.run(evaluate, { deadlineMs: 300 }));
+        const dropped = await outcome(session.run(evaluate, { signal: controller.signal }));
+        check(
+          "a request cancelled while abandoned work is taken back starts no kernel for itself",
+          /cancelled before it reached the kernel/.test(dropped) && starts(marker) === 1,
+          `${starts(marker)} kernel start(s): ${dropped.slice(0, 70)}`,
+        );
+      } finally {
+        await session.stop();
+      }
+    }
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key];
+    Object.assign(process.env, savedEnv);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // A long evaluation used to show the caller nothing and then die at the call
 // timeout, however busy the kernel had been: the progress token was never
 // forwarded, and upstream progress had nowhere to go.
