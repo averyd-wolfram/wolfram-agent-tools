@@ -133,7 +133,7 @@ const PING_DEADLINE_MS = REQUEST_GRACE_MS;
 function brokerError(response: BrokerResponse): Error {
   const message = response.error ?? "the Wolfram broker reported an error";
   if (response.code === undefined) return new Error(message);
-  return new McpError(response.code, bareMcpText(response.code, message));
+  return new McpError(response.code, bareMcpText(response.code, message), response.data);
 }
 
 export interface BrokerClientOptions {

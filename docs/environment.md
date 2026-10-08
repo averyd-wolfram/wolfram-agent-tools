@@ -64,7 +64,7 @@ code, so whoever changes a constant changes its row.
 
 | Constant | Value | Where | What it decides |
 |---|---|---|---|
-| `BROKER_PROTOCOL` | `5` | `broker-protocol.ts` | Part of the socket path, so proxies and brokers that cannot understand each other never meet. |
+| `BROKER_PROTOCOL` | `6` | `broker-protocol.ts` | Part of the socket path, so proxies and brokers that cannot understand each other never meet. |
 | `MAX_SOCKET_PATH` | `100` | `broker-protocol.ts` | Longest socket path used, inside macOS's 104-byte `sockaddr_un`, which truncates rather than refusing. |
 | `MAX_UNTERMINATED_BYTES` | `4 * 1024 * 1024` | `transport.ts`, `broker-protocol.ts` | Output held from a kernel, or a frame from a socket peer, before it is dropped unread. Two separate boundaries, deliberately: one trusts a kernel, the other an unauthenticated socket. |
 | `RECENT_LINE_LIMIT` | `15` | `transport.ts` | Lines of non-protocol kernel output kept, to quote back in an error. |

@@ -500,9 +500,10 @@ guards the whole design — if dispatch ever becomes concurrent, all of this nee
 - A private kernel (`WOLFRAM_MCP_SHARE=0`) was never retired at all — the wedged-kernel fix
   lived in the pool, and the pool is the broker's.
 - The broker erased the protocol-vs-`isError` distinction `proxy.ts` maintains, so the same
-  call was an MCP error when private and an `isError` result when shared. `BROKER_PROTOCOL` is
-  now 5 and the frame carries the code.
-- A doubled `MCP error -32602: MCP error -32602:` prefix on every relayed protocol error.
+  call was an MCP error when private and an `isError` result when shared. `BROKER_PROTOCOL`
+  went to 5 for the frame to carry the code, and to 6 for it to carry the error's `data` (#62).
+- A doubled `MCP error -32602: MCP error -32602:` prefix on every relayed protocol error — on
+  `tools/call` first, and on every other request a kernel answers since #62.
 - `--help` and the "no usable Wolfram" diagnostic told users to run an unpublished
   `npx wolfram-mcp-server` (registry: 404). A smoke check had been asserting one was present.
 

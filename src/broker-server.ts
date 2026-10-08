@@ -426,7 +426,9 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
         id: request.id,
         ok: false,
         error: errorText(err),
-        ...(err instanceof McpError ? { code: err.code } : {}),
+        ...(err instanceof McpError
+          ? { code: err.code, ...(err.data === undefined ? {} : { data: err.data }) }
+          : {}),
       };
     } finally {
       if (cancel) inFlight.delete(request.id);
