@@ -11,7 +11,8 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { McpError, type Prompt } from "@modelcontextprotocol/sdk/types.js";
 import { createServer, type Server, type Socket } from "node:net";
-import { linkSync, rmSync, statSync, unlinkSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { linkSync, statSync, unlinkSync } from "node:fs";
 import { connect } from "node:net";
 import { dirname, join } from "node:path";
 import { KernelPool, type LicenceInfo } from "./pool.js";
@@ -165,15 +166,6 @@ function removeStaleSocket(address: string, expected: string | null, log: Logger
 }
 
 const BIND_ATTEMPTS = 4;
-
-/**
- * Claims made by this process, for the name each binds under before linking
- * (`claimSocket`). The pid alone named the process, not the claim, and a library
- * caller can run two brokers in one process: claiming at once in one directory,
- * the second replaced the first's socket under the shared name between its
- * bind and its link, so the first linked the second's socket to its address.
- */
-let claims = 0;
 const jitter = () => new Promise<void>((r) => setTimeout(r, 40 + Math.random() * 120));
 
 /** The address taken: the server, its socket's identity, and whether it is bound there itself. */
@@ -243,10 +235,11 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
   /** Set once this broker has found another at its address, or none. */
   let retiring = false;
   let addressWatch: NodeJS.Timeout | null = null;
-  /** dev:ino of the socket this broker actually bound, so it only removes its own. */
-  let boundIdentity: string | null = null;
-  /** See `Claim.atAddress`. */
-  let boundAtAddress = false;
+  /**
+   * What this broker took (`claimSocket`), once it has: its server, and the
+   * dev:ino of the socket it actually bound, so it only ever removes its own.
+   */
+  let claim: Claim | null = null;
 
   /**
    * The pool, once we know what the licence permits.
@@ -591,7 +584,7 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
     if (stopping) return;
     if (!retiring) {
       const now = socketIdentity(address);
-      if (now === boundIdentity) return;
+      if (now === (claim?.identity ?? null)) return;
       retiring = true;
       log(
         `${now === null ? "the socket at this address is gone" : "another broker owns this address now"}; ` +
@@ -619,8 +612,15 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
     // closing, it could have been a successor's by then — removed, and that
     // broker orphaned in turn. A linked socket's close unlinks only the staging
     // name, long gone.
-    const ours = boundIdentity === null || socketIdentity(address) === boundIdentity;
-    if (ours && boundIdentity !== null && !boundAtAddress) {
+    // stop() only ever runs on a broker that took the address, but the claim
+    // is made after this is defined, so the compiler cannot see that.
+    const taken = claim;
+    const identity = taken?.identity ?? null;
+    const ours = identity === null || socketIdentity(address) === identity;
+    // Said, because this log is how a race like #32 is read afterwards, and an
+    // address that survived its broker's exit is otherwise unexplained.
+    if (!ours) log("the address no longer holds this broker's socket; leaving it alone");
+    if (ours && identity !== null && !taken?.atAddress) {
       try {
         unlinkSync(address);
       } catch {
@@ -629,12 +629,16 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
     }
     // A socket bound at the address itself is unlinked by its close, whatever
     // is at the address by then: so one that is no longer there is left open,
-    // and goes with the process, which unlinks nothing.
-    // stop() only ever runs on a broker that won the socket, but the binding
-    // happens after this is defined, so the compiler cannot see that.
+    // and goes with the process, which unlinks nothing. Unreferenced, though:
+    // left holding the event loop, it kept a library caller that stopped its
+    // broker and carried on from ever exiting.
     await new Promise<void>((resolve) => {
-      if (server && (ours || !boundAtAddress)) server.close(() => resolve());
-      else resolve();
+      if (!taken) resolve();
+      else if (ours || !taken.atAddress) taken.server.close(() => resolve());
+      else {
+        taken.server.unref();
+        resolve();
+      }
     });
     await pool?.stop();
   }
@@ -682,6 +686,26 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
   }
 
   /**
+   * Whether the address can be taken now: false when a broker answers there,
+   * true once whatever dead socket was there has been cleared.
+   *
+   * The file is identified *before* asking whether it is alive, so the answer
+   * and the file it describes cannot drift apart. Taking it afterwards means a
+   * broker that bound while the probe was in flight looks exactly like the dead
+   * socket the probe judged — and removing it under that mistake left two
+   * brokers running, one of them on an unlinked inode.
+   */
+  async function addressIsFree(): Promise<boolean> {
+    const judged = socketIdentity(address);
+    if (await socketIsLive(address)) {
+      log("another broker is already listening; standing down");
+      return false;
+    }
+    removeStaleSocket(address, judged, log);
+    return true;
+  }
+
+  /**
    * Take the address, or stand down.
    *
    * Explicitly ordered — ask whether anyone is listening, clear only a file we
@@ -714,10 +738,15 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
     }
 
     // Short, so it fits wherever the address does: sun_path is 104 bytes on
-    // macOS. Any file of this name was left by a process that died with this
-    // pid, since a live one is this process, and `claims` keeps its own apart.
-    const staging = join(dirname(address), `.b${process.pid}-${claims++}`);
-    rmSync(staging, { force: true });
+    // macOS, and this is shorter than the terse `wm-<digest>.sock`. Random, and
+    // never cleared first. Named for the process and a count of its claims, it
+    // was cleared on the reasoning that any file of that name was left by a
+    // process that died with this pid. That holds inside one PID namespace only:
+    // two containers sharing this directory can each run a broker as the same
+    // pid, and clearing the name removed the other's socket between its bind
+    // and its link. A name already taken fails the bind, and the claim stands
+    // down rather than take it.
+    const staging = join(dirname(address), `.b${process.pid}-${randomBytes(4).toString("hex")}`);
     const server = await listenAt(staging, 1);
     if (!server) return null;
     options.onBound?.(staging);
@@ -725,17 +754,7 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
     let unlinkable = false;
     try {
       for (let attempt = 1; attempt <= BIND_ATTEMPTS; attempt++) {
-        // Identify the file *before* asking whether it is alive, so the answer
-        // and the file it describes cannot drift apart. Taking it afterwards
-        // means a broker that bound while the probe was in flight looks exactly
-        // like the dead socket the probe judged — and removing it under that
-        // mistake left two brokers running, one of them on an unlinked inode.
-        const judged = socketIdentity(address);
-        if (await socketIsLive(address)) {
-          log("another broker is already listening; standing down");
-          break;
-        }
-        removeStaleSocket(address, judged, log);
+        if (!(await addressIsFree())) break;
         try {
           linkSync(staging, address);
           return { server, identity, atAddress: false };
@@ -769,17 +788,14 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
    * address too long for a socket path, a filesystem without hard links. The
    * identity is read from the address after binding, which another broker may
    * have replaced by then, and for a truncated address there is none to read.
-   * Closing such a server unlinks the address, whatever is there.
+   * Closing such a server unlinks the address, whatever is there — except a
+   * truncated one: libuv unlinks the full path it was given, which never
+   * existed, and the truncated socket stays where no check here can see it, so
+   * no later broker can bind (#74).
    */
   async function claimDirect(): Promise<Claim | null> {
     for (let attempt = 1; attempt <= BIND_ATTEMPTS; attempt++) {
-      // As in claimSocket, and for the same reason.
-      const judged = socketIdentity(address);
-      if (await socketIsLive(address)) {
-        log("another broker is already listening; standing down");
-        return null;
-      }
-      removeStaleSocket(address, judged, log);
+      if (!(await addressIsFree())) return null;
       const server = await listenAt(address, attempt);
       if (server) {
         options.onBound?.(address);
@@ -806,15 +822,12 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
     return null;
   }
 
-  const claimed = await claimSocket();
-  if (!claimed) return null;
-  const { server } = claimed;
-  boundIdentity = claimed.identity;
-  boundAtAddress = claimed.atAddress;
+  claim = await claimSocket();
+  if (!claim) return null;
   log(`broker listening on ${address} (pid ${process.pid})`);
   scheduleExit();
   // Named pipes have no identity to compare, and nothing can replace one.
-  if (boundIdentity !== null) {
+  if (claim.identity !== null) {
     addressWatch = setInterval(checkAddress, ADDRESS_CHECK_MS);
     addressWatch.unref?.();
   }
@@ -822,5 +835,5 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
   process.on("SIGINT", () => void stop().then(() => process.exit(0)));
   process.on("SIGTERM", () => void stop().then(() => process.exit(0)));
 
-  return { server, stop };
+  return { server: claim.server, stop };
 }

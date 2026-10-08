@@ -288,7 +288,9 @@ there. That way it knows exactly which socket is its own, and its server's close
 only that name, never a successor's socket at the address. Where a socket cannot be linked
 (an address too long for a socket path, a filesystem without hard links, a named pipe), it
 binds at the address as before. Closing such a server unlinks the address, so one that is
-no longer at its address leaves without closing it.
+no longer at its address leaves without closing it. A truncated address is the exception:
+the close unlinks the full path, which never existed, and leaves the truncated socket where
+nothing can clear it, so no later broker binds there (#74).
 
 Removing a dead socket is still a check followed by an unlink, and nothing makes that
 pair atomic. A broker descheduled between the two can unlink a winner's fresh socket and

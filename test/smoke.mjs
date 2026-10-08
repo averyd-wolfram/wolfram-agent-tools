@@ -2050,6 +2050,8 @@ heading("A broker no longer at its address hands its sessions over and leaves");
   const lone = await connect(shared);
   await call(lone, "4+4");
   const [lonely] = ownBrokers(runtime);
+  const brokerLog = shared.WOLFRAM_MCP_LOG;
+  const logFrom = existsSync(brokerLog) ? readFileSync(brokerLog, "utf8").length : 0;
   rmSync(socketPath());
   await lone.client.close();
   const next = await connect(shared);
@@ -2067,6 +2069,15 @@ heading("A broker no longer at its address hands its sessions over and leaves");
     "an orphaned broker that stops leaves the live broker's socket alone",
     liveInode !== null && inode(socketPath()) === liveInode,
     `live inode ${liveInode}, now ${inode(socketPath())}`,
+  );
+  // And says so. Its log is how a race like #32 is read afterwards, and the
+  // line saying why the address survived went missing with the unlink it
+  // explained.
+  const leaving = existsSync(brokerLog) ? readFileSync(brokerLog, "utf8").slice(logFrom) : "";
+  check(
+    "and says in its log that it left the address alone",
+    /no longer holds this broker's socket; leaving it alone/.test(leaving),
+    leaving.split("\n").filter((l) => /address|socket|leaving/.test(l)).join(" | ").slice(0, 240),
   );
   await next.client.close();
   signalOwnBrokers("SIGKILL", runtime);
@@ -2260,14 +2271,130 @@ heading("A socket put at the address the moment a broker binds is never taken fo
     decoyConnections > decoyBefore ? "the other broker" : logs.some((m) => /proxy connected/.test(m)) ? "itself" : "nothing",
   );
   probe.destroy();
+  // Standing down counts only for the reason this check is about: it asked
+  // the address, and the other broker answered. A claim that gave up for any
+  // other reason also returns null, and passed here as though it had seen it.
+  const sawOther = decoyBefore > 0 && logs.some((m) => /another broker is already listening; standing down/.test(m));
   check(
-    "a broker either stands down or is the one at its address",
-    boundAt !== null && (broker === null || reached === "itself"),
+    "a broker either stands down because the other answers, or is the one at its address",
+    boundAt !== null && (broker === null ? sawOther : reached === "itself"),
     `bound at ${boundAt === null ? "nothing (the hook never ran)" : boundAt.slice(dir.length + 1)}; ` +
-      `${broker ? "running" : "stood down"}; its address reached ${reached}`,
+      `${broker ? "running" : `stood down, ${sawOther ? "having reached the other" : "without reaching the other"}`}; ` +
+      `its address reached ${reached}`,
   );
   await broker?.stop();
   await new Promise((resolve) => (decoy ? decoy.close(() => resolve()) : resolve()));
+}
+
+// ---------------------------------------------------------------------------
+// The name a broker binds under before linking was its pid and a count, cleared
+// first on the reasoning that any file of that name was left by a process that
+// died with this pid. That holds inside one PID namespace only: two containers
+// sharing a runtime or cache directory can each run a broker as the same pid,
+// and the one that cleared the name removed the other's socket between that
+// one's bind and its link. This process plays the other: a live socket under
+// every name a broker here could have picked.
+heading("A broker's staging name never takes another process's socket");
+{
+  const dir = privateDir(join(home, "run-same-pid"));
+  const address = join(dir, "broker.sock");
+  const ino = (path) => {
+    try {
+      return statSync(path).ino;
+    } catch {
+      return null;
+    }
+  };
+  const others = [];
+  for (let k = 0; k < 64; k++) {
+    const path = join(dir, `.b${process.pid}-${k}`);
+    const server = createServer((c) => c.end());
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(path, resolve);
+    });
+    others.push({ path, server, ino: ino(path) });
+  }
+  const logs = [];
+  const broker = await lib.startBroker({
+    address,
+    bin: fakeKernel,
+    serverName: "WolframLanguage",
+    idleMs: 60_000,
+    startTimeoutMs: 10_000,
+    reserveSeats: 0,
+    allowInspect: false,
+    clientInfo: { name: "smoke", version: "1.0.0" },
+    log: (message) => logs.push(message),
+  });
+  const taken = others.filter((o) => ino(o.path) !== o.ino).map((o) => o.path.slice(dir.length + 1));
+  check(
+    "it takes its address, and every other process's socket is where it was",
+    broker !== null && taken.length === 0,
+    `${broker ? "listening" : "stood down"}; ${taken.length} of ${others.length} taken${taken.length ? `: ${taken.join(", ")}` : ""}`,
+  );
+  await broker?.stop();
+  for (const o of others) await new Promise((resolve) => o.server.close(() => resolve()));
+}
+
+// ---------------------------------------------------------------------------
+// A socket bound at the address itself, where none can be linked to it, is
+// unlinked by its own close whatever is at the address by then, so a broker
+// that has lost its address stops without closing it. That server still held
+// the event loop, and a library caller that stopped its broker and carried on
+// never exited. macOS binds an address too long for a socket path in full,
+// which is that case; a Linux that truncates it has no identity there to lose,
+// and closes. A child process, because what is measured is its exit.
+heading("A broker that stops after losing its address leaves its process free to exit");
+{
+  const dir = privateDir(join(home, "q".repeat(Math.max(1, 110 - home.length))));
+  const address = join(dir, `wm-${"1".repeat(12)}.sock`);
+  const script = `
+    const lib = await import(${JSON.stringify(pathToFileURL(join(root, "dist", "lib.js")).href)});
+    const { createServer } = await import("node:net");
+    const { rmSync, statSync } = await import("node:fs");
+    const [address, bin] = process.argv.slice(1);
+    const broker = await lib.startBroker({
+      address, bin, serverName: "WolframLanguage", idleMs: 60000, startTimeoutMs: 10000,
+      reserveSeats: 0, allowInspect: false, clientInfo: { name: "smoke", version: "1.0.0" },
+      log: (m) => process.stderr.write(m + "\\n"),
+    });
+    let said = "no broker";
+    if (broker) {
+      let held = false;
+      try { statSync(address); held = true; } catch {}
+      said = held ? "its socket at the full address" : "no file at the full address";
+      // The other broker, between two of the address watch's looks.
+      rmSync(address, { force: true });
+      const other = createServer((c) => c.end());
+      other.on("error", () => {});
+      other.listen(address);
+      await broker.stop();
+      other.close();
+    }
+    process.stdout.write(said);
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script, address, fakeKernel], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let said = "";
+  let logged = "";
+  child.stdout.on("data", (d) => (said += d));
+  child.stderr.on("data", (d) => (logged += d));
+  const exited = await new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), 10_000);
+    child.on("exit", () => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
+  if (!exited) child.kill("SIGKILL");
+  check(
+    "it exits by itself once its broker has stopped",
+    exited,
+    `${said || "(nothing said)"}; ` +
+      logged.split("\n").filter((l) => /listening|bind|address|socket|Error/.test(l)).join(" | ").slice(0, 200),
+  );
 }
 
 // ---------------------------------------------------------------------------
