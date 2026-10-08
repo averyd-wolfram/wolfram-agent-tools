@@ -52,8 +52,22 @@ let sections = 0;
 // holds fewer call sites than the run holds checks. Printing the total is what
 // retires `grep -c PASS`, which is how every check count the docs ever quoted
 // was obtained — and how each of them went stale unnoticed.
+// Anything in this process that ends it early — an in-process broker's own
+// exit, say — ends the run with the code it chose, and that was 0: every check
+// after that point unrun, and the suite green. Measured: a broker stopped by a
+// section still held its 60s empty-grace timer, which then exited the suite
+// with 0 two sections later.
+let finished = false;
+let lastHeading = "(before the first section)";
+process.on("exit", (code) => {
+  if (finished) return;
+  console.error(`\nThe suite ended early, with code ${code}, in "${lastHeading}".`);
+  process.exitCode = 1;
+});
+
 const heading = (title) => {
   sections++;
+  lastHeading = title;
   console.log(`\n${title}`);
 };
 const check = (label, ok, detail = "") => {
@@ -2097,6 +2111,60 @@ heading("Sessions share a broker even at an address too long for a socket path")
   for (const s of sessions) await s.client.close();
   signalOwnBrokers("SIGKILL", runtime);
   await new Promise((r) => setTimeout(r, 300));
+}
+
+// ---------------------------------------------------------------------------
+// The name a broker binds under before linking it to its address was the
+// process's, and a library caller can run two brokers in one process: claiming
+// at once in one directory, the second replaced the first's socket under that
+// name between its bind and its link, so the first linked the second's socket
+// to its own address.
+heading("Two brokers claiming at once in one process each take their own address");
+{
+  const dir = privateDir(join(home, "run-two-in-one"));
+  const logs = [[], []];
+  const start = (i) =>
+    lib.startBroker({
+      address: join(dir, `b${i}.sock`),
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 10_000,
+      reserveSeats: 0,
+      allowInspect: false,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: (message) => logs[i].push(message),
+    });
+  const maskBefore = process.umask();
+  const brokers = await Promise.all([start(0), start(1)]);
+  const maskAfter = process.umask();
+  const reached = [];
+  for (let i = 0; i < 2; i++) {
+    const seen = logs.map((l) => l.length);
+    const answeredBy = () =>
+      logs.findIndex((l, j) => l.slice(seen[j]).some((m) => /proxy connected/.test(m)));
+    const probe = connectSocket(join(dir, `b${i}.sock`));
+    probe.on("error", () => {});
+    await until(() => answeredBy() !== -1, 3_000);
+    reached.push(answeredBy());
+    probe.destroy();
+  }
+  check(
+    "each address reaches the broker that claimed it",
+    brokers.every(Boolean) && reached[0] === 0 && reached[1] === 1,
+    `b0.sock reached broker ${reached[0]}, b1.sock reached broker ${reached[1]}`,
+  );
+  // The umask is the process's, and each bind holds it to create its socket
+  // 0600. Held until the bind's callback, two at once put back each other's:
+  // the second restored the first's 0177 for good, and every directory this
+  // process and its children made after that came out untraversable — the
+  // suite's capability cache stopped being written from here on.
+  check(
+    "and the process's umask is as it was",
+    maskAfter === maskBefore,
+    `${maskBefore.toString(8)} before, ${maskAfter.toString(8)} after`,
+  );
+  for (const broker of brokers) await broker?.stop();
 }
 
 // ---------------------------------------------------------------------------
@@ -7365,4 +7433,5 @@ console.log(
     ? `\n${checks} checks across ${sections} sections, all passed.\n`
     : `\n${failures} of ${checks} checks failed.\n`,
 );
+finished = true;
 process.exit(failures === 0 ? 0 : 1);

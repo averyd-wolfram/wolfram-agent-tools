@@ -285,7 +285,10 @@ the liveness check *is* a connection attempt; only a socket that refuses connect
 unlinked, and only if it is still the file that was judged. A broker binds under a name of
 its own beside the address and then links it into place, which fails if anything is
 there. That way it knows exactly which socket is its own, and its server's close unlinks
-only that name, never a successor's socket at the address.
+only that name, never a successor's socket at the address. Where a socket cannot be linked
+(an address too long for a socket path, a filesystem without hard links, a named pipe), it
+binds at the address as before. Closing such a server unlinks the address, so one that is
+no longer at its address leaves without closing it.
 
 Removing a dead socket is still a check followed by an unlink, and nothing makes that
 pair atomic. A broker descheduled between the two can unlink a winner's fresh socket and

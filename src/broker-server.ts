@@ -158,6 +158,15 @@ function removeStaleSocket(address: string, expected: string | null, log: Logger
 }
 
 const BIND_ATTEMPTS = 4;
+
+/**
+ * Claims made by this process, for the name each binds under before linking
+ * (`claimSocket`). The pid alone named the process, not the claim, and a library
+ * caller can run two brokers in one process: claiming at once in one directory,
+ * the second replaced the first's socket under the shared name between its
+ * bind and its link, so the first linked the second's socket to its address.
+ */
+let claims = 0;
 const jitter = () => new Promise<void>((r) => setTimeout(r, 40 + Math.random() * 120));
 
 /** The address taken: the server, its socket's identity, and whether it is bound there itself. */
@@ -558,7 +567,7 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
   function scheduleExit(): void {
     if (emptyTimer || stopping) return;
     emptyTimer = setTimeout(() => {
-      if (connections.size > 0) return;
+      if (connections.size > 0 || stopping) return;
       log("no proxies attached, shutting down");
       void stop().then(() => process.exit(0));
     }, EMPTY_GRACE_MS);
@@ -591,6 +600,9 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
     if (stopping) return;
     stopping = true;
     if (addressWatch) clearInterval(addressWatch);
+    // Held otherwise: a broker stopped by a library caller that carries on
+    // still ended that caller's process when the timer fired, 60s later.
+    if (emptyTimer) clearTimeout(emptyTimer);
     const pool = await preparing.catch(() => null);
     broadcast({ event: "shuttingDown" });
     for (const socket of connections.keys()) socket.destroy();
@@ -635,7 +647,19 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
     // address bound successfully while the directory we asked for stayed
     // empty. A umask needs no path, and it also closes the window in which the
     // socket exists at the umask's default 755, connectable by anyone.
+    //
+    // Process-global, so it is held for exactly the bind, which listen() makes
+    // before it returns: the socket's file exists, 0600, by then (measured on
+    // macOS and Linux). Held until the bind's callback instead, two brokers
+    // binding at once in one process put back each other's, and the second
+    // restored the first's 0177 for good — every directory the process made
+    // after that came out untraversable.
     const previousMask = process.umask(0o777 & ~SOCKET_MODE);
+    try {
+      candidate.listen(path);
+    } finally {
+      process.umask(previousMask);
+    }
     const bound = await new Promise<boolean>((resolve) => {
       candidate.once("error", (err: NodeJS.ErrnoException) => {
         // Always say why. A bind that fails for a reason nobody logged is
@@ -643,11 +667,7 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
         log(`bind attempt ${attempt} failed: ${err.code ?? "?"} ${err.message}`);
         resolve(false);
       });
-      candidate.listen(path, () => resolve(true));
-    }).finally(() => {
-      // Process-global, so it is held for exactly as long as the bind and put
-      // back whichever way that went.
-      process.umask(previousMask);
+      candidate.once("listening", () => resolve(true));
     });
     if (bound) return candidate;
     candidate.close();
@@ -687,9 +707,9 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
     }
 
     // Short, so it fits wherever the address does: sun_path is 104 bytes on
-    // macOS. Any file of this name was left by a broker that died with this
-    // pid, since a live one is this process.
-    const staging = join(dirname(address), `.b${process.pid}`);
+    // macOS. Any file of this name was left by a process that died with this
+    // pid, since a live one is this process, and `claims` keeps its own apart.
+    const staging = join(dirname(address), `.b${process.pid}-${claims++}`);
     rmSync(staging, { force: true });
     const server = await listenAt(staging, 1);
     if (!server) return null;
