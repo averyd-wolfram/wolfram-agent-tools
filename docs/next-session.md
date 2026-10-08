@@ -33,14 +33,25 @@ in `docs/design.md`.
   stays the one human step of a release. Four hardening items came out of it: #46 (pin actions
   to commits), #47 (build-provenance attestations), #48 (immutable releases, needs design) and
   #49 (ordinary CI on the release PR, unverified, needs design).
-- **Dependabot is PR #50**: weekly npm and Actions updates, and security updates once the
-  repository settings are on, titled so `commit-types` and release-please read them right
-  (`fix(deps):` for a production dependency, which ships inside the bundle). It closes #29.
-- **#7 and #43 are PR #51** (D34): a `release` branch carrying the newest release as the
-  `wolfram-agent-tools` marketplace, which a project follows at `"ref": "release"` with
-  `"autoUpdate": true` or pins at `"ref": "wolfram--v<version>"`. The release run's last job,
-  `advance` (`scripts/release-branch.mjs`), is the one writer of the branch, its tags and GitHub's
-  Latest; builds publish with Latest off.
+- **Dependabot is on** (#50, merged 2026-10-06; closes #29): weekly npm and Actions updates,
+  titled so `commit-types` and release-please read them right (`fix(deps):` for a production
+  dependency, which ships inside the bundle), and Dependabot alerts and security updates turned
+  on in the repository settings. Its first alert was real: the SDK's OAuth client advisory
+  (GHSA-6qxp-vccf-f47h, high, 1.12–1.30), fixed by its PR #53 (SDK 1.31.0), merged. The bundle
+  uses no OAuth, but the fix ships in 0.1.3.
+- **Other projects can follow releases** (#51, merged 2026-10-06; closes #7 and #43; D34). The
+  `release` branch carries the newest release as the `wolfram-agent-tools` marketplace: a
+  project follows it at `"ref": "release"` with `"autoUpdate": true`, or pins
+  `"ref": "wolfram--v<version>"`. The release run's last job, `advance`
+  (`scripts/release-branch.mjs`), is the one writer of the branch, its tags and GitHub's Latest;
+  builds publish with Latest off. Its first run made `release` from v0.1.2 and tagged
+  `wolfram--v0.1.2`; both routes were accepted in a fresh config (ledger, 2026-10-06).
+- **0.1.3 is released** (2026-10-06, #57), the first release through the whole new pipeline,
+  with the `release` branch and `wolfram--v*` tag rulesets on (forward only, never moved or
+  deleted; checked with a throwaway tag). `pending` finished the draft, the build published it
+  with Latest off, and `advance` verified the zip, moved `release` to it, tagged
+  `wolfram--v0.1.3` and made it Latest. `releases/latest/download/…` serves 0.1.3, verified. A
+  project following `release` loaded 0.1.3 after one marketplace refresh, with no edit (ledger).
 - **What 0.1.2 holds:** #9 (a kernel's handshake bounded by the start timeout, not the MCP SDK's
   default), #5 (a server that will not start fails at once, with a short back-off — on the
   shared path only for requests after the first failure; a simultaneous burst is #19), #11 (a
@@ -69,20 +80,29 @@ in `docs/design.md`.
 
 ## What to do next, in order
 
-1. **Land #50 and #51.** #50's reviews kept tuning the Dependabot config round after round;
-   simplify toward Dependabot's standard setup rather than chase each round, then merge on a
-   reviewed head (the maintainer's approach for #42). After #50 merges, turn on the two
-   settings `docs/releasing.md` lists: `gh api -X PUT repos/<owner>/<repo>/vulnerability-alerts`
-   and `gh api -X PUT repos/<owner>/<repo>/automated-security-fixes`.
-2. **Prime and accept the release branch** after #51 merges. Its own release run's `advance` job
-   should create `release` from v0.1.2 and tag `wolfram--v0.1.2` (check the run, then
-   `git ls-remote origin release 'refs/tags/wolfram--*'`). Then, in a scratch project with a
-   throwaway `CLAUDE_CONFIG_DIR`, commit the README's snippet, trust the folder, and check that
-   `claude plugin list` shows `wolfram@wolfram-agent-tools` at project scope with no install
-   step, and that `"ref": "wolfram--v0.1.2"` pins. Record it as a ledger row (plan §6). The
-   update half of #7's acceptance, a later release arriving with no edit, waits for the next
-   release. Offer the maintainer the rulesets `docs/releasing.md` recommends for `release` and
-   `wolfram--v*`.
+1. **The one link of #7 left unobserved**: Claude Code running the auto-update pass itself, in
+   an interactive session up to ten minutes after the first message, and saying `Plugin updated:
+   wolfram`. Check it at the next release, in a project following `release`; and try the route at
+   the 2.1.75 client floor, unmeasured for it. `docs/releasing.md` has the headless check.
+2. **Dependabot's open PRs**, which the maintainer wants assessed, not merged by default.
+   **#52 is PR #61** (2026-10-08): `@types/node` held to `~22.13.0` and Dependabot told to ignore
+   its minors and majors, with a check that the installed typings are the floor's line. Three
+   review rounds; three threads are left open for the maintainer, each answered without a
+   change (TypeScript 7, tracked on #56; a version check rather than a compile probe; the
+   suite's other `package.json` reads). Once it merges, close #55 (`@types/node` 26) with
+   `@dependabot close`; the ignore keeps it from returning.
+   **#54** (eslint 10.11, prettier 3.9.9, typescript-eslint 8.71; green) was assessed on
+   2026-10-08 and is ready for the maintainer: dev-only, eslint 10.11's engines still accept
+   `^22.13.0`, and its new transitive packages (`file-entry-cache` 11 and the `cacheable` and
+   `keyv` 5 family under it) are dev-only too. eslint's range skips `file-entry-cache` 11.1.6,
+   which was pulled from the registry; the lock takes 11.1.5. **#56** (TypeScript 7) still
+   waits: typescript-eslint 8.71.1 accepts TypeScript `<6.1.0` (checked 2026-10-08). It will
+   also need `"types": ["node"]` in `tsconfig.json`, since TypeScript 7 no longer includes
+   `@types/*` by default; with it, 7.0.2 compiles `src/` on either typings (measured, noted on
+   #56). `tsconfig.json` ships, so that change is a `fix:`. Filed last
+   session: #58 (tag every version the branch skips, and check a tag's commit), and #46 to #49
+   (pin actions to commits, provenance, immutable releases, CI on the release PR). The rulesets
+   for `release` and `wolfram--v*` are on (ids 24615785 and 24615786).
 3. **Design the kernel-start cluster before code** (`needs design`, `area: startup` and
    `area: broker`): #22 (back off by what failed — a start refused for lack of time is not a
    broken installation), #20 (any failed start in the pool, and a private restart after idling),
@@ -110,13 +130,25 @@ in `docs/design.md`.
    Claude Code marketplace entry and trusting our hook; Cursor importing an installed Claude Code
    plugin, and whether its `sessionStart` injects context; Copilot honouring `userConfig`; the
    Agent Plugins precedence in VS Code; Codex's filtered environment against our broker.
+   #60 (filed 2026-10-08, `needs design`) is the measured form of that last one: a Linux agent
+   sandbox where AgentTools failed to make its log directory under the default
+   `$UserBaseDirectory` (no errno was captured, so the cause is not established), and
+   listening on a Unix socket was refused (`EPERM`), so the broker could not run and the suite
+   aborted on an uncaught stub-broker error. Its work list — a supported
+   userbase route, diagnostics that name the failing directory, a socket-free test partition —
+   overlaps #4, #12 and #22.
 6. **The restructure** (MA). M1's `archive` install, update and bad-digest rows need only public
    releases (`v0.1.0` then `v0.1.1` is an update), as does a Claude run of the plugin installed
    from the archive.
 7. **MD, downstream packages** (plan §5 MD, D33), after the restructure: another project's
    plugin built on the release bundle. Item 3's defect for today's users — a server not found
-   held off by the long back-off — is fixed for 0.1.2 (#5), not yet released; its
-   `test:custom` counterpart remains.
+   held off by the long back-off — is fixed in 0.1.2 (#5); its `test:custom` counterpart
+   remains. #59 (filed 2026-10-08 from the downstream WolframVerifier, `needs design`) measured
+   MD-2's split: two releases' bundles on one machine run two brokers, each sizing a pool from
+   the whole licence, and with `autoUpdate` that happens after every release, both between the
+   `wolfram` plugin and a downstream copy and across one plugin's update. It asks for MD-2's
+   second candidate, a broker address keyed on `BROKER_PROTOCOL` rather than the version and
+   the bundle's bytes, which needs its own argument that sharing never changes an answer.
 8. **The rest of M1**: the chat checklist and M1b's client version, `SessionStart` and file
    workflow (run by a maintainer); entitlement leases outliving clean kernel exits by about an hour
    (measured, cause not found, matters only to entitlement users); a resumed Claude Desktop
@@ -154,14 +186,18 @@ in `docs/design.md`.
 ## Working here
 
 - **Branches and PRs.** `main` is protected: work on a branch, open a PR into `main` with a
-  Conventional Commit title, and squash-merge it once `ci-ok`, `conventional-title` and
-  `commit-types` pass — the title becomes the commit release-please reads. GitHub deletes a
-  merged PR's branch; delete the local copy with `git branch -d`.
+  Conventional Commit title, and squash-merge it — the title becomes the commit release-please
+  reads — once `ci-ok`, `conventional-title` and `commit-types` pass, Codex has reviewed it
+  (below), and the maintainer has given final approval; a merge waits for that approval every
+  time. GitHub deletes a merged PR's branch; delete the local copy with `git branch -d`.
 - **Review.** Run `/code-review high <pr> --comment` on each PR, and again on every new head
   before merging — except a push that only rewrites commit messages, whose tree the finished
   review already covered. Answer every finding with its fixing commit and the check that failed
   first, then resolve the thread (GraphQL `resolveReviewThread`). A finding the PR does not fix
-  is answered with the issue that tracks it; file one if none does.
+  is answered with the issue that tracks it; file one if none does. Once checks pass and the
+  PR is otherwise ready, comment `@codex review` (a focus may follow, as in `@codex review for
+  security regressions`); Codex posts only P0 and P1 findings, which are answered and resolved
+  the same way. Then ask the maintainer to approve the merge.
 - **When reviews stop converging, split.** Each review round finds new edges, and a design
   added inside a fix — the pool's burst handling in #18, a refused start's back-off in #21 —
   can keep producing them for round after round. When the fix itself is settled and the rounds

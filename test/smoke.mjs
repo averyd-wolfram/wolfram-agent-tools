@@ -23,6 +23,14 @@ const root = resolve(here, "..");
 const entry = join(root, "dist", "index.js");
 const fakeKernel = join(here, "fake-kernel.mjs");
 
+// The Node floor, as engines states it. The launchers' guards and the
+// compiler's typings are both held to it, so both read it here, and a range
+// that leaves out the patch or minor (`>=22.13`, `>=22`) still names one.
+const [, floorMajor, floorMinor = "0"] = /(\d+)(?:\.(\d+))?/.exec(
+  JSON.parse(readFileSync(join(root, "package.json"), "utf8")).engines.node,
+);
+const nodeFloor = `${floorMajor}.${floorMinor}`;
+
 // Deliberately NOT realpath'd: on macOS tmpdir() sits behind /var -> /private/var,
 // and the longer real spelling pushes this suite's socket paths past sun_path,
 // where bind truncates. Discovery resolves symlinks, so checks comparing a path
@@ -5379,8 +5387,10 @@ heading("The bundle is the deliverable, and the suite drives the bundle");
   // this package ever had, so faking it passed a guard left at 18.17 after
   // engines moved to 22.13. process.versions.node is read-only by assignment
   // but redefinable, so a child fakes the version and then imports the entry.
-  const floor = /(\d+)\.(\d+)\.\d+/.exec(pkg.engines.node);
-  const belowFloor = `${floor[1]}.${Number(floor[2]) - 1}.0`;
+  // Just under a major's .0 is the major before it: 24.-1.0 has the floor's
+  // own major, so a guard written as `major < 24` would let it through.
+  const belowFloor =
+    floorMinor === "0" ? `${Number(floorMajor) - 1}.99.0` : `${floorMajor}.${Number(floorMinor) - 1}.0`;
   const underFloor = (file, argv, env = {}) =>
     spawnSync(
       process.execPath,
@@ -5393,7 +5403,7 @@ heading("The bundle is the deliverable, and the suite drives the bundle");
       ],
       { encoding: "utf8", timeout: 15_000, input: "", env: { ...process.env, ...env } },
     );
-  const instruction = new RegExp(`needs Node ${floor[1]}\\.${floor[2]} or newer`);
+  const instruction = new RegExp(`needs Node ${floorMajor}\\.${floorMinor} or newer`);
   // The bundle and the MCP launcher would otherwise answer --version and exit
   // 0; the LSP launcher would serve its no-seat stub. So a missing or stale
   // guard fails here rather than passing on a clean exit.
@@ -5818,6 +5828,24 @@ heading("Packaging matches the not-published decision");
 {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   check("package.json is marked private", pkg.private === true, `private=${pkg.private}`);
+}
+
+// ---------------------------------------------------------------------------
+// Node's typings are all the compiler knows of Node, so they decide which APIs
+// it accepts. Declared ^22.10.0, they resolved to 22.20, and a call to an API
+// added after 22.13 compiled, passed CI on newer Node, and failed at runtime on
+// the floor the package promises, wherever the 22.13.0 leg's hermetic run did
+// not happen to go (#52). So the installed typings must be the floor's own
+// line. The floor is engines' to state, as for the launchers' guards, and the
+// typings are read as installed, since that is what tsc compiles against.
+heading("The compiler knows the Node the package promises, not a newer one");
+{
+  const typings = createRequire(join(root, "package.json"))("@types/node/package.json").version;
+  check(
+    `Node's typings are the floor's line, ${nodeFloor}`,
+    typings.startsWith(`${nodeFloor}.`),
+    `@types/node ${typings}`,
+  );
 }
 
 // ---------------------------------------------------------------------------
