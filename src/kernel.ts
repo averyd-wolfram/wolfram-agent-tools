@@ -16,6 +16,7 @@ import {
   PromptListChangedNotificationSchema,
   ToolListChangedNotificationSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { MAX_TIMER_MS, timerDelay } from "./config.js";
 import { FilteringStdioTransport } from "./transport.js";
 import { applyFlavour, type KernelFlavour } from "./flavour.js";
 import { FACTS_EXPRESSION, isFactsLine, parseFacts, type KernelFacts } from "./inspect.js";
@@ -99,7 +100,7 @@ export class HandshakeTimeout extends Error {
  * and dropping the kernel's answer (#34) — and, once only tool calls were given
  * this, every prompt longer than a minute (#39).
  */
-const SDK_REQUEST_TIMEOUT_MS = 2 ** 31 - 1;
+const SDK_REQUEST_TIMEOUT_MS = MAX_TIMER_MS;
 
 /**
  * How long a caller waits for a request that names no deadline of its own: the
@@ -417,7 +418,10 @@ export class KernelSession {
 
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new HandshakeTimeout(startTimeoutMs)), startTimeoutMs);
+      timer = setTimeout(
+        () => reject(new HandshakeTimeout(startTimeoutMs)),
+        timerDelay(startTimeoutMs),
+      );
       timer.unref?.();
     });
     void timeout.catch(() => {});
@@ -429,7 +433,7 @@ export class KernelSession {
       // minute with a bare "Request timed out", whatever the setting said. A
       // beat past our own timer, so that timer, which names the cause, fires.
       await Promise.race([
-        client.connect(transport, { timeout: startTimeoutMs + HANDSHAKE_SDK_GRACE_MS }),
+        client.connect(transport, { timeout: timerDelay(startTimeoutMs + HANDSHAKE_SDK_GRACE_MS) }),
         fatal,
         timeout,
       ]);
@@ -556,7 +560,7 @@ export class KernelSession {
     if (deadlineMs === undefined || deadlineMs <= 0) return work;
     let timer: NodeJS.Timeout | undefined;
     const expiry = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new DeadlineExceeded(deadlineMs)), deadlineMs);
+      timer = setTimeout(() => reject(new DeadlineExceeded(deadlineMs)), timerDelay(deadlineMs));
       timer.unref?.();
     });
     void expiry.catch(() => {});
@@ -710,7 +714,7 @@ export class KernelSession {
     this.#idleTimer = setTimeout(() => {
       log(`idle for ${budgetText(idleMs)}, shutting the kernel down`);
       void this.stop();
-    }, idleMs);
+    }, timerDelay(idleMs));
     this.#idleTimer.unref?.();
   }
 

@@ -67,6 +67,22 @@ export const DEFAULT_START_TIMEOUT_MS = 120_000;
  */
 export const MAX_TIME_MS = 24 * 86_400_000;
 
+/** The longest delay a Node timer holds: 2^31-1 ms, about 24.8 days. */
+export const MAX_TIMER_MS = 2 ** 31 - 1;
+
+/**
+ * A delay a timer can hold, for every timer fed by something other than this
+ * package's own configuration: an option a library caller builds, a `timeoutMs`
+ * read off the broker's socket. #28 held what comes from the environment and a
+ * tool call; a longer time reaching a timer another way fired after 1 ms, so a
+ * start failed at once, a shared call gave up on its broker at once, and a
+ * kernel was stopped as idle after each call (#33). Held rather than refused,
+ * as #28's settings are: a delay that long means "as long as it can be".
+ */
+export function timerDelay(ms: number): number {
+  return Math.min(ms, MAX_TIMER_MS);
+}
+
 /** The units the time settings are given in, for reading and for saying. */
 const SECONDS = { ms: 1000, name: "seconds" };
 const MINUTES = { ms: 60_000, name: "minutes" };

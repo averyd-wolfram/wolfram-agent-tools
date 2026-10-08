@@ -201,7 +201,10 @@ when one is. A call's own `timeConstraint` raises this server's wait only as far
 days; the kernel still receives the constraint as requested. Node fires a timer longer than about 24.8 days after 1 ms instead, so
 a value set huge to mean "never" used to do the opposite — every start or call failed at once,
 or the kernel was shut down after each call (#15). The margin covers the seconds of grace added
-on the way to a timer. To keep a kernel resident, use `0`, not a large idle time.
+on the way to a timer. To keep a kernel resident, use `0`, not a large idle time. A time that
+reaches a timer some other way — an option a library caller builds, or a call's `timeoutMs`
+read off the broker's socket — is held at the timer itself, to the 24.8 days one can hold, so it
+too means "as long as it can be" rather than firing at once (#33).
 
 The 10-minute default is not arbitrary. With Poisson arrivals at rate λ and a kernel that
 dies `T` after the last request, `P(cold start) = e^(−λT)` and `P(resident) = 1 − e^(−λT)`,

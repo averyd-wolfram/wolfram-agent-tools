@@ -40,7 +40,7 @@ import {
   type BrokerResponse,
   socketFault,
 } from "./broker-protocol.js";
-import { DEFAULT_START_TIMEOUT_MS } from "./config.js";
+import { DEFAULT_START_TIMEOUT_MS, timerDelay } from "./config.js";
 import type { KernelFlavour } from "./flavour.js";
 import { DEFAULT_DEADLINE_MS } from "./kernel.js";
 import { bareMcpText, errorText, type Logger } from "./log.js";
@@ -566,7 +566,7 @@ export class BrokerBackend implements KernelBackend {
               // session: give up on it so the next call can choose again.
               this.#closed = true;
               reject(new Error(`the Wolfram broker did not answer ${op} within ${ceiling}ms`));
-            }, ceiling);
+            }, timerDelay(ceiling));
       timer?.unref?.();
       const settle = {
         resolve: (v: unknown) => {

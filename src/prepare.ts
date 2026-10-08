@@ -17,6 +17,7 @@
  * installation itself changes.
  */
 import { statSync } from "node:fs";
+import { timerDelay } from "./config.js";
 import { budgetText, errorText } from "./log.js";
 
 /** How long a failed preparation is not retried, unless the binary changes. */
@@ -151,10 +152,13 @@ export class Deadline {
     let timer: NodeJS.Timeout | undefined;
     let onAbort: (() => void) | undefined;
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => {
-        expired = true;
-        reject(new PreparationTimeout(stage, this.totalMs));
-      }, this.remaining() + graceMs);
+      timer = setTimeout(
+        () => {
+          expired = true;
+          reject(new PreparationTimeout(stage, this.totalMs));
+        },
+        timerDelay(this.remaining() + graceMs),
+      );
       timer.unref?.();
       // A stop counts as "after the deadline" for onLate: whatever the work
       // produces once nobody is waiting is the owner's to release.
