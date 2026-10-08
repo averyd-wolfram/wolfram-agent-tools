@@ -4481,6 +4481,30 @@ heading("A numeric setting that is not a plain number is ignored, and the log sa
     units.said.some((line) => /^ignoring WOLFRAM_CALL_TIMEOUT_SECONDS="30m": .*using 300 seconds/.test(line)),
     units.said.find((line) => line.includes("CALL_TIMEOUT")) ?? "(no line)",
   );
+  // A number that is refused says what was wrong with it, not what it already is.
+  const numbers = loadWith({
+    WOLFRAM_MCP_RESERVE_SEATS: "inf",
+    WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "-5",
+    WOLFRAM_MCP_MAX_KERNELS: "2.5",
+  });
+  const line = (name) => numbers.said.find((l) => l.startsWith(`ignoring ${name}=`)) ?? "(no line)";
+  check(
+    "a number out of range is refused for what it is: not finite, below 0, not whole",
+    /expected a finite number/.test(line("WOLFRAM_MCP_RESERVE_SEATS")) &&
+      /expected a number of seconds, 0 or more/.test(line("WOLFRAM_MCP_CALL_TIMEOUT_SECONDS")) &&
+      /expected a positive integer; using the budget the licence gives/.test(line("WOLFRAM_MCP_MAX_KERNELS")) &&
+      numbers.config.reserveSeats === defaults.reserveSeats &&
+      numbers.config.callTimeoutMs === defaults.callTimeoutMs &&
+      numbers.config.maxKernels === undefined,
+    numbers.said.join(" | ").slice(0, 240),
+  );
+  check(
+    "and the licence limit says what is used instead, as the rest do",
+    units.said.some((l) =>
+      /^ignoring WOLFRAM_MCP_LICENSE_LIMIT="4x": expected a positive integer or "unlimited"; using what kernels report$/.test(l),
+    ),
+    units.said.find((l) => l.includes("LICENSE_LIMIT")) ?? "(no line)",
+  );
   const plain = loadWith({
     WOLFRAM_MCP_IDLE_MINUTES: "1.5",
     WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "1e2",
