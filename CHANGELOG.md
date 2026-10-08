@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.4](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.3...v0.1.4) (2026-10-08)
+
+
+### Bug Fixes
+
+* give every kernel request this server's deadline, so a prompt longer than a minute is answered ([#63](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/63)) ([edb0346](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/edb03461f465989eea579a5d90b1db7360780fbc))
+* hold a time at each timer it reaches, so one from an option or the socket can't fire at once ([#67](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/67)) ([b63099b](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/b63099bf934159ad6cbf49ac4ed876d9784fff08))
+* ignore a numeric setting written with a unit, and say so, rather than misread it ([#66](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/66)) ([26cdfa8](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/26cdfa8a90d66c7e21e1b2d57769854bb5cbb79f))
+* relay a kernel's error on every request with its prefix once, as tools/call does ([#65](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/65)) ([6231705](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/62317052435c38e92e02ef94c93bb3c2756779f6))
+
 ## [0.1.3](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.2...v0.1.3) (2026-10-06)
 
 
