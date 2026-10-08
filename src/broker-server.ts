@@ -26,6 +26,7 @@ import {
   SOCKET_MODE,
 } from "./broker-protocol.js";
 import { settingValue, type KernelFlavour } from "./flavour.js";
+import { listToolsPage } from "./kernel.js";
 import { errorText, type Logger } from "./log.js";
 
 /** How long to linger with no connections before exiting. */
@@ -262,7 +263,7 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
     try {
       const capabilities = client.getServerCapabilities() ?? {};
       const tools = await drain<Tool>(async (cursor) => {
-        const page = await client.listTools(cursor ? { cursor } : undefined);
+        const page = await listToolsPage(client, cursor);
         return { items: page.tools ?? [], nextCursor: page.nextCursor };
       });
       const prompts = capabilities.prompts
@@ -345,7 +346,7 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
           return reply({
             tools: await pool.run(flavour, (c, options) =>
               drain(async (cursor) => {
-                const page = await c.listTools(cursor ? { cursor } : undefined, options);
+                const page = await listToolsPage(c, cursor, options);
                 return { items: page.tools ?? [], nextCursor: page.nextCursor };
               }),
             ),

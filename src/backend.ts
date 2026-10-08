@@ -44,7 +44,7 @@ import {
   type BackoffState,
   type CandidateIdentity,
 } from "./prepare.js";
-import { HandshakeTimeout, isServerNotResolved, KernelSession } from "./kernel.js";
+import { HandshakeTimeout, isServerNotResolved, KernelSession, listToolsPage } from "./kernel.js";
 import type { KernelInstall } from "./locate.js";
 import { errorText, type Logger } from "./log.js";
 import { PKG } from "./version.js";
@@ -191,7 +191,7 @@ export class LocalBackend implements KernelBackend {
         // The raw client, deliberately: this runs inside the queue.
         await this.#onReady?.({
           capabilities: async () => client.getServerCapabilities() ?? {},
-          listTools: (cursor) => client.listTools(cursor ? { cursor } : undefined),
+          listTools: (cursor) => listToolsPage(client, cursor),
           listPrompts: (cursor) => client.listPrompts(cursor ? { cursor } : undefined),
         });
       },
@@ -243,7 +243,7 @@ export class LocalBackend implements KernelBackend {
   async listTools(): Promise<ToolPage> {
     const tools = await this.#session.run((c, request) =>
       drainPages(async (cursor) => {
-        const page = await c.listTools(cursor ? { cursor } : undefined, request);
+        const page = await listToolsPage(c, cursor, request);
         return { items: page.tools ?? [], nextCursor: page.nextCursor };
       }),
     );

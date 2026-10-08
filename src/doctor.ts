@@ -11,7 +11,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { cacheKey, capabilityFile, readCache } from "./cache.js";
 import { loadConfig, MCP_SERVERS } from "./config.js";
 import { installationEnv, readFacts, recordFacts, type KernelFacts } from "./inspect.js";
-import { KernelSession } from "./kernel.js";
+import { KernelSession, listToolsPage } from "./kernel.js";
 import {
   compareVersions,
   exampleKernelPath,
@@ -372,7 +372,7 @@ export async function runDoctor(): Promise<number> {
     const startedAt = Date.now();
     const result = await session.run(async (client: Client, request) => {
       const caps = client.getServerCapabilities() ?? {};
-      const tools = await client.listTools(undefined, request);
+      const tools = await listToolsPage(client, undefined, request);
       return { caps, tools: tools.tools ?? [], info: client.getServerVersion() };
     });
     const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);

@@ -12,9 +12,11 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import {
   ErrorCode,
+  ListToolsResultSchema,
   McpError,
   PromptListChangedNotificationSchema,
   ToolListChangedNotificationSchema,
+  type ListToolsResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import { deadlineDelay, MAX_TIMER_MS, timerDelay } from "./config.js";
 import { FilteringStdioTransport } from "./transport.js";
@@ -120,6 +122,32 @@ export const DEFAULT_DEADLINE_MS = 60_000;
  */
 function requestOptions(signal: AbortSignal | undefined): RequestOptions {
   return { timeout: SDK_REQUEST_TIMEOUT_MS, ...(signal ? { signal } : {}) };
+}
+
+/**
+ * One page of a kernel's tool list, asked as a plain request, and the only way
+ * this server reads one.
+ *
+ * Never `Client.listTools`: the SDK's compiles every tool's `outputSchema` with
+ * ajv, to validate later `tools/call` results, and a schema ajv refuses throws
+ * out of the whole list. So one tool took every tool of its server with it — on
+ * a cold list, in the refresh that keeps the cache, at the broker and in
+ * `doctor` (#31); fast-uri 3.1.8 made a malformed `$id` such a schema. This
+ * server relays results and judges none: the client it serves validates each
+ * against the schema relayed to it. With no validators cached, `callTool`
+ * checks nothing, which it only ever did once this client happened to have
+ * listed the tools.
+ */
+export function listToolsPage(
+  client: Client,
+  cursor: string | undefined,
+  options?: RequestOptions,
+): Promise<ListToolsResult> {
+  return client.request(
+    { method: "tools/list", params: cursor ? { cursor } : undefined },
+    ListToolsResultSchema,
+    options,
+  );
 }
 
 /** The SDK's own timeout, which a request given `requestOptions` never meets. */
