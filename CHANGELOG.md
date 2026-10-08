@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.5](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.4...v0.1.5) (2026-10-08)
+
+
+### Bug Fixes
+
+* list a kernel's tools without compiling their output schemas, so one that won't compile can't hide the rest ([#68](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/68)) ([136b59f](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/136b59f1d4a8524cda8864c2b4cb8b28a213bdf0))
+* say every duration one way, in units that fit it, a budget rounded down and a wait up ([#71](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/71)) ([3a6448f](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/3a6448fea9e9ae9e8891dc04ca028866d6b1c541))
+
 ## [0.1.4](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.3...v0.1.4) (2026-10-08)
 
 
