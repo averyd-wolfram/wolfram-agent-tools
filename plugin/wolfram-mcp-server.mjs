@@ -6997,7 +6997,7 @@ var init_version = __esm({
   "dist/version.js"() {
     "use strict";
     here = dirname(fileURLToPath(import.meta.url));
-    PKG = true ? JSON.parse('{"name":"wolfram-mcp-server","version":"0.1.3","description":"MCP server that drives a locally installed Wolfram kernel, with lazy start and idle shutdown."}') : JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8"));
+    PKG = true ? JSON.parse('{"name":"wolfram-mcp-server","version":"0.1.4","description":"MCP server that drives a locally installed Wolfram kernel, with lazy start and idle shutdown."}') : JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8"));
   }
 });
 
@@ -7250,7 +7250,7 @@ var init_broker_protocol = __esm({
     init_cache();
     init_flavour();
     init_version();
-    BROKER_PROTOCOL = 5;
+    BROKER_PROTOCOL = 6;
     MAX_SOCKET_PATH = 100;
     SOCKET_MODE = 384;
     MAX_UNTERMINATED_BYTES = 4 * 1024 * 1024;
@@ -7283,6 +7283,12 @@ var init_broker_protocol = __esm({
 });
 
 // dist/config.js
+function timerDelay(ms) {
+  return Number.isNaN(ms) ? MAX_TIMER_MS : Math.min(ms, MAX_TIMER_MS);
+}
+function deadlineDelay(ms) {
+  return Number.isNaN(ms) ? MAX_TIME_MS : Math.min(ms, MAX_TIME_MS);
+}
 function readEnv(...names) {
   return readEnvEntry(...names)?.[1];
 }
@@ -7300,21 +7306,40 @@ function readEnvEntry(...names) {
   }
   return void 0;
 }
-function readNumber(fallback, ...names) {
-  const raw = readEnv(...names);
-  if (raw === void 0)
+function plainNumber(raw) {
+  return /^inf(inity)?$/i.test(raw) ? Infinity : Number(raw);
+}
+function readNumber(fallback, log, ...names) {
+  const entry = readEnvEntry(...names);
+  if (entry === void 0)
     return fallback;
-  const parsed = Number.parseFloat(raw);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+  const [name, raw] = entry;
+  const parsed = plainNumber(raw);
+  if (Number.isFinite(parsed) && parsed >= 0)
+    return parsed;
+  log(`ignoring ${name}="${raw}": expected a finite number, 0 or more; using ${fallback}`);
+  return fallback;
+}
+function readCount(name, log, { expected = "a positive integer", instead }) {
+  const raw = readEnv(name);
+  if (raw === void 0)
+    return void 0;
+  const parsed = Number(raw);
+  if (Number.isInteger(parsed) && parsed > 0)
+    return parsed;
+  log(`ignoring ${name}="${raw}": expected ${expected}; using ${instead}`);
+  return void 0;
 }
 function readTime(fallback, unit, log, ...names) {
   const entry = readEnvEntry(...names);
   if (entry === void 0)
     return fallback * unit.ms;
   const [name, raw] = entry;
-  const parsed = /^inf(inity)?$/i.test(raw) ? Infinity : Number.parseFloat(raw);
-  if (Number.isNaN(parsed) || parsed < 0)
+  const parsed = plainNumber(raw);
+  if (Number.isNaN(parsed) || parsed < 0) {
+    log(`ignoring ${name}="${raw}": expected a number of ${unit.name}, 0 or more and without a unit, or Infinity; using ${fallback} ${unit.name}`);
     return fallback * unit.ms;
+  }
   const ms = parsed * unit.ms;
   if (ms <= MAX_TIME_MS)
     return ms;
@@ -7358,32 +7383,20 @@ function loadConfig(log) {
     callTimeoutMs: readTime(300, SECONDS, log, "WOLFRAM_MCP_CALL_TIMEOUT_SECONDS", "WOLFRAM_CALL_TIMEOUT_SECONDS"),
     cacheEnabled: readBoolean(true, "WOLFRAM_MCP_CACHE"),
     share: readBoolean(true, "WOLFRAM_MCP_SHARE"),
-    maxKernels: (() => {
-      const raw = readEnv("WOLFRAM_MCP_MAX_KERNELS");
-      if (raw === void 0)
-        return void 0;
-      const parsed = Number.parseInt(raw, 10);
-      return Number.isFinite(parsed) && parsed > 0 ? parsed : void 0;
-    })(),
-    reserveSeats: Math.max(0, Math.round(readNumber(1, "WOLFRAM_MCP_RESERVE_SEATS"))),
-    licenseLimit: (() => {
-      const raw = readEnv("WOLFRAM_MCP_LICENSE_LIMIT");
-      if (raw === void 0)
-        return void 0;
-      if (/^(unlimited|infinity|inf)$/i.test(raw))
-        return "unlimited";
-      const parsed = Number.parseInt(raw, 10);
-      if (Number.isFinite(parsed) && parsed > 0)
-        return parsed;
-      log(`ignoring WOLFRAM_MCP_LICENSE_LIMIT="${raw}": expected a positive integer or "unlimited"`);
-      return void 0;
-    })(),
+    maxKernels: readCount("WOLFRAM_MCP_MAX_KERNELS", log, {
+      instead: "the budget the licence gives"
+    }),
+    reserveSeats: Math.max(0, Math.round(readNumber(1, log, "WOLFRAM_MCP_RESERVE_SEATS"))),
+    licenseLimit: /^(unlimited|infinity|inf)$/i.test(readEnv("WOLFRAM_MCP_LICENSE_LIMIT") ?? "") ? "unlimited" : readCount("WOLFRAM_MCP_LICENSE_LIMIT", log, {
+      expected: 'a positive integer or "unlimited"',
+      instead: "what kernels report"
+    }),
     inspect: readBoolean(true, "WOLFRAM_MCP_INSPECT"),
     // Over the resolved name, because that is the one a kernel is started with.
     flavour: kernelFlavour({ ...process.env, MCP_SERVER_NAME: serverName })
   };
 }
-var MCP_SERVERS, DEFAULT_SERVER_NAME, DEFAULT_MIN_VERSION, DEFAULT_START_TIMEOUT_MS, MAX_TIME_MS, SECONDS, MINUTES;
+var MCP_SERVERS, DEFAULT_SERVER_NAME, DEFAULT_MIN_VERSION, DEFAULT_START_TIMEOUT_MS, MAX_TIME_MS, MAX_TIMER_MS, SECONDS, MINUTES;
 var init_config = __esm({
   "dist/config.js"() {
     "use strict";
@@ -7398,497 +7411,9 @@ var init_config = __esm({
     DEFAULT_MIN_VERSION = "14.3";
     DEFAULT_START_TIMEOUT_MS = 12e4;
     MAX_TIME_MS = 24 * 864e5;
+    MAX_TIMER_MS = 2 ** 31 - 1;
     SECONDS = { ms: 1e3, name: "seconds" };
     MINUTES = { ms: 6e4, name: "minutes" };
-  }
-});
-
-// dist/log.js
-function createLogger(prefix, options = {}) {
-  const stamp = options.timestamps ?? false;
-  return (message) => {
-    try {
-      const at = stamp ? `${(/* @__PURE__ */ new Date()).toISOString()} ` : "";
-      process.stderr.write(`${at}[${prefix}] ${message}
-`);
-    } catch {
-    }
-  };
-}
-function budgetText(ms) {
-  if (ms < 1e3)
-    return `${Math.floor(ms)}ms`;
-  if (ms < 1e4)
-    return `${Math.floor(ms / 100) / 10}s`;
-  return `${Math.floor(ms / 1e3)}s`;
-}
-function errorText(err) {
-  if (err instanceof Error)
-    return err.message;
-  if (typeof err === "string")
-    return err;
-  try {
-    return JSON.stringify(err);
-  } catch {
-    return String(err);
-  }
-}
-function bareMcpText(code2, message) {
-  const prefix = `MCP error ${code2}: `;
-  return message.startsWith(prefix) ? message.slice(prefix.length) : message;
-}
-var init_log = __esm({
-  "dist/log.js"() {
-    "use strict";
-  }
-});
-
-// dist/broker-client.js
-var broker_client_exports = {};
-__export(broker_client_exports, {
-  BrokerBackend: () => BrokerBackend,
-  brokerCeilingMs: () => brokerCeilingMs
-});
-import { spawn } from "node:child_process";
-import { closeSync, openSync } from "node:fs";
-import { connect } from "node:net";
-function brokerCeilingMs(op, timeoutMs, startTimeoutMs) {
-  if (timeoutMs === 0)
-    return 0;
-  if (timeoutMs !== void 0)
-    return timeoutMs + REQUEST_GRACE_MS;
-  const start = FROM_KERNEL[op] ? startTimeoutMs : 0;
-  return start + DEFAULT_OP_TIMEOUT_MS + REQUEST_GRACE_MS;
-}
-function brokerError(response) {
-  const message = response.error ?? "the Wolfram broker reported an error";
-  if (response.code === void 0)
-    return new Error(message);
-  return new McpError(response.code, bareMcpText(response.code, message));
-}
-function tryConnect(address) {
-  return new Promise((resolve) => {
-    const socket = connect(address);
-    const fail = () => {
-      socket.removeAllListeners();
-      socket.destroy();
-      resolve(null);
-    };
-    socket.once("connect", () => {
-      socket.removeAllListeners("error");
-      resolve(socket);
-    });
-    socket.once("error", fail);
-  });
-}
-var CONNECT_DEADLINE_MS, CONNECT_RETRY_MS, REQUEST_GRACE_MS, DEFAULT_OP_TIMEOUT_MS, FROM_KERNEL, PING_DEADLINE_MS, delay, BrokerBackend;
-var init_broker_client = __esm({
-  "dist/broker-client.js"() {
-    "use strict";
-    init_types();
-    init_broker_protocol();
-    init_config();
-    init_log();
-    CONNECT_DEADLINE_MS = 5e3;
-    CONNECT_RETRY_MS = 100;
-    REQUEST_GRACE_MS = 2e3;
-    DEFAULT_OP_TIMEOUT_MS = 6e4;
-    FROM_KERNEL = {
-      capabilities: true,
-      listTools: true,
-      listPrompts: true,
-      getPrompt: true,
-      listResources: true,
-      readResource: true,
-      callTool: true,
-      cancel: false,
-      status: false,
-      hello: false,
-      ping: false,
-      ready: false
-    };
-    PING_DEADLINE_MS = REQUEST_GRACE_MS;
-    delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-    BrokerBackend = class _BrokerBackend {
-      kind = "broker";
-      /**
-       * The pid this process spawned as a broker, or null when it only attached.
-       *
-       * A pid rather than a "did we spawn one" flag, because spawning is not
-       * winning: the child can find the address already bound by another session's
-       * broker and stand down, and the retry loop in open() then attaches to the
-       * winner. A flag set on the spawn path called the winner ours; the pid
-       * comparison in spawnedHere() cannot. Not on the wire; a local fact about how
-       * this connection came to be.
-       */
-      #spawnedPid = null;
-      #options;
-      #socket;
-      #nextId = 1;
-      #pending = /* @__PURE__ */ new Map();
-      #progress = /* @__PURE__ */ new Map();
-      /**
-       * Outstanding pings, kept apart from #pending because their contracts differ:
-       * #pending treats `ok: false` as a failure, and a ping treats it as an answer.
-       */
-      #liveness = /* @__PURE__ */ new Map();
-      #onKernelReady;
-      #closed = false;
-      constructor(options, socket) {
-        this.#options = options;
-        this.#socket = socket;
-        this.#attach(socket);
-      }
-      /**
-       * Is the broker answering on this socket the process this backend spawned?
-       *
-       * Only `doctor` asks, and only to keep one line honest: the pool settings —
-       * idle, budget, reserve — belong to whichever session started the broker, so
-       * a run that merely attached cannot report its own as though they were in
-       * force. The caller supplies the pid the broker reports for itself, so the
-       * answer is the two processes agreeing rather than a note taken at connect
-       * time about which path the connection came off.
-       */
-      spawnedHere(brokerPid) {
-        return this.#spawnedPid !== null && this.#spawnedPid === brokerPid;
-      }
-      /**
-       * Attach to a broker only if one is already listening — never start one — for
-       * a caller that asks about sharing rather than shares: `wolfram_status`, which
-       * must start nothing. Same safety check and same verified attach as `open`,
-       * and the same logger, which is where a caller learns why the answer is null.
-       */
-      static async attachIfRunning(options) {
-        const fault = socketFault(options.address);
-        if (fault) {
-          options.log(`not sharing kernels: ${fault}`);
-          return null;
-        }
-        const existing = await tryConnect(options.address);
-        return existing ? _BrokerBackend.#verified(options, existing, null) : null;
-      }
-      /**
-       * Connect to a broker, starting one if necessary.
-       *
-       * @returns a backend, or null when sharing could not be arranged.
-       */
-      static async open(options) {
-        const { address, log } = options;
-        const fault = socketFault(address);
-        if (fault) {
-          log(`not sharing kernels: ${fault}. Using a private kernel instead; sharing resumes when WOLFRAM_MCP_RUNTIME_DIR (or XDG_RUNTIME_DIR) names a directory only you can write to`);
-          return null;
-        }
-        const existing = await tryConnect(address);
-        if (existing)
-          return _BrokerBackend.#verified(options, existing, null);
-        log("no broker listening; starting one");
-        let spawnFailed = null;
-        let spawnedPid = null;
-        let logTarget = "ignore";
-        const logPath = options.spawnEnv["WOLFRAM_MCP_LOG"] ?? process.env["WOLFRAM_MCP_LOG"];
-        if (logPath) {
-          try {
-            logTarget = openSync(logPath, "a");
-          } catch (err) {
-            log(`cannot write broker logs to ${logPath}: ${errorText(err)}`);
-          }
-        }
-        try {
-          const child = spawn(options.spawnCommand, options.spawnArgs, {
-            detached: true,
-            stdio: ["ignore", logTarget, logTarget],
-            env: options.spawnEnv,
-            windowsHide: true
-          });
-          child.on("error", (err) => {
-            spawnFailed = errorText(err);
-            log(`the broker could not be started: ${spawnFailed}`);
-          });
-          child.unref();
-          spawnedPid = child.pid ?? null;
-        } catch (err) {
-          log(`could not spawn a broker: ${errorText(err)}`);
-          return null;
-        } finally {
-          if (typeof logTarget === "number") {
-            try {
-              closeSync(logTarget);
-            } catch {
-            }
-          }
-        }
-        const deadline = Date.now() + CONNECT_DEADLINE_MS;
-        while (Date.now() < deadline) {
-          await delay(CONNECT_RETRY_MS);
-          if (spawnFailed !== null) {
-            log("the broker never started; using a private kernel instead");
-            return null;
-          }
-          const socket = await tryConnect(address);
-          if (socket)
-            return _BrokerBackend.#verified(options, socket, spawnedPid);
-        }
-        log("a broker did not come up in time; using a private kernel instead");
-        return null;
-      }
-      /**
-       * Build a backend on a connected socket, but only once the process behind it
-       * has answered.
-       *
-       * Accepting a connection is the OS's work, not the broker's: a SIGSTOPped
-       * process, or one blocked in a synchronous call, still has its listen backlog
-       * answered for it. So a socket proves that a broker bound this path once, not
-       * that one is running now — and "the socket accepted me" is exactly what
-       * `attached to the broker` used to mean. A wedged broker was discovered only
-       * by the first real call, which the caller paid for at the full timeout.
-       */
-      static async #verified(options, socket, spawnedPid) {
-        const backend = new _BrokerBackend(options, socket);
-        backend.#spawnedPid = spawnedPid;
-        if (await backend.#answers()) {
-          const refused = await backend.#declare();
-          if (refused === null) {
-            options.log(`attached to the broker at ${options.address} for environment ${options.flavour.digest}`);
-            return backend;
-          }
-          options.log(`the broker will not serve this session's kernel environment (${options.flavour.digest}): ${refused}; using a private kernel instead`);
-          await backend.stop();
-          return null;
-        }
-        options.log(`the broker at ${options.address} accepted a connection but did not answer; using a private kernel instead`);
-        await backend.stop();
-        return null;
-      }
-      /**
-       * Ask the broker whether it is running, and take any answer as yes.
-       *
-       * The `ok` flag is ignored on purpose. A broker started before this op existed
-       * answers `unknown broker op: ping`, and that refusal is still proof the
-       * process is running and reading its socket, which is the entire question.
-       * Reading it as a failure would send every session to a private kernel, and
-       * cost the seat that buys, for as long as an older broker keeps serving — a
-       * minute past the last detach at the very least, and in practice a whole
-       * working session, since a broker serves the code it started with.
-       */
-      #answers() {
-        if (this.#closed || !this.#socket.writable)
-          return Promise.resolve(false);
-        const id = this.#nextId++;
-        return new Promise((resolve) => {
-          const timer = setTimeout(() => {
-            this.#liveness.delete(id);
-            resolve(false);
-          }, PING_DEADLINE_MS);
-          this.#liveness.set(id, (alive) => {
-            clearTimeout(timer);
-            resolve(alive);
-          });
-          this.#socket.write(encodeFrame({ id, op: "ping" }), (err) => {
-            if (err) {
-              this.#liveness.delete(id);
-              clearTimeout(timer);
-              resolve(false);
-            }
-          });
-        });
-      }
-      /**
-       * Tell the broker what this session's kernels must be started with.
-       *
-       * The values travel, not just their digest, because the broker is what starts
-       * the kernel and its own environment belongs to whichever session spawned it.
-       *
-       * A broker that predates this refuses the op, and a refusal is not a failure
-       * of the broker — it is the absence of the one thing needed to share safely,
-       * so it is treated exactly like a rejection.
-       */
-      async #declare() {
-        const { flavour } = this.#options;
-        try {
-          const result = await this.#request("hello", { digest: flavour.digest, env: flavour.env, names: flavour.names }, PING_DEADLINE_MS);
-          return result?.flavours === true ? null : "it did not accept the declaration";
-        } catch (err) {
-          return errorText(err);
-        }
-      }
-      #attach(socket) {
-        socket.setEncoding("utf8");
-        const reader = new FrameReader((raw) => this.#onFrame(raw));
-        socket.on("data", (chunk) => reader.push(chunk));
-        socket.on("close", () => this.#failAll(new Error("the Wolfram broker closed the connection")));
-        socket.on("error", (err) => this.#failAll(err));
-      }
-      #onFrame(frame) {
-        if (isEvent(frame)) {
-          if (frame.event === "shuttingDown") {
-            this.#options.log("the broker is shutting down; will choose again");
-            this.#closed = true;
-            return;
-          }
-          if (frame.event === "progress") {
-            this.#progress.get(frame.target)?.(frame.progress);
-            return;
-          }
-          if (frame.event === "kernelReady") {
-            const { capabilities, tools, prompts } = frame;
-            void this.#onKernelReady?.({
-              capabilities: async () => capabilities,
-              listTools: async (cursor) => cursor ? this.listTools(cursor) : { tools },
-              listPrompts: async (cursor) => cursor ? this.listPrompts(cursor) : { prompts: prompts ?? [] }
-            });
-          }
-          return;
-        }
-        const response = frame;
-        const alive = this.#liveness.get(response.id);
-        if (alive) {
-          this.#liveness.delete(response.id);
-          alive(true);
-          return;
-        }
-        const waiter = this.#pending.get(response.id);
-        if (!waiter)
-          return;
-        this.#pending.delete(response.id);
-        if (response.ok)
-          waiter.resolve(response.result);
-        else
-          waiter.reject(brokerError(response));
-      }
-      #failAll(err) {
-        if (this.#closed)
-          return;
-        this.#closed = true;
-        for (const [, waiter] of this.#pending)
-          waiter.reject(err);
-        this.#pending.clear();
-        for (const [, alive] of this.#liveness)
-          alive(false);
-        this.#liveness.clear();
-      }
-      /** False once the socket is gone or the broker stopped answering. */
-      usable() {
-        return !this.#closed && this.#socket.writable;
-      }
-      #request(op, params, timeoutMs, signal, onprogress) {
-        if (this.#closed || !this.#socket.writable) {
-          return Promise.reject(new Error("the Wolfram broker is not connected"));
-        }
-        const id = this.#nextId++;
-        const frame = {
-          id,
-          op,
-          ...params === void 0 ? {} : { params },
-          ...timeoutMs === void 0 ? {} : { timeoutMs }
-        };
-        const ceiling = brokerCeilingMs(op, timeoutMs, this.#options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS);
-        return new Promise((resolve, reject) => {
-          const timer = ceiling === 0 ? void 0 : setTimeout(() => {
-            this.#pending.delete(id);
-            this.#closed = true;
-            reject(new Error(`the Wolfram broker did not answer ${op} within ${ceiling}ms`));
-          }, ceiling);
-          timer?.unref?.();
-          const settle = {
-            resolve: (v) => {
-              clearTimeout(timer);
-              this.#progress.delete(id);
-              resolve(v);
-            },
-            reject: (e) => {
-              clearTimeout(timer);
-              this.#progress.delete(id);
-              reject(e);
-            }
-          };
-          if (signal) {
-            if (signal.aborted) {
-              settle.reject(new Error("the call was cancelled before it was sent"));
-              return;
-            }
-            signal.addEventListener("abort", () => {
-              if (this.#socket.writable) {
-                this.#socket.write(encodeFrame({ id: this.#nextId++, op: "cancel", target: id }));
-              }
-              this.#pending.delete(id);
-              settle.reject(new Error("the call was cancelled"));
-            }, { once: true });
-          }
-          if (onprogress)
-            this.#progress.set(id, onprogress);
-          this.#pending.set(id, settle);
-          this.#socket.write(encodeFrame(frame), (err) => {
-            if (err) {
-              this.#pending.delete(id);
-              settle.reject(err);
-            }
-          });
-        });
-      }
-      onKernelReady(handler) {
-        this.#onKernelReady = handler;
-      }
-      capabilities() {
-        return this.#request("capabilities");
-      }
-      listTools(cursor) {
-        return this.#request("listTools", cursor ? { cursor } : void 0);
-      }
-      listPrompts(cursor) {
-        return this.#request("listPrompts", cursor ? { cursor } : void 0);
-      }
-      getPrompt(params) {
-        return this.#request("getPrompt", params);
-      }
-      listResources(params) {
-        return this.#request("listResources", params);
-      }
-      readResource(params) {
-        return this.#request("readResource", params);
-      }
-      callTool(params, options) {
-        return this.#request("callTool", params, options.timeoutMs, options.signal, options.onprogress);
-      }
-      /**
-       * Wait for the broker's own preparation — reading what its kernels need from
-       * cache — within what the deadline has left. That work is the broker's,
-       * shared with every session attached to it, so the deadline passing stops
-       * only this session's wait; the broker finishes, and
-       * serves whoever asks next.
-       *
-       * Deliberately not a pool request. This was `capabilities`, which queues for
-       * a slot like any work, so a session arriving while every slot held a long
-       * evaluation timed out here and was backed off for ten minutes from a
-       * perfectly healthy broker. Waiting for a
-       * slot is ordinary queueing, bounded by the call's own ceiling; a kernel the
-       * broker starts for it is bounded by the broker's start timeout.
-       */
-      async awaitReady(deadline) {
-        const stage = "waiting for the shared broker to prepare";
-        const remainder = deadline.handOn(stage);
-        try {
-          await deadline.within(stage, this.#request("ready", void 0, remainder));
-        } catch (err) {
-          if (/unknown broker op/.test(errorText(err)))
-            return;
-          throw err;
-        }
-      }
-      /**
-       * Pool and licence state, for `doctor` and `wolfram_status`. The broker
-       * answers from memory, so a caller that must not hang — the status tool is
-       * what you ask when things are stuck — passes a ceiling of its own.
-       */
-      status(timeoutMs) {
-        return this.#request("status", void 0, timeoutMs);
-      }
-      async stop() {
-        this.#closed = true;
-        this.#socket.end();
-        this.#socket.destroy();
-      }
-    };
   }
 });
 
@@ -8703,15 +8228,15 @@ var init_protocol = __esm({
             if (abortController.signal.aborted) {
               throw new McpError(ErrorCode.ConnectionClosed, "Request was cancelled");
             }
-            const requestOptions = { ...options, relatedRequestId: request.id };
-            if (relatedTaskId && !requestOptions.relatedTask) {
-              requestOptions.relatedTask = { taskId: relatedTaskId };
+            const requestOptions2 = { ...options, relatedRequestId: request.id };
+            if (relatedTaskId && !requestOptions2.relatedTask) {
+              requestOptions2.relatedTask = { taskId: relatedTaskId };
             }
-            const effectiveTaskId = requestOptions.relatedTask?.taskId ?? relatedTaskId;
+            const effectiveTaskId = requestOptions2.relatedTask?.taskId ?? relatedTaskId;
             if (effectiveTaskId && taskStore) {
               await taskStore.updateTaskStatus(effectiveTaskId, "input_required");
             }
-            return await this.request(r, resultSchema, requestOptions);
+            return await this.request(r, resultSchema, requestOptions2);
           },
           authInfo: extra?.authInfo,
           requestId: request.id,
@@ -17318,178 +16843,8 @@ var init_client2 = __esm({
   }
 });
 
-// dist/inspect.js
-var inspect_exports = {};
-__export(inspect_exports, {
-  FACTS_EXPRESSION: () => FACTS_EXPRESSION,
-  baseDirectoryEnv: () => baseDirectoryEnv,
-  clearFacts: () => clearFacts,
-  installationEnv: () => installationEnv,
-  isFactsLine: () => isFactsLine,
-  parseFacts: () => parseFacts,
-  readFacts: () => readFacts,
-  recordFacts: () => recordFacts
-});
-import { createHash as createHash4 } from "node:crypto";
-import { mkdirSync as mkdirSync3, readFileSync as readFileSync3, renameSync as renameSync2, rmSync as rmSync2, statSync as statSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync2 } from "node:fs";
-import { dirname as dirname4, join as join4 } from "node:path";
-function factsFile(bin) {
-  const digest = createHash4("sha256").update(bin).digest("hex").slice(0, 16);
-  return join4(cacheDir(), "installations", `${digest}.json`);
-}
-function binaryIdentity(bin) {
-  try {
-    const stat = statSync2(bin);
-    return { mtimeMs: Math.round(stat.mtimeMs), size: stat.size };
-  } catch {
-    return null;
-  }
-}
-function normaliseVersion(version2) {
-  if (typeof version2 !== "string")
-    return null;
-  const repaired = version2.replace(/\.\./g, ".0.");
-  return /^\d+(\.\d+)*$/.test(repaired) ? repaired : null;
-}
-function readFacts(bin) {
-  const identity = binaryIdentity(bin);
-  if (!identity)
-    return null;
-  try {
-    const entry = JSON.parse(readFileSync3(factsFile(bin), "utf8"));
-    if (entry.format !== CACHE_FORMAT2)
-      return null;
-    if (entry.binary !== bin)
-      return null;
-    if (entry.binaryMtimeMs !== identity.mtimeMs)
-      return null;
-    if (entry.binarySize !== identity.size)
-      return null;
-    const version2 = normaliseVersion(entry.version);
-    if (version2 === null)
-      return null;
-    return { ...entry, version: version2 };
-  } catch {
-    return null;
-  }
-}
-function writeFacts(bin, facts) {
-  const identity = binaryIdentity(bin);
-  if (!identity)
-    return;
-  const file = factsFile(bin);
-  const temp = `${file}.${process.pid}.tmp`;
-  try {
-    mkdirSync3(dirname4(file), { recursive: true });
-    const entry = {
-      ...facts,
-      format: CACHE_FORMAT2,
-      binary: bin,
-      binaryMtimeMs: identity.mtimeMs,
-      binarySize: identity.size,
-      probedAt: Date.now()
-    };
-    writeFileSync2(temp, `${JSON.stringify(entry, null, 2)}
-`);
-    renameSync2(temp, file);
-  } catch {
-    try {
-      unlinkSync2(temp);
-    } catch {
-    }
-  }
-}
-function isFactsLine(line) {
-  return line.includes(OPEN);
-}
-function parseFacts(stdout) {
-  const start = stdout.indexOf(OPEN);
-  const end = stdout.indexOf(CLOSE, start + OPEN.length);
-  if (start === -1 || end === -1)
-    return null;
-  try {
-    const raw = JSON.parse(stdout.slice(start + OPEN.length, end));
-    const limit = raw["maxLicenseProcesses"];
-    const parsed = typeof limit === "string" ? Number.parseInt(limit, 10) : Number.NaN;
-    const text = (value) => typeof value === "string" ? value : "";
-    return {
-      version: text(raw["version"]),
-      systemID: text(raw["systemID"]),
-      base: text(raw["base"]),
-      userBase: text(raw["userBase"]),
-      localBase: text(raw["localBase"]),
-      maxLicenseProcesses: limit === "unlimited" ? "unlimited" : Number.isFinite(parsed) && parsed > 0 ? parsed : "unknown",
-      licenseType: typeof raw["licenseType"] === "string" ? raw["licenseType"] : null,
-      networkLicense: raw["networkLicense"] === true,
-      agentTools: typeof raw["agentTools"] === "string" ? raw["agentTools"] : null,
-      // An unsigned-in kernel answers with the symbol None, which arrives here
-      // as the string "None" rather than as an absent field.
-      wolframID: typeof raw["wolframID"] === "string" && raw["wolframID"] !== "" && raw["wolframID"] !== "None" ? raw["wolframID"] : null,
-      cloudConnected: raw["cloudConnected"] === true
-    };
-  } catch {
-    return null;
-  }
-}
-function recordFacts(bin, facts, chosen, log) {
-  if (chosen.length > 0) {
-    log(`reported facts for its own configuration (${chosen.join(", ")}); not the installation's`);
-    return;
-  }
-  log(`reported ${facts.version}, licence ${facts.maxLicenseProcesses}${facts.licenseType ? ` (${facts.licenseType})` : ""}, AgentTools ${facts.agentTools ?? "absent"}, account ${facts.wolframID ?? "not signed in"}`);
-  writeFacts(bin, facts);
-}
-function installationEnv(bin, allowInspect) {
-  if (!allowInspect)
-    return {};
-  return baseDirectoryEnv(readFacts(bin));
-}
-function clearFacts() {
-  const dir = join4(cacheDir(), "installations");
-  try {
-    rmSync2(dir, { recursive: true, force: true });
-  } catch {
-  }
-  return dir;
-}
-function baseDirectoryEnv(facts) {
-  if (!facts)
-    return {};
-  const env = {};
-  if (facts.base)
-    env["WOLFRAM_BASE"] = facts.base;
-  if (facts.userBase)
-    env["WOLFRAM_USERBASE"] = facts.userBase;
-  if (facts.localBase)
-    env["WOLFRAM_LOCALBASE"] = facts.localBase;
-  return env;
-}
-var CACHE_FORMAT2, OPEN, CLOSE, FACTS_EXPRESSION;
-var init_inspect = __esm({
-  "dist/inspect.js"() {
-    "use strict";
-    init_cache();
-    CACHE_FORMAT2 = 2;
-    OPEN = "<<WMCPFACTS>>";
-    CLOSE = "<<END>>";
-    FACTS_EXPRESSION = `WriteString["stdout","${OPEN}",ExportString[<|
-  "version"->TextString[$VersionNumber]<>"."<>ToString[$ReleaseNumber],
-  "systemID"->$SystemID,
-  "base"->$BaseDirectory,
-  "userBase"->$UserBaseDirectory,
-  "localBase"->ExpandFileName[LocalObject[$LocalBase]],
-  "maxLicenseProcesses"->If[$MaxLicenseProcesses===Infinity,"unlimited",ToString[$MaxLicenseProcesses]],
-  "licenseType"->$LicenseType,
-  "networkLicense"->TrueQ[$NetworkLicense],
-  "agentTools"->Replace[PacletObject["Wolfram/AgentTools"]["Version"],Except[_String]->None],
-  "wolframID"->ToString[$WolframID],
-  "cloudConnected"->TrueQ[$CloudConnected]
-|>,"JSON","Compact"->True],"${CLOSE}\\n"]`;
-  }
-});
-
 // dist/transport.js
-import { spawn as spawn2 } from "node:child_process";
+import { spawn } from "node:child_process";
 var MAX_UNTERMINATED_BYTES2, RECENT_LINE_LIMIT, KILL_ESCALATION_MS, REAP_TIMEOUT_MS, FilteringStdioTransport;
 var init_transport = __esm({
   "dist/transport.js"() {
@@ -17530,7 +16885,7 @@ var init_transport = __esm({
       async start() {
         if (this.#child)
           throw new Error("FilteringStdioTransport is already started");
-        const child = spawn2(this.#options.command, this.#options.args ?? [], {
+        const child = spawn(this.#options.command, this.#options.args ?? [], {
           stdio: ["pipe", "pipe", "pipe"],
           env: this.#options.env,
           cwd: this.#options.cwd,
@@ -17732,7 +17087,220 @@ var init_transport = __esm({
   }
 });
 
+// dist/inspect.js
+var inspect_exports = {};
+__export(inspect_exports, {
+  FACTS_EXPRESSION: () => FACTS_EXPRESSION,
+  baseDirectoryEnv: () => baseDirectoryEnv,
+  clearFacts: () => clearFacts,
+  installationEnv: () => installationEnv,
+  isFactsLine: () => isFactsLine,
+  parseFacts: () => parseFacts,
+  readFacts: () => readFacts,
+  recordFacts: () => recordFacts
+});
+import { createHash as createHash4 } from "node:crypto";
+import { mkdirSync as mkdirSync3, readFileSync as readFileSync3, renameSync as renameSync2, rmSync as rmSync2, statSync as statSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { dirname as dirname4, join as join4 } from "node:path";
+function factsFile(bin) {
+  const digest = createHash4("sha256").update(bin).digest("hex").slice(0, 16);
+  return join4(cacheDir(), "installations", `${digest}.json`);
+}
+function binaryIdentity(bin) {
+  try {
+    const stat = statSync2(bin);
+    return { mtimeMs: Math.round(stat.mtimeMs), size: stat.size };
+  } catch {
+    return null;
+  }
+}
+function normaliseVersion(version2) {
+  if (typeof version2 !== "string")
+    return null;
+  const repaired = version2.replace(/\.\./g, ".0.");
+  return /^\d+(\.\d+)*$/.test(repaired) ? repaired : null;
+}
+function readFacts(bin) {
+  const identity = binaryIdentity(bin);
+  if (!identity)
+    return null;
+  try {
+    const entry = JSON.parse(readFileSync3(factsFile(bin), "utf8"));
+    if (entry.format !== CACHE_FORMAT2)
+      return null;
+    if (entry.binary !== bin)
+      return null;
+    if (entry.binaryMtimeMs !== identity.mtimeMs)
+      return null;
+    if (entry.binarySize !== identity.size)
+      return null;
+    const version2 = normaliseVersion(entry.version);
+    if (version2 === null)
+      return null;
+    return { ...entry, version: version2 };
+  } catch {
+    return null;
+  }
+}
+function writeFacts(bin, facts) {
+  const identity = binaryIdentity(bin);
+  if (!identity)
+    return;
+  const file = factsFile(bin);
+  const temp = `${file}.${process.pid}.tmp`;
+  try {
+    mkdirSync3(dirname4(file), { recursive: true });
+    const entry = {
+      ...facts,
+      format: CACHE_FORMAT2,
+      binary: bin,
+      binaryMtimeMs: identity.mtimeMs,
+      binarySize: identity.size,
+      probedAt: Date.now()
+    };
+    writeFileSync2(temp, `${JSON.stringify(entry, null, 2)}
+`);
+    renameSync2(temp, file);
+  } catch {
+    try {
+      unlinkSync2(temp);
+    } catch {
+    }
+  }
+}
+function isFactsLine(line) {
+  return line.includes(OPEN);
+}
+function parseFacts(stdout) {
+  const start = stdout.indexOf(OPEN);
+  const end = stdout.indexOf(CLOSE, start + OPEN.length);
+  if (start === -1 || end === -1)
+    return null;
+  try {
+    const raw = JSON.parse(stdout.slice(start + OPEN.length, end));
+    const limit = raw["maxLicenseProcesses"];
+    const parsed = typeof limit === "string" ? Number.parseInt(limit, 10) : Number.NaN;
+    const text = (value) => typeof value === "string" ? value : "";
+    return {
+      version: text(raw["version"]),
+      systemID: text(raw["systemID"]),
+      base: text(raw["base"]),
+      userBase: text(raw["userBase"]),
+      localBase: text(raw["localBase"]),
+      maxLicenseProcesses: limit === "unlimited" ? "unlimited" : Number.isFinite(parsed) && parsed > 0 ? parsed : "unknown",
+      licenseType: typeof raw["licenseType"] === "string" ? raw["licenseType"] : null,
+      networkLicense: raw["networkLicense"] === true,
+      agentTools: typeof raw["agentTools"] === "string" ? raw["agentTools"] : null,
+      // An unsigned-in kernel answers with the symbol None, which arrives here
+      // as the string "None" rather than as an absent field.
+      wolframID: typeof raw["wolframID"] === "string" && raw["wolframID"] !== "" && raw["wolframID"] !== "None" ? raw["wolframID"] : null,
+      cloudConnected: raw["cloudConnected"] === true
+    };
+  } catch {
+    return null;
+  }
+}
+function recordFacts(bin, facts, chosen, log) {
+  if (chosen.length > 0) {
+    log(`reported facts for its own configuration (${chosen.join(", ")}); not the installation's`);
+    return;
+  }
+  log(`reported ${facts.version}, licence ${facts.maxLicenseProcesses}${facts.licenseType ? ` (${facts.licenseType})` : ""}, AgentTools ${facts.agentTools ?? "absent"}, account ${facts.wolframID ?? "not signed in"}`);
+  writeFacts(bin, facts);
+}
+function installationEnv(bin, allowInspect) {
+  if (!allowInspect)
+    return {};
+  return baseDirectoryEnv(readFacts(bin));
+}
+function clearFacts() {
+  const dir = join4(cacheDir(), "installations");
+  try {
+    rmSync2(dir, { recursive: true, force: true });
+  } catch {
+  }
+  return dir;
+}
+function baseDirectoryEnv(facts) {
+  if (!facts)
+    return {};
+  const env = {};
+  if (facts.base)
+    env["WOLFRAM_BASE"] = facts.base;
+  if (facts.userBase)
+    env["WOLFRAM_USERBASE"] = facts.userBase;
+  if (facts.localBase)
+    env["WOLFRAM_LOCALBASE"] = facts.localBase;
+  return env;
+}
+var CACHE_FORMAT2, OPEN, CLOSE, FACTS_EXPRESSION;
+var init_inspect = __esm({
+  "dist/inspect.js"() {
+    "use strict";
+    init_cache();
+    CACHE_FORMAT2 = 2;
+    OPEN = "<<WMCPFACTS>>";
+    CLOSE = "<<END>>";
+    FACTS_EXPRESSION = `WriteString["stdout","${OPEN}",ExportString[<|
+  "version"->TextString[$VersionNumber]<>"."<>ToString[$ReleaseNumber],
+  "systemID"->$SystemID,
+  "base"->$BaseDirectory,
+  "userBase"->$UserBaseDirectory,
+  "localBase"->ExpandFileName[LocalObject[$LocalBase]],
+  "maxLicenseProcesses"->If[$MaxLicenseProcesses===Infinity,"unlimited",ToString[$MaxLicenseProcesses]],
+  "licenseType"->$LicenseType,
+  "networkLicense"->TrueQ[$NetworkLicense],
+  "agentTools"->Replace[PacletObject["Wolfram/AgentTools"]["Version"],Except[_String]->None],
+  "wolframID"->ToString[$WolframID],
+  "cloudConnected"->TrueQ[$CloudConnected]
+|>,"JSON","Compact"->True],"${CLOSE}\\n"]`;
+  }
+});
+
+// dist/log.js
+function createLogger(prefix, options = {}) {
+  const stamp = options.timestamps ?? false;
+  return (message) => {
+    try {
+      const at = stamp ? `${(/* @__PURE__ */ new Date()).toISOString()} ` : "";
+      process.stderr.write(`${at}[${prefix}] ${message}
+`);
+    } catch {
+    }
+  };
+}
+function budgetText(ms) {
+  if (ms < 1e3)
+    return `${Math.floor(ms)}ms`;
+  if (ms < 1e4)
+    return `${Math.floor(ms / 100) / 10}s`;
+  return `${Math.floor(ms / 1e3)}s`;
+}
+function errorText(err) {
+  if (err instanceof Error)
+    return err.message;
+  if (typeof err === "string")
+    return err;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
+function bareMcpText(code2, message) {
+  const prefix = `MCP error ${code2}: `;
+  return message.startsWith(prefix) ? message.slice(prefix.length) : message;
+}
+var init_log = __esm({
+  "dist/log.js"() {
+    "use strict";
+  }
+});
+
 // dist/kernel.js
+function requestOptions(signal) {
+  return { timeout: SDK_REQUEST_TIMEOUT_MS, ...signal ? { signal } : {} };
+}
 function isRequestTimeout(err) {
   return err instanceof McpError && err.code === REQUEST_TIMEOUT;
 }
@@ -17758,12 +17326,13 @@ function withKernelOutput(err, output) {
 Last output from the kernel:
 ${tail}${hint}`, { cause: err });
 }
-var PACLET_KERNEL_ARGS, LOAD_AGENTTOOLS, KERNEL_ARGS, DeadlineExceeded, HandshakeTimeout, CALL_REQUEST_TIMEOUT_MS, REQUEST_TIMEOUT, SERVER_NOT_FOUND, ServerNotResolved, HANDSHAKE_SDK_GRACE_MS, NOT_ACTIVATED, SHAPING_VARS, KernelSession;
+var PACLET_KERNEL_ARGS, LOAD_AGENTTOOLS, KERNEL_ARGS, DeadlineExceeded, HandshakeTimeout, SDK_REQUEST_TIMEOUT_MS, DEFAULT_DEADLINE_MS, REQUEST_TIMEOUT, RequestDropped, SERVER_NOT_FOUND, ServerNotResolved, HANDSHAKE_SDK_GRACE_MS, NOT_ACTIVATED, SHAPING_VARS, KernelSession;
 var init_kernel = __esm({
   "dist/kernel.js"() {
     "use strict";
     init_client2();
     init_types();
+    init_config();
     init_transport();
     init_flavour();
     init_inspect();
@@ -17794,8 +17363,17 @@ var init_kernel = __esm({
         this.timeoutMs = timeoutMs;
       }
     };
-    CALL_REQUEST_TIMEOUT_MS = 2 ** 31 - 1;
+    SDK_REQUEST_TIMEOUT_MS = MAX_TIMER_MS;
+    DEFAULT_DEADLINE_MS = 6e4;
     REQUEST_TIMEOUT = ErrorCode.RequestTimeout;
+    RequestDropped = class extends Error {
+      constructor(reason) {
+        super(`the request was cancelled before it reached the kernel (${errorText(reason)})`, {
+          cause: reason
+        });
+        this.name = "RequestDropped";
+      }
+    };
     SERVER_NOT_FOUND = /StartMCPServer::InvalidArguments|MCPServerNotFound|No MCPServerObject found for name/;
     ServerNotResolved = class extends Error {
       constructor(message) {
@@ -17895,14 +17473,14 @@ var init_kernel = __esm({
         const startedAt = Date.now();
         let timer;
         const timeout = new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new HandshakeTimeout(startTimeoutMs)), startTimeoutMs);
+          timer = setTimeout(() => reject(new HandshakeTimeout(startTimeoutMs)), timerDelay(startTimeoutMs));
           timer.unref?.();
         });
         void timeout.catch(() => {
         });
         try {
           await Promise.race([
-            client.connect(transport, { timeout: startTimeoutMs + HANDSHAKE_SDK_GRACE_MS }),
+            client.connect(transport, { timeout: timerDelay(startTimeoutMs + HANDSHAKE_SDK_GRACE_MS) }),
             fatal,
             timeout
           ]);
@@ -17955,16 +17533,28 @@ var init_kernel = __esm({
        * Run `fn` with the kernel guaranteed up, serialized against other work.
        *
        * `deadlineMs` is how long the *caller* will wait, and deliberately not a
-       * timeout on the request: see `#fate`.
+       * timeout on the request: see `#fate`. `fn` is handed the options every
+       * request it sends the kernel must carry, which keep the SDK from ending the
+       * request before that deadline does.
        */
       async run(fn, options = {}) {
         const task = this.#queue.then(async () => {
+          if (options.signal?.aborted)
+            throw new RequestDropped(options.signal.reason);
           this.#clearIdle();
+          const dropIfCancelled = () => {
+            if (!options.signal?.aborted)
+              return;
+            this.#scheduleIdle();
+            throw new RequestDropped(options.signal.reason);
+          };
           await this.#reclaim();
+          dropIfCancelled();
           const client = await this.ensure();
-          const work = fn(client);
+          dropIfCancelled();
+          const work = fn(client, requestOptions(options.signal));
           try {
-            return await this.#awaitWithin(work, options.deadlineMs);
+            return await this.#awaitWithin(work, options.deadlineMs ?? DEFAULT_DEADLINE_MS);
           } catch (err) {
             this.#deciding = this.#fate(work, err, options);
             throw err;
@@ -17989,7 +17579,7 @@ var init_kernel = __esm({
           return work;
         let timer;
         const expiry = new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new DeadlineExceeded(deadlineMs)), deadlineMs);
+          timer = setTimeout(() => reject(new DeadlineExceeded(deadlineMs)), deadlineDelay(deadlineMs));
           timer.unref?.();
         });
         void expiry.catch(() => {
@@ -18017,11 +17607,14 @@ var init_kernel = __esm({
        *    honours it. `notifications/cancelled` cannot: the serial loop will not
        *    read it until the evaluation it would cancel has already finished.
        *  - **The transport is gone.** Nothing to decide; it is already dead.
-       *  - **We stopped waiting** (our deadline, or the SDK's own on an op that
-       *    carries no deadline). The kernel may be working or hung, and there is no
-       *    way to tell — so it is left alone, and the reply it may yet send is
+       *  - **We stopped waiting.** The kernel may be working or hung, and there is
+       *    no way to tell — so it is left alone, and the reply it may yet send is
        *    taken as proof of life. Nobody is waiting for that reply, so the value
        *    is discarded; only the fact of it matters.
+       *  - **The SDK stopped waiting**, which `requestOptions` keeps from happening
+       *    but a library caller's own options can still do. The SDK forgets the
+       *    request, so no reply can prove anything: the kernel is presumed still
+       *    at work, and the next request takes it back.
        *  - **Anything else.** The kernel answered, which means it is alive and now
        *    idle: an unknown tool name, a malformed argument, a failed evaluation.
        *    Keep it. This is the case that used to cost a kernel and its sessions
@@ -18038,8 +17631,12 @@ var init_kernel = __esm({
           }
           if (!this.running)
             return false;
-          if (err instanceof DeadlineExceeded || isRequestTimeout(err)) {
+          if (err instanceof DeadlineExceeded) {
             this.#abandon(work, errorText(err));
+            return true;
+          }
+          if (isRequestTimeout(err)) {
+            this.#abandon(null, errorText(err));
             return true;
           }
           log(`the kernel answered (${errorText(err)}), so it is alive and idle; keeping it`);
@@ -18061,11 +17658,18 @@ var init_kernel = __esm({
        * The seat cannot be leaked this way: the broker exits 60s after its last
        * proxy detaches whatever its kernels are doing, and a private kernel dies
        * with the process it belongs to.
+       *
+       * `null` is work whose reply will never be seen, because the SDK has already
+       * given up on the request: it never settles, so the next request reclaims.
        */
       #abandon(work, reason) {
         const { log } = this.#options;
         const abandoned = { settled: false };
         this.#abandoned = abandoned;
+        if (!work) {
+          log(`the request to the kernel was given up on (${reason}), so its reply will not be seen; presuming the kernel still busy, for the next request to take back`);
+          return;
+        }
         log(`stopped waiting for the kernel (${reason}); leaving it to finish, sessions intact`);
         abandoned.done = work.then(() => {
           abandoned.settled = true;
@@ -18118,7 +17722,7 @@ var init_kernel = __esm({
         this.#idleTimer = setTimeout(() => {
           log(`idle for ${budgetText(idleMs)}, shutting the kernel down`);
           void this.stop();
-        }, idleMs);
+        }, timerDelay(idleMs));
         this.#idleTimer.unref?.();
       }
       async stop() {
@@ -18142,6 +17746,456 @@ var init_kernel = __esm({
           await transport?.close();
         } catch {
         }
+      }
+    };
+  }
+});
+
+// dist/broker-client.js
+var broker_client_exports = {};
+__export(broker_client_exports, {
+  BrokerBackend: () => BrokerBackend,
+  brokerCeilingMs: () => brokerCeilingMs
+});
+import { spawn as spawn2 } from "node:child_process";
+import { closeSync, openSync } from "node:fs";
+import { connect } from "node:net";
+function brokerCeilingMs(op, timeoutMs, startTimeoutMs) {
+  if (timeoutMs === 0)
+    return 0;
+  if (timeoutMs !== void 0)
+    return timeoutMs + REQUEST_GRACE_MS;
+  const start = FROM_KERNEL[op] ? startTimeoutMs : 0;
+  return start + DEFAULT_DEADLINE_MS + REQUEST_GRACE_MS;
+}
+function brokerError(response) {
+  const message = response.error ?? "the Wolfram broker reported an error";
+  if (response.code === void 0)
+    return new Error(message);
+  return new McpError(response.code, bareMcpText(response.code, message), response.data);
+}
+function tryConnect(address) {
+  return new Promise((resolve) => {
+    const socket = connect(address);
+    const fail = () => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(null);
+    };
+    socket.once("connect", () => {
+      socket.removeAllListeners("error");
+      resolve(socket);
+    });
+    socket.once("error", fail);
+  });
+}
+var CONNECT_DEADLINE_MS, CONNECT_RETRY_MS, REQUEST_GRACE_MS, FROM_KERNEL, PING_DEADLINE_MS, delay, BrokerBackend;
+var init_broker_client = __esm({
+  "dist/broker-client.js"() {
+    "use strict";
+    init_types();
+    init_broker_protocol();
+    init_config();
+    init_kernel();
+    init_log();
+    CONNECT_DEADLINE_MS = 5e3;
+    CONNECT_RETRY_MS = 100;
+    REQUEST_GRACE_MS = 2e3;
+    FROM_KERNEL = {
+      capabilities: true,
+      listTools: true,
+      listPrompts: true,
+      getPrompt: true,
+      listResources: true,
+      readResource: true,
+      callTool: true,
+      cancel: false,
+      status: false,
+      hello: false,
+      ping: false,
+      ready: false
+    };
+    PING_DEADLINE_MS = REQUEST_GRACE_MS;
+    delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    BrokerBackend = class _BrokerBackend {
+      kind = "broker";
+      /**
+       * The pid this process spawned as a broker, or null when it only attached.
+       *
+       * A pid rather than a "did we spawn one" flag, because spawning is not
+       * winning: the child can find the address already bound by another session's
+       * broker and stand down, and the retry loop in open() then attaches to the
+       * winner. A flag set on the spawn path called the winner ours; the pid
+       * comparison in spawnedHere() cannot. Not on the wire; a local fact about how
+       * this connection came to be.
+       */
+      #spawnedPid = null;
+      #options;
+      #socket;
+      #nextId = 1;
+      #pending = /* @__PURE__ */ new Map();
+      #progress = /* @__PURE__ */ new Map();
+      /**
+       * Outstanding pings, kept apart from #pending because their contracts differ:
+       * #pending treats `ok: false` as a failure, and a ping treats it as an answer.
+       */
+      #liveness = /* @__PURE__ */ new Map();
+      #onKernelReady;
+      #closed = false;
+      constructor(options, socket) {
+        this.#options = options;
+        this.#socket = socket;
+        this.#attach(socket);
+      }
+      /**
+       * Is the broker answering on this socket the process this backend spawned?
+       *
+       * Only `doctor` asks, and only to keep one line honest: the pool settings —
+       * idle, budget, reserve — belong to whichever session started the broker, so
+       * a run that merely attached cannot report its own as though they were in
+       * force. The caller supplies the pid the broker reports for itself, so the
+       * answer is the two processes agreeing rather than a note taken at connect
+       * time about which path the connection came off.
+       */
+      spawnedHere(brokerPid) {
+        return this.#spawnedPid !== null && this.#spawnedPid === brokerPid;
+      }
+      /**
+       * Attach to a broker only if one is already listening — never start one — for
+       * a caller that asks about sharing rather than shares: `wolfram_status`, which
+       * must start nothing. Same safety check and same verified attach as `open`,
+       * and the same logger, which is where a caller learns why the answer is null.
+       */
+      static async attachIfRunning(options) {
+        const fault = socketFault(options.address);
+        if (fault) {
+          options.log(`not sharing kernels: ${fault}`);
+          return null;
+        }
+        const existing = await tryConnect(options.address);
+        return existing ? _BrokerBackend.#verified(options, existing, null) : null;
+      }
+      /**
+       * Connect to a broker, starting one if necessary.
+       *
+       * @returns a backend, or null when sharing could not be arranged.
+       */
+      static async open(options) {
+        const { address, log } = options;
+        const fault = socketFault(address);
+        if (fault) {
+          log(`not sharing kernels: ${fault}. Using a private kernel instead; sharing resumes when WOLFRAM_MCP_RUNTIME_DIR (or XDG_RUNTIME_DIR) names a directory only you can write to`);
+          return null;
+        }
+        const existing = await tryConnect(address);
+        if (existing)
+          return _BrokerBackend.#verified(options, existing, null);
+        log("no broker listening; starting one");
+        let spawnFailed = null;
+        let spawnedPid = null;
+        let logTarget = "ignore";
+        const logPath = options.spawnEnv["WOLFRAM_MCP_LOG"] ?? process.env["WOLFRAM_MCP_LOG"];
+        if (logPath) {
+          try {
+            logTarget = openSync(logPath, "a");
+          } catch (err) {
+            log(`cannot write broker logs to ${logPath}: ${errorText(err)}`);
+          }
+        }
+        try {
+          const child = spawn2(options.spawnCommand, options.spawnArgs, {
+            detached: true,
+            stdio: ["ignore", logTarget, logTarget],
+            env: options.spawnEnv,
+            windowsHide: true
+          });
+          child.on("error", (err) => {
+            spawnFailed = errorText(err);
+            log(`the broker could not be started: ${spawnFailed}`);
+          });
+          child.unref();
+          spawnedPid = child.pid ?? null;
+        } catch (err) {
+          log(`could not spawn a broker: ${errorText(err)}`);
+          return null;
+        } finally {
+          if (typeof logTarget === "number") {
+            try {
+              closeSync(logTarget);
+            } catch {
+            }
+          }
+        }
+        const deadline = Date.now() + CONNECT_DEADLINE_MS;
+        while (Date.now() < deadline) {
+          await delay(CONNECT_RETRY_MS);
+          if (spawnFailed !== null) {
+            log("the broker never started; using a private kernel instead");
+            return null;
+          }
+          const socket = await tryConnect(address);
+          if (socket)
+            return _BrokerBackend.#verified(options, socket, spawnedPid);
+        }
+        log("a broker did not come up in time; using a private kernel instead");
+        return null;
+      }
+      /**
+       * Build a backend on a connected socket, but only once the process behind it
+       * has answered.
+       *
+       * Accepting a connection is the OS's work, not the broker's: a SIGSTOPped
+       * process, or one blocked in a synchronous call, still has its listen backlog
+       * answered for it. So a socket proves that a broker bound this path once, not
+       * that one is running now — and "the socket accepted me" is exactly what
+       * `attached to the broker` used to mean. A wedged broker was discovered only
+       * by the first real call, which the caller paid for at the full timeout.
+       */
+      static async #verified(options, socket, spawnedPid) {
+        const backend = new _BrokerBackend(options, socket);
+        backend.#spawnedPid = spawnedPid;
+        if (await backend.#answers()) {
+          const refused = await backend.#declare();
+          if (refused === null) {
+            options.log(`attached to the broker at ${options.address} for environment ${options.flavour.digest}`);
+            return backend;
+          }
+          options.log(`the broker will not serve this session's kernel environment (${options.flavour.digest}): ${refused}; using a private kernel instead`);
+          await backend.stop();
+          return null;
+        }
+        options.log(`the broker at ${options.address} accepted a connection but did not answer; using a private kernel instead`);
+        await backend.stop();
+        return null;
+      }
+      /**
+       * Ask the broker whether it is running, and take any answer as yes.
+       *
+       * The `ok` flag is ignored on purpose. A broker started before this op existed
+       * answers `unknown broker op: ping`, and that refusal is still proof the
+       * process is running and reading its socket, which is the entire question.
+       * Reading it as a failure would send every session to a private kernel, and
+       * cost the seat that buys, for as long as an older broker keeps serving — a
+       * minute past the last detach at the very least, and in practice a whole
+       * working session, since a broker serves the code it started with.
+       */
+      #answers() {
+        if (this.#closed || !this.#socket.writable)
+          return Promise.resolve(false);
+        const id = this.#nextId++;
+        return new Promise((resolve) => {
+          const timer = setTimeout(() => {
+            this.#liveness.delete(id);
+            resolve(false);
+          }, PING_DEADLINE_MS);
+          this.#liveness.set(id, (alive) => {
+            clearTimeout(timer);
+            resolve(alive);
+          });
+          this.#socket.write(encodeFrame({ id, op: "ping" }), (err) => {
+            if (err) {
+              this.#liveness.delete(id);
+              clearTimeout(timer);
+              resolve(false);
+            }
+          });
+        });
+      }
+      /**
+       * Tell the broker what this session's kernels must be started with.
+       *
+       * The values travel, not just their digest, because the broker is what starts
+       * the kernel and its own environment belongs to whichever session spawned it.
+       *
+       * A broker that predates this refuses the op, and a refusal is not a failure
+       * of the broker — it is the absence of the one thing needed to share safely,
+       * so it is treated exactly like a rejection.
+       */
+      async #declare() {
+        const { flavour } = this.#options;
+        try {
+          const result = await this.#request("hello", { digest: flavour.digest, env: flavour.env, names: flavour.names }, PING_DEADLINE_MS);
+          return result?.flavours === true ? null : "it did not accept the declaration";
+        } catch (err) {
+          return errorText(err);
+        }
+      }
+      #attach(socket) {
+        socket.setEncoding("utf8");
+        const reader = new FrameReader((raw) => this.#onFrame(raw));
+        socket.on("data", (chunk) => reader.push(chunk));
+        socket.on("close", () => this.#failAll(new Error("the Wolfram broker closed the connection")));
+        socket.on("error", (err) => this.#failAll(err));
+      }
+      #onFrame(frame) {
+        if (isEvent(frame)) {
+          if (frame.event === "shuttingDown") {
+            this.#options.log("the broker is shutting down; will choose again");
+            this.#closed = true;
+            return;
+          }
+          if (frame.event === "progress") {
+            this.#progress.get(frame.target)?.(frame.progress);
+            return;
+          }
+          if (frame.event === "kernelReady") {
+            const { capabilities, tools, prompts } = frame;
+            void this.#onKernelReady?.({
+              capabilities: async () => capabilities,
+              listTools: async (cursor) => cursor ? this.listTools(cursor) : { tools },
+              listPrompts: async (cursor) => cursor ? this.listPrompts(cursor) : { prompts: prompts ?? [] }
+            });
+          }
+          return;
+        }
+        const response = frame;
+        const alive = this.#liveness.get(response.id);
+        if (alive) {
+          this.#liveness.delete(response.id);
+          alive(true);
+          return;
+        }
+        const waiter = this.#pending.get(response.id);
+        if (!waiter)
+          return;
+        this.#pending.delete(response.id);
+        if (response.ok)
+          waiter.resolve(response.result);
+        else
+          waiter.reject(brokerError(response));
+      }
+      #failAll(err) {
+        if (this.#closed)
+          return;
+        this.#closed = true;
+        for (const [, waiter] of this.#pending)
+          waiter.reject(err);
+        this.#pending.clear();
+        for (const [, alive] of this.#liveness)
+          alive(false);
+        this.#liveness.clear();
+      }
+      /** False once the socket is gone or the broker stopped answering. */
+      usable() {
+        return !this.#closed && this.#socket.writable;
+      }
+      #request(op, params, timeoutMs, signal, onprogress) {
+        if (this.#closed || !this.#socket.writable) {
+          return Promise.reject(new Error("the Wolfram broker is not connected"));
+        }
+        const id = this.#nextId++;
+        const sent = timeoutMs === void 0 ? void 0 : deadlineDelay(timeoutMs);
+        const frame = {
+          id,
+          op,
+          ...params === void 0 ? {} : { params },
+          ...sent === void 0 ? {} : { timeoutMs: sent }
+        };
+        const ceiling = brokerCeilingMs(op, sent, this.#options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS);
+        return new Promise((resolve, reject) => {
+          const timer = ceiling === 0 ? void 0 : setTimeout(() => {
+            this.#pending.delete(id);
+            this.#closed = true;
+            reject(new Error(`the Wolfram broker did not answer ${op} within ${ceiling}ms`));
+          }, timerDelay(ceiling));
+          timer?.unref?.();
+          const settle = {
+            resolve: (v) => {
+              clearTimeout(timer);
+              this.#progress.delete(id);
+              resolve(v);
+            },
+            reject: (e) => {
+              clearTimeout(timer);
+              this.#progress.delete(id);
+              reject(e);
+            }
+          };
+          if (signal) {
+            if (signal.aborted) {
+              settle.reject(new Error("the call was cancelled before it was sent"));
+              return;
+            }
+            signal.addEventListener("abort", () => {
+              if (this.#socket.writable) {
+                this.#socket.write(encodeFrame({ id: this.#nextId++, op: "cancel", target: id }));
+              }
+              this.#pending.delete(id);
+              settle.reject(new Error("the call was cancelled"));
+            }, { once: true });
+          }
+          if (onprogress)
+            this.#progress.set(id, onprogress);
+          this.#pending.set(id, settle);
+          this.#socket.write(encodeFrame(frame), (err) => {
+            if (err) {
+              this.#pending.delete(id);
+              settle.reject(err);
+            }
+          });
+        });
+      }
+      onKernelReady(handler) {
+        this.#onKernelReady = handler;
+      }
+      capabilities() {
+        return this.#request("capabilities");
+      }
+      listTools(cursor) {
+        return this.#request("listTools", cursor ? { cursor } : void 0);
+      }
+      listPrompts(cursor) {
+        return this.#request("listPrompts", cursor ? { cursor } : void 0);
+      }
+      getPrompt(params, options) {
+        return this.#request("getPrompt", params, options?.timeoutMs, options?.signal);
+      }
+      listResources(params) {
+        return this.#request("listResources", params);
+      }
+      readResource(params, options) {
+        return this.#request("readResource", params, options?.timeoutMs, options?.signal);
+      }
+      callTool(params, options) {
+        return this.#request("callTool", params, options.timeoutMs, options.signal, options.onprogress);
+      }
+      /**
+       * Wait for the broker's own preparation — reading what its kernels need from
+       * cache — within what the deadline has left. That work is the broker's,
+       * shared with every session attached to it, so the deadline passing stops
+       * only this session's wait; the broker finishes, and
+       * serves whoever asks next.
+       *
+       * Deliberately not a pool request. This was `capabilities`, which queues for
+       * a slot like any work, so a session arriving while every slot held a long
+       * evaluation timed out here and was backed off for ten minutes from a
+       * perfectly healthy broker. Waiting for a
+       * slot is ordinary queueing, bounded by the call's own ceiling; a kernel the
+       * broker starts for it is bounded by the broker's start timeout.
+       */
+      async awaitReady(deadline) {
+        const stage = "waiting for the shared broker to prepare";
+        const remainder = deadline.handOn(stage);
+        try {
+          await deadline.within(stage, this.#request("ready", void 0, remainder));
+        } catch (err) {
+          if (/unknown broker op/.test(errorText(err)))
+            return;
+          throw err;
+        }
+      }
+      /**
+       * Pool and licence state, for `doctor` and `wolfram_status`. The broker
+       * answers from memory, so a caller that must not hang — the status tool is
+       * what you ask when things are stuck — passes a ceiling of its own.
+       */
+      status(timeoutMs) {
+        return this.#request("status", void 0, timeoutMs);
+      }
+      async stop() {
+        this.#closed = true;
+        this.#socket.end();
+        this.#socket.destroy();
       }
     };
   }
@@ -18825,9 +18879,9 @@ async function runDoctor() {
   let code2;
   try {
     const startedAt = Date.now();
-    const result = await session.run(async (client) => {
+    const result = await session.run(async (client, request) => {
       const caps = client.getServerCapabilities() ?? {};
-      const tools = await client.listTools();
+      const tools = await client.listTools(void 0, request);
       return { caps, tools: tools.tools ?? [], info: client.getServerVersion() };
     });
     const elapsed = ((Date.now() - startedAt) / 1e3).toFixed(1);
@@ -18951,6 +19005,7 @@ var PREPARATION_BACKOFF_MS, NOT_RESOLVED_BACKOFF_MS, MIN_START_MS, NOT_RESOLVED_
 var init_prepare = __esm({
   "dist/prepare.js"() {
     "use strict";
+    init_config();
     init_log();
     PREPARATION_BACKOFF_MS = 10 * 6e4;
     NOT_RESOLVED_BACKOFF_MS = 15e3;
@@ -19026,7 +19081,7 @@ var init_prepare = __esm({
           timer = setTimeout(() => {
             expired = true;
             reject(new PreparationTimeout(stage, this.totalMs));
-          }, this.remaining() + graceMs);
+          }, timerDelay(this.remaining() + graceMs));
           timer.unref?.();
           onAbort = () => {
             expired = true;
@@ -19284,33 +19339,38 @@ var init_backend = __esm({
        * complete lists and neither ever returns a `nextCursor`.
        */
       async listTools() {
-        const tools = await this.#session.run((c) => drainPages(async (cursor) => {
-          const page = await c.listTools(cursor ? { cursor } : void 0);
+        const tools = await this.#session.run((c, request) => drainPages(async (cursor) => {
+          const page = await c.listTools(cursor ? { cursor } : void 0, request);
           return { items: page.tools ?? [], nextCursor: page.nextCursor };
         }));
         return { tools };
       }
       async listPrompts() {
-        const prompts = await this.#session.run((c) => drainPages(async (cursor) => {
-          const page = await c.listPrompts(cursor ? { cursor } : void 0);
+        const prompts = await this.#session.run((c, request) => drainPages(async (cursor) => {
+          const page = await c.listPrompts(cursor ? { cursor } : void 0, request);
           return { items: page.prompts ?? [], nextCursor: page.nextCursor };
         }));
         return { prompts };
       }
-      async getPrompt(params) {
-        return this.#session.run((c) => c.getPrompt(params));
+      async getPrompt(params, options) {
+        return this.#session.run((c, request) => c.getPrompt(params, request), {
+          deadlineMs: options?.timeoutMs,
+          signal: options?.signal
+        });
       }
       async listResources(params) {
-        return this.#session.run((c) => c.listResources(params));
+        return this.#session.run((c, request) => c.listResources(params, request));
       }
-      async readResource(params) {
-        return this.#session.run((c) => c.readResource(params));
+      async readResource(params, options) {
+        return this.#session.run((c, request) => c.readResource(params, request), {
+          deadlineMs: options?.timeoutMs,
+          signal: options?.signal
+        });
       }
       async callTool(params, options) {
-        return this.#session.run((c) => c.callTool(params, void 0, {
-          timeout: CALL_REQUEST_TIMEOUT_MS,
-          ...options.signal ? { signal: options.signal } : {},
-          ...options.onprogress ? { onprogress: options.onprogress, resetTimeoutOnProgress: true } : {}
+        return this.#session.run((c, request) => c.callTool(params, void 0, {
+          ...request,
+          ...options.onprogress ? { onprogress: options.onprogress } : {}
         }), { deadlineMs: options.timeoutMs, signal: options.signal });
       }
       async stop() {
@@ -19443,14 +19503,14 @@ The failure was: ${waiting.reason}`);
       async listPrompts(cursor) {
         return (await this.#get()).listPrompts(cursor);
       }
-      async getPrompt(params) {
-        return (await this.#get()).getPrompt(params);
+      async getPrompt(params, options) {
+        return (await this.#get()).getPrompt(params, options);
       }
       async listResources(params) {
         return (await this.#get()).listResources(params);
       }
-      async readResource(params) {
-        return (await this.#get()).readResource(params);
+      async readResource(params, options) {
+        return (await this.#get()).readResource(params, options);
       }
       async callTool(params, options) {
         return (await this.#get()).callTool(params, options);
@@ -19941,7 +20001,7 @@ var init_pool = __esm({
        * Five tiers, and the order is what keeps sharing wide while never serving a
        * session from a kernel that is not its own kind.
        */
-      async #acquire(flavour) {
+      async #acquire(flavour, signal) {
         const mine = (s) => s.flavour.digest === flavour.digest;
         const free = this.#slots.find((s) => !s.busy && !s.session.abandoned && mine(s));
         if (free) {
@@ -19959,7 +20019,17 @@ var init_pool = __esm({
           return spent;
         }
         this.#options.log(`all ${this.#slots.length} kernel(s) busy and budget reached; queueing (${this.#waiters.length + 1} waiting)`);
-        return new Promise((resolve, reject) => this.#waiters.push({ flavour, resolve, reject }));
+        return new Promise((resolve, reject) => {
+          const waiter = { flavour, resolve, reject };
+          this.#waiters.push(waiter);
+          signal?.addEventListener("abort", () => {
+            const at = this.#waiters.indexOf(waiter);
+            if (at === -1)
+              return;
+            this.#waiters.splice(at, 1);
+            reject(new RequestDropped(signal.reason));
+          }, { once: true });
+        });
       }
       #release(slot) {
         slot.busy = false;
@@ -20088,12 +20158,18 @@ var init_pool = __esm({
         const refusal = this.#refusal(flavour);
         if (refusal)
           throw refusal;
-        const slot = await this.#acquire(flavour);
+        if (options.signal?.aborted)
+          throw new RequestDropped(options.signal.reason);
+        const slot = await this.#acquire(flavour, options.signal);
         try {
           const result = await slot.session.run(fn, options);
           this.#release(slot);
           return result;
         } catch (err) {
+          if (err instanceof RequestDropped) {
+            this.#release(slot);
+            throw err;
+          }
           if (isServerNotResolved(err))
             this.#recordUnresolved(flavour.digest, err);
           this.#quarantine(slot, errorText(err));
@@ -20298,6 +20374,9 @@ async function startBroker(options) {
       ...declared,
       names: [.../* @__PURE__ */ new Set([...declared.names, ...declaredNames])]
     };
+    const cancel = EVALUATIONS.has(request.op) ? new AbortController() : null;
+    if (cancel)
+      inFlight.set(request.id, cancel);
     try {
       const pool = await preparing;
       switch (request.op) {
@@ -20309,49 +20388,49 @@ async function startBroker(options) {
         // that never issued page 1. Nothing outside this process ever sees one.
         case "listTools":
           return reply({
-            tools: await pool.run(flavour, (c) => drain(async (cursor) => {
-              const page = await c.listTools(cursor ? { cursor } : void 0);
+            tools: await pool.run(flavour, (c, options2) => drain(async (cursor) => {
+              const page = await c.listTools(cursor ? { cursor } : void 0, options2);
               return { items: page.tools ?? [], nextCursor: page.nextCursor };
             }))
           });
         case "listPrompts":
           return reply({
-            prompts: await pool.run(flavour, (c) => drain(async (cursor) => {
-              const page = await c.listPrompts(cursor ? { cursor } : void 0);
+            prompts: await pool.run(flavour, (c, options2) => drain(async (cursor) => {
+              const page = await c.listPrompts(cursor ? { cursor } : void 0, options2);
               return { items: page.prompts ?? [], nextCursor: page.nextCursor };
             }))
           });
+        // The session's own call ceiling, and its cancel, as for a tool call: a
+        // prompt runs its function in the kernel. Without a ceiling, the kernel
+        // session's default.
         case "getPrompt":
-          return reply(await pool.run(flavour, (c) => c.getPrompt(request.params)));
+          return reply(await pool.run(flavour, (c, options2) => c.getPrompt(request.params, options2), {
+            deadlineMs: request.timeoutMs,
+            signal: cancel?.signal
+          }));
         case "listResources":
-          return reply(await pool.run(flavour, (c) => c.listResources(request.params)));
+          return reply(await pool.run(flavour, (c, options2) => c.listResources(request.params, options2)));
         case "readResource":
-          return reply(await pool.run(flavour, (c) => c.readResource(request.params)));
-        case "callTool": {
-          const controller = new AbortController();
-          inFlight.set(request.id, controller);
-          try {
-            return reply(await pool.run(
-              flavour,
-              (c) => c.callTool(request.params, void 0, {
-                // One that cannot fire first: unset, the SDK's 60 s
-                // default cut every longer call (#34).
-                timeout: CALL_REQUEST_TIMEOUT_MS,
-                signal: controller.signal,
-                onprogress: (progress) => emit({ event: "progress", target: request.id, progress }),
-                // Measured: AgentTools never sends progress, so this only
-                // ever fires for a kernel that is not the real one. Kept
-                // because it costs nothing and the paclet may gain it.
-                resetTimeoutOnProgress: true
-              }),
-              // The deadline belongs to the session, not to the SDK request:
-              // see LocalBackend.callTool.
-              { deadlineMs: request.timeoutMs ?? 3e5, signal: controller.signal }
-            ));
-          } finally {
-            inFlight.delete(request.id);
-          }
-        }
+          return reply(await pool.run(flavour, (c, options2) => c.readResource(request.params, options2), {
+            deadlineMs: request.timeoutMs,
+            signal: cancel?.signal
+          }));
+        case "callTool":
+          return reply(await pool.run(
+            flavour,
+            (c, options2) => c.callTool(request.params, void 0, {
+              // The session's: the signal below, and an SDK timeout that
+              // cannot fire first (#34).
+              ...options2,
+              // Measured: AgentTools never sends progress, so this only
+              // ever fires for a kernel that is not the real one. Kept
+              // because it costs nothing and the paclet may gain it.
+              onprogress: (progress) => emit({ event: "progress", target: request.id, progress })
+            }),
+            // The deadline belongs to the session, not to the SDK request:
+            // see LocalBackend.callTool.
+            { deadlineMs: request.timeoutMs ?? 3e5, signal: cancel?.signal }
+          ));
         case "status":
           return reply({
             kernels: pool.size,
@@ -20369,8 +20448,11 @@ async function startBroker(options) {
         id: request.id,
         ok: false,
         error: errorText(err),
-        ...err instanceof McpError ? { code: err.code } : {}
+        ...err instanceof McpError ? { code: err.code, ...err.data === void 0 ? {} : { data: err.data } } : {}
       };
+    } finally {
+      if (cancel)
+        inFlight.delete(request.id);
     }
   }
   const onConnection = (socket) => {
@@ -20536,7 +20618,7 @@ async function startBroker(options) {
   process.on("SIGTERM", () => void stop().then(() => process.exit(0)));
   return { server, stop };
 }
-var EMPTY_GRACE_MS, MAX_PAGES2, declaredNames, BIND_ATTEMPTS, jitter;
+var EMPTY_GRACE_MS, EVALUATIONS, MAX_PAGES2, declaredNames, BIND_ATTEMPTS, jitter;
 var init_broker_server = __esm({
   "dist/broker-server.js"() {
     "use strict";
@@ -20545,9 +20627,13 @@ var init_broker_server = __esm({
     init_inspect();
     init_broker_protocol();
     init_flavour();
-    init_kernel();
     init_log();
     EMPTY_GRACE_MS = 6e4;
+    EVALUATIONS = /* @__PURE__ */ new Set([
+      "callTool",
+      "getPrompt",
+      "readResource"
+    ]);
     MAX_PAGES2 = 50;
     declaredNames = /* @__PURE__ */ new Set();
     BIND_ATTEMPTS = 4;
@@ -21310,11 +21396,18 @@ function evaluationCeilingMs(configuredMs, args) {
   return Math.min(MAX_TIME_MS, ceiling);
 }
 function relayable(err) {
-  const relayed = new Error(bareMcpText(err.code, err.message));
-  return Object.assign(relayed, {
+  const relayed2 = new Error(bareMcpText(err.code, err.message));
+  return Object.assign(relayed2, {
     code: err.code,
     ...err.data === void 0 ? {} : { data: err.data }
   });
+}
+async function relayed(answer) {
+  try {
+    return await answer;
+  } catch (err) {
+    throw err instanceof McpError ? relayable(err) : err;
+  }
 }
 var STATUS_TOOL = {
   name: "wolfram_status",
@@ -21458,10 +21551,11 @@ function createWolframServer(config2, log, makeBackend) {
   }
   log(`kernel: ${install.bin} (version=${install.version ?? "unknown"}, via ${install.source})`);
   if (config2.callTimeoutMs < KERNEL_TIME_CONSTRAINT_S * 1e3) {
-    log(`call timeout is ${config2.callTimeoutMs / 1e3}s, below the evaluator's default ${KERNEL_TIME_CONSTRAINT_S}s time constraint: this server will stop waiting first, so a slow evaluation is reported here rather than ending in the kernel's own "time constraint exceeded", which says more. The kernel is left running either way`);
+    log(`call timeout is ${config2.callTimeoutMs / 1e3}s, below the evaluator's default ${KERNEL_TIME_CONSTRAINT_S}s time constraint: this server will stop waiting first, so a slow evaluation is reported here rather than ending in the kernel's own "time constraint exceeded", which says more. The kernel is left running either way. Prompts and resource reads wait this same ceiling`);
   }
   log(`profile=${config2.serverName} idle=${config2.idleMs / 6e4}min cache=${usableCache ? "hit" : "miss"}`);
   const backend = makeBackend(install);
+  const fromKernel = (schema, handler) => server.setRequestHandler(schema, (request, extra) => relayed(Promise.resolve(handler(request, extra))));
   let toolCache = usableCache?.tools ?? null;
   let promptCache = usableCache?.prompts ?? null;
   let toolCachedAt = usableCache?.cachedAt ?? null;
@@ -21510,7 +21604,7 @@ function createWolframServer(config2, log, makeBackend) {
     }
   }
   backend.onKernelReady((ops) => reload(ops));
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
+  fromKernel(ListToolsRequestSchema, async () => {
     if (toolCache) {
       log(`tools/list served from cache (${toolCache.length} tools), kernel not started`);
       return { tools: [...toolCache, STATUS_TOOL] };
@@ -21534,13 +21628,13 @@ function createWolframServer(config2, log, makeBackend) {
     try {
       const progressToken = request.params._meta?.progressToken;
       const timeoutMs = evaluationCeilingMs(config2.callTimeoutMs, args);
-      let relayed = Promise.resolve();
+      let relayed2 = Promise.resolve();
       const result = await backend.callTool({ name, arguments: args ?? {} }, {
         timeoutMs,
         signal: extra.signal,
         ...progressToken === void 0 ? {} : {
           onprogress: (progress) => {
-            relayed = relayed.then(() => extra.sendNotification({
+            relayed2 = relayed2.then(() => extra.sendNotification({
               method: "notifications/progress",
               params: { ...progress, progressToken }
             })).catch(() => {
@@ -21548,7 +21642,7 @@ function createWolframServer(config2, log, makeBackend) {
           }
         }
       });
-      await relayed;
+      await relayed2;
       return result;
     } catch (err) {
       if (err instanceof McpError && PROTOCOL_ERRORS.has(err.code)) {
@@ -21563,16 +21657,19 @@ function createWolframServer(config2, log, makeBackend) {
     }
   });
   if (capabilities.prompts) {
-    server.setRequestHandler(ListPromptsRequestSchema, async () => {
+    fromKernel(ListPromptsRequestSchema, async () => {
       if (promptCache)
         return { prompts: promptCache };
       return backend.listPrompts();
     });
-    server.setRequestHandler(GetPromptRequestSchema, async (request) => backend.getPrompt(request.params));
+    fromKernel(GetPromptRequestSchema, async (request, extra) => backend.getPrompt(request.params, { timeoutMs: config2.callTimeoutMs, signal: extra.signal }));
   }
   if (capabilities.resources) {
-    server.setRequestHandler(ListResourcesRequestSchema, async (request) => backend.listResources(request.params));
-    server.setRequestHandler(ReadResourceRequestSchema, async (request) => backend.readResource(request.params));
+    fromKernel(ListResourcesRequestSchema, async (request) => backend.listResources(request.params));
+    fromKernel(ReadResourceRequestSchema, async (request, extra) => backend.readResource(request.params, {
+      timeoutMs: config2.callTimeoutMs,
+      signal: extra.signal
+    }));
   }
   return {
     server,
@@ -21646,7 +21743,8 @@ Environment
                                      failed preparation is not retried for 10
                                      minutes, or until the binary changes
                                      (default: 120)
-  WOLFRAM_MCP_CALL_TIMEOUT_SECONDS   give up on a single evaluation
+  WOLFRAM_MCP_CALL_TIMEOUT_SECONDS   give up on a single evaluation: a tool
+                                     call, a prompt or a resource read
                                      (default: 300)
   WOLFRAM_MCP_CACHE                  0 to always ask a kernel for the tool list
                                      (default: 1)
