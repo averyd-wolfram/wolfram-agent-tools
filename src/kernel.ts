@@ -137,7 +137,10 @@ export interface RunOptions {
    * Unset is `DEFAULT_DEADLINE_MS`; `0` waits as long as the work takes.
    */
   deadlineMs?: number | undefined;
-  /** Fires when the caller cancels, which is the one case that kills a kernel. */
+  /**
+   * Fires when the caller cancels, which is the one case that kills a kernel —
+   * once the kernel has the work, and not before.
+   */
   signal?: AbortSignal | undefined;
 }
 
@@ -483,11 +486,22 @@ export class KernelSession {
     options: RunOptions = {},
   ): Promise<T> {
     const task = this.#queue.then(async () => {
+      // Cancelled while it waited its turn, so the kernel never had it: there
+      // is nothing to stop, and no reason to start one. Sent on, the SDK
+      // refused it unsent and `#fate`, seeing the cancel, stopped a kernel that
+      // had never had the work — or one just started to receive it.
+      options.signal?.throwIfAborted();
       this.#clearIdle();
       // Someone needs the kernel now, so this is the moment abandoned work
       // stops being free to finish.
       await this.#reclaim();
       const client = await this.ensure();
+      if (options.signal?.aborted) {
+        // Cancelled during the start: the same, and the new kernel is kept,
+        // to idle out like any other.
+        this.#scheduleIdle();
+        options.signal.throwIfAborted();
+      }
       const work = fn(client, requestOptions(options.signal));
       try {
         return await this.#awaitWithin(work, options.deadlineMs ?? DEFAULT_DEADLINE_MS);

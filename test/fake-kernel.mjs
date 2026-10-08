@@ -495,40 +495,26 @@ function run() {
           );
         }
       }
-      outstanding++;
-      const answer = () => {
-        outstanding--;
-        if (process.env.FAKE_METHOD_LOG) {
-          appendFileSync(process.env.FAKE_METHOD_LOG, "(replied tools/call)\n");
-        }
-        send({
-          jsonrpc: "2.0",
-          id: msg.id,
-          result: {
-            content: [
-              {
-                type: "text",
-                text:
-                  `evaluated ${JSON.stringify(msg.params.arguments)} server=${serverName}` +
-                  ` base=${process.env.WOLFRAM_BASE ?? "(unset)"}` +
-                  ` userbase=${process.env.WOLFRAM_USERBASE ?? "(unset)"}` +
-                  // AgentTools reads MCP_TOOL_OPTIONS from the environment at
-                  // startup and it is what sets each tool's effective
-                  // TimeConstraint. It reaches the kernel only because kernel.ts
-                  // spreads process.env, so it is reported here to be checked.
-                  ` toolOptions=${process.env.MCP_TOOL_OPTIONS ?? "(unset)"}`,
-              },
-            ],
-          },
-        });
-      };
       // Holding a slot for the length of an evaluation is the normal case, not
       // the exception. A negative delay never answers at all.
       const slow = !delayFirstOnly || callsSeen === 1;
-      if (callDelay < 0 && slow) return;
-      const wait = Math.max(slow ? callDelay : 0, progressDone);
-      if (wait === 0) answer();
-      else setTimeout(answer, wait);
+      const wait = callDelay < 0 && slow ? -1 : Math.max(slow ? callDelay : 0, progressDone);
+      evaluate(msg, wait, () => ({
+        content: [
+          {
+            type: "text",
+            text:
+              `evaluated ${JSON.stringify(msg.params.arguments)} server=${serverName}` +
+              ` base=${process.env.WOLFRAM_BASE ?? "(unset)"}` +
+              ` userbase=${process.env.WOLFRAM_USERBASE ?? "(unset)"}` +
+              // AgentTools reads MCP_TOOL_OPTIONS from the environment at
+              // startup and it is what sets each tool's effective
+              // TimeConstraint. It reaches the kernel only because kernel.ts
+              // spreads process.env, so it is reported here to be checked.
+              ` toolOptions=${process.env.MCP_TOOL_OPTIONS ?? "(unset)"}`,
+          },
+        ],
+      }));
       return;
     }
     if (msg.id !== undefined) {

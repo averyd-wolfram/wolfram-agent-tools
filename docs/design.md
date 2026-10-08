@@ -531,9 +531,14 @@ timeout fire anyway, from a library caller's options, the kernel is presumed bus
 request reclaims it.
 
 The handshake's `initialize` is sent with the start timeout plus a beat, so the handshake's own
-timer, which names the cause, is what fires. What remains on the SDK's minute is the lists a
-kernel-ready hook reads inside a start, where there is no caller to answer and a failure is
-logged and ignored.
+timer, which names the cause, is what fires. What remains on the SDK's minute is the lists the
+kernel-ready hook reads: inside a start, and again outside the queue whenever the kernel says a
+list changed. Neither has a caller to answer, and a failure is logged and ignored.
+
+A cancel stops the kernel only once the kernel has the work. A request cancelled while it
+waited — in the session's queue, the pool's, or a kernel's start — is dropped before it is sent;
+sent on, the SDK refused it unsent, and `#fate`, seeing the cancel, stopped a kernel that never
+had it.
 
 ## Teardown reaps the kernel's descendants
 

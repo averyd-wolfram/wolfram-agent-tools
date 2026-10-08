@@ -19,6 +19,7 @@ import {
   encodeFrame,
   FrameReader,
   type BrokerEvent,
+  type BrokerOp,
   type BrokerRequest,
   type BrokerResponse,
   socketFault,
@@ -29,6 +30,13 @@ import { errorText, type Logger } from "./log.js";
 
 /** How long to linger with no connections before exiting. */
 const EMPTY_GRACE_MS = 60_000;
+
+/** The ops a kernel evaluates, which a `cancel` frame may stop. */
+const EVALUATIONS: ReadonlySet<BrokerOp> = new Set<BrokerOp>([
+  "callTool",
+  "getPrompt",
+  "readResource",
+]);
 const MAX_PAGES = 50;
 
 /** Follow `nextCursor` so a broadcast carries the whole list, not page one. */
@@ -313,18 +321,15 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
       ...declared,
       names: [...new Set([...declared.names, ...declaredNames])],
     };
-    // An evaluation is registered so a later `cancel` frame can reach it. A
-    // kernel that ignores the cancellation still ends up stopped: the rejection
-    // retires it rather than returning it to the pool.
-    const cancellable = async <T>(evaluate: (signal: AbortSignal) => Promise<T>): Promise<T> => {
-      const controller = new AbortController();
-      inFlight.set(request.id, controller);
-      try {
-        return await evaluate(controller.signal);
-      } finally {
-        inFlight.delete(request.id);
-      }
-    };
+    // An evaluation is registered as its frame is read, before anything here
+    // awaits, so a `cancel` frame that follows it can reach it. Registered
+    // after `await preparing`, a cancel read first — in the same chunk, or
+    // while a cold broker was still resolving its licence — found nothing,
+    // and the evaluation ran to its ceiling. A kernel that ignores the
+    // cancellation still ends up stopped: the rejection retires it rather than
+    // returning it to the pool.
+    const cancel = EVALUATIONS.has(request.op) ? new AbortController() : null;
+    if (cancel) inFlight.set(request.id, cancel);
     try {
       // The first request may arrive before the licence is known; it waits here
       // rather than the proxy waiting to attach.
@@ -359,12 +364,10 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
         // session's default.
         case "getPrompt":
           return reply(
-            await cancellable((signal) =>
-              pool.run(flavour, (c, options) => c.getPrompt(request.params as never, options), {
-                deadlineMs: request.timeoutMs,
-                signal,
-              }),
-            ),
+            await pool.run(flavour, (c, options) => c.getPrompt(request.params as never, options), {
+              deadlineMs: request.timeoutMs,
+              signal: cancel?.signal,
+            }),
           );
         case "listResources":
           return reply(
@@ -374,33 +377,33 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
           );
         case "readResource":
           return reply(
-            await cancellable((signal) =>
-              pool.run(flavour, (c, options) => c.readResource(request.params as never, options), {
+            await pool.run(
+              flavour,
+              (c, options) => c.readResource(request.params as never, options),
+              {
                 deadlineMs: request.timeoutMs,
-                signal,
-              }),
+                signal: cancel?.signal,
+              },
             ),
           );
         case "callTool":
           return reply(
-            await cancellable((signal) =>
-              pool.run(
-                flavour,
-                (c, options) =>
-                  c.callTool(request.params as never, undefined, {
-                    // The session's: the signal below, and an SDK timeout that
-                    // cannot fire first (#34).
-                    ...options,
-                    // Measured: AgentTools never sends progress, so this only
-                    // ever fires for a kernel that is not the real one. Kept
-                    // because it costs nothing and the paclet may gain it.
-                    onprogress: (progress) =>
-                      emit({ event: "progress", target: request.id, progress }),
-                  }),
-                // The deadline belongs to the session, not to the SDK request:
-                // see LocalBackend.callTool.
-                { deadlineMs: request.timeoutMs ?? 300_000, signal },
-              ),
+            await pool.run(
+              flavour,
+              (c, options) =>
+                c.callTool(request.params as never, undefined, {
+                  // The session's: the signal below, and an SDK timeout that
+                  // cannot fire first (#34).
+                  ...options,
+                  // Measured: AgentTools never sends progress, so this only
+                  // ever fires for a kernel that is not the real one. Kept
+                  // because it costs nothing and the paclet may gain it.
+                  onprogress: (progress) =>
+                    emit({ event: "progress", target: request.id, progress }),
+                }),
+              // The deadline belongs to the session, not to the SDK request:
+              // see LocalBackend.callTool.
+              { deadlineMs: request.timeoutMs ?? 300_000, signal: cancel?.signal },
             ),
           );
         case "status":
@@ -425,6 +428,8 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
         error: errorText(err),
         ...(err instanceof McpError ? { code: err.code } : {}),
       };
+    } finally {
+      if (cancel) inFlight.delete(request.id);
     }
   }
 
