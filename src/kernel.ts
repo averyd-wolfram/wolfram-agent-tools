@@ -16,7 +16,7 @@ import {
   PromptListChangedNotificationSchema,
   ToolListChangedNotificationSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { MAX_TIMER_MS, timerDelay } from "./config.js";
+import { deadlineDelay, MAX_TIMER_MS, timerDelay } from "./config.js";
 import { FilteringStdioTransport } from "./transport.js";
 import { applyFlavour, type KernelFlavour } from "./flavour.js";
 import { FACTS_EXPRESSION, isFactsLine, parseFacts, type KernelFacts } from "./inspect.js";
@@ -560,7 +560,7 @@ export class KernelSession {
     if (deadlineMs === undefined || deadlineMs <= 0) return work;
     let timer: NodeJS.Timeout | undefined;
     const expiry = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new DeadlineExceeded(deadlineMs)), timerDelay(deadlineMs));
+      timer = setTimeout(() => reject(new DeadlineExceeded(deadlineMs)), deadlineDelay(deadlineMs));
       timer.unref?.();
     });
     void expiry.catch(() => {});

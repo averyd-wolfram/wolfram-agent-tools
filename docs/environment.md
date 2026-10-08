@@ -90,7 +90,7 @@ code, so whoever changes a constant changes its row.
 | `KERNEL_TIME_CONSTRAINT_S` | `60` | `proxy.ts` | The evaluator's own default `TimeConstraint`, which `MCP_TOOL_OPTIONS` may change — used to warn when this server's ceiling is set below it. |
 | `TIME_CONSTRAINT_HEADROOM_MS` | `30_000` | `proxy.ts` | Added to a caller's requested `timeConstraint`, so this server answers after the kernel does and the caller gets the kernel's own words. |
 | `MAX_TIME_MS` | `24 * 86_400_000` | `config.ts` | The longest a time setting, or this server's wait on one call, is held to: Node fires a timer longer than about 24.8 days at once (#15). |
-| `MAX_TIMER_MS` | `2 ** 31 - 1` | `config.ts` | The longest delay a timer holds, which every timer's delay is held to (`timerDelay`), whatever reaches it — an option a library caller builds, a `timeoutMs` off the broker's socket — so none fires at once (#33). A NaN delay, which Node also runs at once, is held to it too. |
+| `MAX_TIMER_MS` | `2 ** 31 - 1` | `config.ts` | The longest delay a timer holds, which every timer's delay is held to (`timerDelay`), whatever reaches it — an option a library caller builds, a `timeoutMs` off the broker's socket — so none fires at once (#33). A NaN delay, which Node also runs at once, is held to it too. A caller's deadline is held to `MAX_TIME_MS` instead (`deadlineDelay`), so it still fires before the SDK's request timeout, which is this. |
 
 ### Sharing and kernel flavours
 
@@ -204,8 +204,9 @@ a value set huge to mean "never" used to do the opposite — every start or call
 or the kernel was shut down after each call (#15). The margin covers the seconds of grace added
 on the way to a timer. To keep a kernel resident, use `0`, not a large idle time. A time that
 reaches a timer some other way — an option a library caller builds, or a call's `timeoutMs`
-read off the broker's socket — is held at the timer itself, to the 24.8 days one can hold, so it
-too means "as long as it can be" rather than firing at once (#33).
+read off the broker's socket — is held at the timer itself, so it too means "as long as it can
+be" rather than firing at once (#33): a caller's deadline to the same 24 days, which keeps it
+inside the SDK's own request timeout, and any other delay to the 24.8 days a timer can hold.
 
 The 10-minute default is not arbitrary. With Poisson arrivals at rate λ and a kernel that
 dies `T` after the last request, `P(cold start) = e^(−λT)` and `P(resident) = 1 − e^(−λT)`,

@@ -91,6 +91,18 @@ export function timerDelay(ms: number): number {
   return Number.isNaN(ms) ? MAX_TIMER_MS : Math.min(ms, MAX_TIMER_MS);
 }
 
+/**
+ * A caller's deadline, held as `timerDelay` holds a delay but to `MAX_TIME_MS`,
+ * so it stays inside every timer outside it: the SDK's request timeout, which
+ * must never fire first (#34), and the broker client's ceiling, which waits the
+ * deadline plus a grace. Held to `MAX_TIMER_MS` like the rest, the deadline tied
+ * the SDK's timer, and the SDK's, armed first, won: it forgot the request, so a
+ * late reply could no longer prove the kernel alive (#67's review).
+ */
+export function deadlineDelay(ms: number): number {
+  return Number.isNaN(ms) ? MAX_TIME_MS : Math.min(ms, MAX_TIME_MS);
+}
+
 /** The units the time settings are given in, for reading and for saying. */
 const SECONDS = { ms: 1000, name: "seconds" };
 const MINUTES = { ms: 60_000, name: "minutes" };

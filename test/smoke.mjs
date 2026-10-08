@@ -4671,6 +4671,43 @@ heading("A time an option or the broker's socket hands a timer is held there too
     } finally {
       await nanSession.stop();
     }
+    // Held, a deadline must still fire before the SDK's own request timeout,
+    // the timer outside it, or the SDK forgets the request and a late reply
+    // can prove nothing. Held to the same 2^31-1 ms, the SDK's timer, armed
+    // first, won the tie. Read off the timers themselves, which both arm.
+    const armed = [];
+    const realSetTimeout = globalThis.setTimeout;
+    const orderMarker = join(home, "starts-deadline-order.log");
+    const ordered = new lib.KernelSession({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 0,
+      startTimeoutMs: 10_000,
+      clientInfo,
+      log: () => {},
+      extraEnv: { FAKE_CALL_DELAY_MS: "100", FAKE_MARKER: orderMarker },
+    });
+    try {
+      await ordered.ensure();
+      globalThis.setTimeout = (fn, ms, ...rest) => {
+        if (ms > 1e9) armed.push(ms);
+        return realSetTimeout(fn, ms, ...rest);
+      };
+      const call = (client, request) =>
+        client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, request);
+      await ordered.run(call, { deadlineMs: huge });
+      await ordered.run(call, { deadlineMs: Number.NaN });
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+      await ordered.stop();
+    }
+    const sdk = Math.max(...armed);
+    const deadlines = armed.filter((ms) => ms < sdk);
+    check(
+      "a held deadline is armed short of the SDK's request timeout, huge or NaN",
+      deadlines.length === 2 && deadlines.every((ms) => ms === lib.MAX_TIME_MS),
+      `armed: ${armed.join(", ")}`,
+    );
     // A preparation's deadline.
     const prepared = await new lib.Deadline(huge)
       .within("waiting", new Promise((r) => setTimeout(() => r("done"), 100)))
