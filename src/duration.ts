@@ -9,7 +9,10 @@
  * minutes, hours and days — with at most two units, the second left out when
  * it is zero: "400ms", "2.4s", "45s", "4m 05s", "2m", "1h 30m", "24d".
  *
- * Only the rounding differs, by purpose, and only in the last unit shown.
+ * Only the rounding differs, by purpose, and only in the last unit shown: a
+ * budget (`budgetText`) and a time that has passed (`elapsedText`) are rounded
+ * down, a wait (`waitText`) up. The two that round alike are named apart so a
+ * call site says which it is, and a wait cannot be said with a budget's rule.
  */
 
 const UNITS = [

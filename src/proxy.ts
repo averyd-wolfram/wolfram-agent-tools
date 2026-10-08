@@ -96,7 +96,7 @@ const KERNEL_TIME_CONSTRAINT_S = 60;
  * paclet's `TimeConstraint` is set in seconds, in `MCP_TOOL_OPTIONS`, so "1m"
  * alone sends someone writing an override off to convert.
  */
-const evaluatorDefault = `${budgetText(KERNEL_TIME_CONSTRAINT_S * 1000)} (TimeConstraint ${KERNEL_TIME_CONSTRAINT_S})`;
+const EVALUATOR_DEFAULT_TEXT = `${budgetText(KERNEL_TIME_CONSTRAINT_S * 1000)} (TimeConstraint ${KERNEL_TIME_CONSTRAINT_S})`;
 
 /** Headroom over a requested time constraint, for transport and framing. */
 const TIME_CONSTRAINT_HEADROOM_MS = 30_000;
@@ -331,7 +331,7 @@ function describeStatus(
     `logs        ${process.env["WOLFRAM_MCP_LOG"] ?? "stderr, captured by your MCP client"}`,
     `timeouts    start ${budgetText(config.startTimeoutMs)}, call ${budgetText(config.callTimeoutMs)}, ` +
       `idle ${idleText(config.idleMs)}`,
-    `evaluation  the evaluator stops itself at ${evaluatorDefault} unless ` +
+    `evaluation  the evaluator stops itself at ${EVALUATOR_DEFAULT_TEXT} unless ` +
       `MCP_TOOL_OPTIONS or a timeConstraint argument says otherwise`,
     `            past the call timeout this server stops waiting but leaves the kernel ` +
       `running, so a long call keeps its session`,
@@ -438,7 +438,7 @@ export function createWolframServer(
   if (config.callTimeoutMs < KERNEL_TIME_CONSTRAINT_S * 1000) {
     log(
       `call timeout is ${budgetText(config.callTimeoutMs)}, below the evaluator's default ` +
-        `${evaluatorDefault} time constraint: this server will stop waiting first, so ` +
+        `time constraint, ${EVALUATOR_DEFAULT_TEXT}: this server will stop waiting first, so ` +
         `a slow evaluation is reported here rather than ending in the kernel's own ` +
         `"time constraint exceeded", which says more. The kernel is left running either way. ` +
         `Prompts and resource reads wait this same ceiling`,

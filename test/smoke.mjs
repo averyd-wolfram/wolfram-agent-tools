@@ -4604,7 +4604,7 @@ heading("Timeouts layer the right way round");
   await new Promise((r) => setTimeout(r, 200));
   check(
     "a ceiling below the evaluator's own default is called out",
-    /call timeout is 30s, below the evaluator's default 1m \(TimeConstraint 60\) time constraint/.test(s.stderr()),
+    /call timeout is 30s, below the evaluator's default time constraint, 1m \(TimeConstraint 60\):/.test(s.stderr()),
     s.stderr().split("\n").filter((l) => /timeout/.test(l)).join(" | ").slice(0, 90),
   );
   await s.client.close();
