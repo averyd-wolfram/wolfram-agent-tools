@@ -5387,7 +5387,10 @@ heading("The bundle is the deliverable, and the suite drives the bundle");
   // this package ever had, so faking it passed a guard left at 18.17 after
   // engines moved to 22.13. process.versions.node is read-only by assignment
   // but redefinable, so a child fakes the version and then imports the entry.
-  const belowFloor = `${floorMajor}.${Number(floorMinor) - 1}.0`;
+  // Just under a major's .0 is the major before it: 24.-1.0 has the floor's
+  // own major, so a guard written as `major < 24` would let it through.
+  const belowFloor =
+    floorMinor === "0" ? `${Number(floorMajor) - 1}.99.0` : `${floorMajor}.${Number(floorMinor) - 1}.0`;
   const underFloor = (file, argv, env = {}) =>
     spawnSync(
       process.execPath,
