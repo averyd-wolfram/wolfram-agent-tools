@@ -38,7 +38,7 @@ import { PKG } from "./version.js";
  * once. An old broker that cannot answer a new op is the lesser problem, and
  * `ping` is built to read that refusal as the proof of life it is.
  */
-export const BROKER_PROTOCOL = 5;
+export const BROKER_PROTOCOL = 6;
 
 /**
  * Longest socket path we will use, leaving room inside the 104-byte
@@ -117,8 +117,9 @@ export interface BrokerResponse {
   /**
    * That error's `data`, when it carried any. Dropped, the same kernel error
    * reached a client with its data privately and without it when shared (#62).
-   * Optional, and read only beside `code`, so peers that differ in it still
-   * understand each other: not a change of shape that `BROKER_PROTOCOL` marks.
+   * A change of shape, so `BROKER_PROTOCOL` moved to 6 with it: the code's own
+   * digest keeps two builds apart, but not when that code cannot be read, and an
+   * older broker met then would drop the data again.
    */
   data?: unknown;
 }
