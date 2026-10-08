@@ -793,10 +793,9 @@ are *traced* in this tree on 2026-10-05 unless marked otherwise.
    schema ajv refuses. Checked through the private path, the broker, a warm cache and `doctor`,
    with the fake emitting both. A schema that is not `type: "object"` still fails the whole list,
    in the SDK's parse rather than ajv, and is non-conformant (#69). *Traced:* AgentTools 2.2.7
-   emits neither — a tool's entry is
-   built from five fixed keys (`createMCPToolData`, `Kernel/Server/Shared.wl`), and its results
-   leave `structuredContent` out on purpose — so `test:custom` cannot pin this until a paclet
-   lets a tool declare an output schema.
+   emits neither — a tool's entry is built from five fixed keys (`createMCPToolData`,
+   `Kernel/Server/Shared.wl`), and its results leave `structuredContent` out on purpose — so
+   `test:custom` cannot pin this until a paclet lets a tool declare an output schema.
 6. **A locked server name for packagers.** *Traced:* the server reads `MCP_SERVER_NAME` first,
    then `WOLFRAM_MCP_SERVER_NAME`, then `WOLFRAM_MCP_DEFAULT_SERVER`; the plugin sets only the
    last, so a user may override it. *Work:* document `MCP_SERVER_NAME` in a package's own
