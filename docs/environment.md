@@ -75,7 +75,7 @@ code, so whoever changes a constant changes its row.
 | `REQUEST_GRACE_MS` | `2_000` | `broker-client.ts` | How long a broker may take *beyond* the call's own ceiling before this side stops waiting. |
 | `PING_DEADLINE_MS` | `REQUEST_GRACE_MS` | `broker-client.ts` | How long a broker gets to say it is running, and to accept this session's kernel environment. |
 | `DEFAULT_DEADLINE_MS` | `60_000` | `kernel.ts`, `broker-client.ts` | How long a caller waits for a kernel request with no ceiling of its own — the tool, prompt and resource lists — once a kernel is up; a tool call, a prompt and a resource read wait the call timeout instead. Shared, the broker may first have to start a kernel, so a session waits the start timeout plus this plus the grace for those (`brokerCeilingMs`); `status`, answered from memory, gets only this plus the grace. It is the minute the MCP SDK gave every request, kept as this server's own deadline: the SDK's forgot the request, so the kernel went on working out of sight and the next request queued behind it (#39). |
-| `SDK_REQUEST_TIMEOUT_MS` | `2 ** 31 - 1` | `kernel.ts` | The MCP SDK's timeout on every request to a kernel: the longest delay a timer holds, so it never fires before this server's deadline, and a late reply still arrives as proof of life. |
+| `SDK_REQUEST_TIMEOUT_MS` | `MAX_TIMER_MS` | `kernel.ts` | The MCP SDK's timeout on every request to a kernel: the longest delay a timer holds, so it never fires before this server's deadline, and a late reply still arrives as proof of life. |
 | `HANDSHAKE_SDK_GRACE_MS` | `1_000` | `kernel.ts` | How far past a start's own handshake timer the MCP SDK's `initialize` timeout is set, so the handshake's timer, which names the cause, is the one that fires. |
 | `EMPTY_GRACE_MS` | `60_000` | `broker-server.ts` | How long a broker keeps running, and keeps its kernels, after its last session detaches. |
 | `BIND_ATTEMPTS` | `4` | `broker-server.ts` | Attempts to claim the socket when several brokers start at once. |
@@ -90,6 +90,7 @@ code, so whoever changes a constant changes its row.
 | `KERNEL_TIME_CONSTRAINT_S` | `60` | `proxy.ts` | The evaluator's own default `TimeConstraint`, which `MCP_TOOL_OPTIONS` may change — used to warn when this server's ceiling is set below it. |
 | `TIME_CONSTRAINT_HEADROOM_MS` | `30_000` | `proxy.ts` | Added to a caller's requested `timeConstraint`, so this server answers after the kernel does and the caller gets the kernel's own words. |
 | `MAX_TIME_MS` | `24 * 86_400_000` | `config.ts` | The longest a time setting, or this server's wait on one call, is held to: Node fires a timer longer than about 24.8 days at once (#15). |
+| `MAX_TIMER_MS` | `2 ** 31 - 1` | `config.ts` | The longest delay a timer holds, which every timer's delay is held to (`timerDelay`), whatever reaches it — an option a library caller builds, a `timeoutMs` off the broker's socket — so none fires at once (#33). A NaN delay, which Node also runs at once, is held to it too. |
 
 ### Sharing and kernel flavours
 

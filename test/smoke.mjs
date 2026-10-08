@@ -4646,6 +4646,31 @@ heading("A time an option or the broker's socket hands a timer is held there too
     } finally {
       await session.stop();
     }
+    // NaN, which Node also runs as 1 ms, and which a `<= 0` guard lets through:
+    // an option computed from a setting that was never there.
+    const nanMarker = join(home, "starts-nan-options.log");
+    const nanSession = new lib.KernelSession({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: Number.NaN,
+      startTimeoutMs: 10_000,
+      clientInfo,
+      log: () => {},
+      extraEnv: { FAKE_CALL_DELAY_MS: "300", FAKE_MARKER: nanMarker },
+    });
+    try {
+      const call = (client, request) =>
+        client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, request);
+      const answered = await nanSession.run(call, { deadlineMs: Number.NaN }).then(answeredByFake, (err) => err.message);
+      await new Promise((r) => setTimeout(r, 200));
+      check(
+        "and one given NaN for its deadline and idle time answers, and keeps its kernel, as for a huge one",
+        answered === true && nanSession.running && starts(nanMarker) === 1,
+        `answered=${answered}; running=${nanSession.running}`,
+      );
+    } finally {
+      await nanSession.stop();
+    }
     // A preparation's deadline.
     const prepared = await new lib.Deadline(huge)
       .within("waiting", new Promise((r) => setTimeout(() => r("done"), 100)))
