@@ -110,12 +110,34 @@ in `docs/design.md`.
     brokers in one process. The suite now fails if anything ends it early. `onBound`, a broker
     option for the suite like `DeferredOptions.clock`, lets a check replace the address the
     moment a broker binds. It shows the broker never takes that socket for its own.
+    A fourth `/code-review high` round (2026-10-08, on `3ccb28f`) found nine things. Four were
+    #73's own and are fixed, each with a check that failed first:
+    - The staging name is random, never cleared first. Two containers can run a broker as the
+      same pid in a shared directory.
+    - A server left open on the way out is unreferenced, so a library caller's process can exit.
+    - `stop()` says again when it leaves the address alone.
+    - The `onBound` check passes only when the other broker answered.
+
+    `addressIsFree` is the claim's shared probe-and-clear step. Three over-long-address
+    findings are `main`'s behaviour and went to #74: a graceful close leaves the truncated
+    socket, the truncation can land outside the checked directory (security), and the
+    100-byte fallback runs on macOS, which binds in full and there has #32's capture race.
+    One became #75.
   - **Release PR #72** is in the milestone.
-  - **Filed from the reviews, all `needs design`:** #69 (a non-object schema still fails the
-    whole list, in zod), #70 (the lists read after a kernel start keep the SDK's 60 s timeout),
-    and #74. #74 was measured in #73's CI: on Node 26 (Linux) an over-long broker address gets
-    `listen EINVAL`, so no broker, and each session waits 5 s before going private. `main` binds
-    the same way. Node 22 truncates the path and shares.
+  - **Filed from the reviews:**
+    - **#69** (`needs design`): a non-object schema still fails the whole list, in zod.
+    - **#70** (`needs design`): the lists read after a kernel start keep the SDK's 60 s
+      timeout.
+    - **#74** (`needs design`), measured in #73's CI. On Node 26 (Linux), an over-long broker
+      address gets `listen EINVAL`, so there is no broker, and each session waits 5 s before
+      going private. Node 22 truncates the path and shares. `main` binds the same way. Its
+      comment from #73's fourth round adds the graceful-close, security and macOS findings
+      above.
+    - **#75** (`bug`): a call in flight when its broker stops waits out its whole ceiling, and
+      forever with none. The cause is `shuttingDown` setting `#closed`, after which `#failAll`
+      skips the pending waiters. It is reproduced on `main`'s client through SIGTERM, and
+      #73's retire path is a second way in. The fix is small and needs no design. Whether it
+      rides in 0.1.5 is the maintainer's call.
 - **The backlog is GitHub issues** (`gh issue list`), labelled by type, `needs design` and area
   (*Working here* below). Other agents file there too, notably the downstream plugin's.
 - **The release pipeline versions itself** from the commit types on `main`. `docs/releasing.md`
@@ -126,9 +148,11 @@ in `docs/design.md`.
 ## What to do next, in order
 
 1. **Finish 0.1.5** (milestone `0.1.5`).
-   - **#73**: once CI passes on its head, comment `@codex review`, answer anything Codex finds,
-     and ask the maintainer to approve the merge. If `main` moved meanwhile, run the suite on the
-     combination first.
+   - **#73**: its fourth review round is answered (above). Once CI passes on its head, comment
+     `@codex review`, answer anything Codex finds, and ask the maintainer to approve the
+     merge. If `main` moved meanwhile, run the suite on the combination first.
+   - **#75**, if the maintainer wants it in 0.1.5: give it the milestone, then fix it with the
+     suite section its issue describes.
    - **Release PR #72**: merge it once its changelog lists #68, #71 and #73.
    - **Then verify the release as 0.1.4 was**: `v0.1.5` is Latest, `release` has moved and is
      tagged `wolfram--v0.1.5`, and the assets fetched through `releases/latest/download/…`
@@ -174,7 +198,9 @@ in `docs/design.md`.
    60 s timeout, which forgets the request) belongs with #12 and #16: a refresh isn't a caller,
    so who waits on it has to be decided first. #74 (Node 26 refuses an over-long socket path,
    so a deep runtime directory gets no broker) wants a choice between going private at once, a
-   short path that resolves to the directory, and Linux's abstract namespace. #29 (how to hear of the next advisory against what
+   short path that resolves to the directory, and Linux's abstract namespace. Since #73's
+   fourth round it also holds a security finding: a truncated socket can land in a
+   world-writable ancestor of the checked directory, so it should come early in item 4. #29 (how to hear of the next advisory against what
    the bundle inlines) needs a design too; an audit gate tried in #27 was reverted. Smaller,
    from 0.1.2's reviews: #38 (durations read three ways) is fixed in #71, and #33 and #35
    shipped in 0.1.4. From #37's review: #40 (tighten #37's long-call check), whose third point is
