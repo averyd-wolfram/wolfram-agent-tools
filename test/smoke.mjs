@@ -1132,6 +1132,13 @@ heading("End to end — idle shutdown");
   await client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "3+3" } });
   await new Promise((r) => setTimeout(r, 2500));
   check("the kernel is shut down when idle", stderr().includes("shutting the kernel down"));
+  // Said as every duration is: the startup line divided by a minute and read
+  // "idle=0.02min" (#38).
+  check(
+    "and the log says the idle time as it was set, once at start and once at shutdown",
+    /idle=1\.2s /.test(stderr()) && /idle for 1\.2s, shutting the kernel down/.test(stderr()),
+    stderr().split("\n").filter((l) => /idle/.test(l)).join(" | ").slice(0, 160),
+  );
 
   const before = startCount();
   const again = await client.callTool({
@@ -3252,10 +3259,12 @@ heading("Regression — a wedged broker cannot outlive the call timeout");
 
   const startedAt = Date.now();
   let settled;
+  let frozenText = "";
   try {
     const r = await s.client.callTool(
       { name: "WolframLanguageEvaluator", arguments: { code: "3+3" } }, undefined, { timeout: 15_000 });
     settled = r.isError ? "isError" : "ok";
+    frozenText = r.content?.[0]?.text ?? "";
   } catch {
     settled = "threw";
   }
@@ -3264,6 +3273,13 @@ heading("Regression — a wedged broker cannot outlive the call timeout");
     "a call against a frozen broker fails near its own timeout",
     settled === "isError" && elapsed < 8000,
     `${settled} after ${elapsed}ms, timeout was 2000ms`,
+  );
+  // The call's 2s and the broker client's 2s of grace, said as the private
+  // path says a time: it read "within 4000ms" (#38).
+  check(
+    "and says how long it waited as the private path would",
+    /did not answer callTool within 4s\b/.test(frozenText),
+    frozenText.replace(/\s+/g, " ").slice(0, 100),
   );
   signalOwnBrokers("SIGKILL");
   await s.client.close();
@@ -4434,7 +4450,7 @@ heading("Discovery spends no seat; doctor is the only route to wolframscript");
     });
     check(
       "the session-start status labels its facts as cached, with their age",
-      /Cached from a kernel \d+ min ago, not checked this session/.test(hook.stdout) &&
+      /Cached from a kernel \d+(\.\d)?(ms|s|m|h|d)( \d\d[smh])? ago, not checked this session/.test(hook.stdout) &&
         /Tool list cached/.test(hook.stdout) &&
         startCount() === before + 1,
       hook.stdout.trim().split("\n").slice(1).join(" | ").slice(0, 110),
@@ -4588,7 +4604,7 @@ heading("Timeouts layer the right way round");
   await new Promise((r) => setTimeout(r, 200));
   check(
     "a ceiling below the evaluator's own default is called out",
-    /below the evaluator's default 60s time constraint/.test(s.stderr()),
+    /call timeout is 30s, below the evaluator's default time constraint, 1m \(TimeConstraint 60\):/.test(s.stderr()),
     s.stderr().split("\n").filter((l) => /timeout/.test(l)).join(" | ").slice(0, 90),
   );
   await s.client.close();
@@ -5158,7 +5174,7 @@ heading("Preparation has one deadline, and names the stage it ran out in");
     const text = again.content?.[0]?.text ?? "";
     check(
       "the next call fails at once, saying how long is left",
-      again.isError === true && elapsed < 1_000 && /retried in \d+m \d\ds/.test(text),
+      again.isError === true && elapsed < 1_000 && /retried in \d+m\b/.test(text),
       `${elapsed}ms: ${text.slice(0, 110)}`,
     );
     const status = await s.client.callTool({ name: "wolfram_status", arguments: {} });
@@ -5296,7 +5312,7 @@ heading("Preparation has one deadline, and names the stage it ran out in");
     const during = await outcome();
     check(
       "during the window, no attempt is made",
-      attempts === 1 && /retried in 10m 00s/.test(during),
+      attempts === 1 && /retried in 10m(?! \d)/.test(during),
       `${attempts} attempt(s): ${during.slice(0, 80)}`,
     );
     now += 600_001;
@@ -5409,7 +5425,7 @@ heading("A start that runs out says what it had, in sentences");
   check(
     "budgets read as given — 2.4s, not 2s or 3s — other errors' words are kept as written, and check() says before",
     said2499.includes("not ready within 2.4s") &&
-      new lib.PreparationTimeout("x", 120_000).message.includes("within 120s") &&
+      new lib.PreparationTimeout("x", 120_000).message.includes("within 2m (") &&
       wrapped.endsWith("starting the kernel. spawn wolfram ENOENT") &&
       checked.includes("time ran out before starting the kernel"),
     `${said2499.slice(0, 50)} | ${wrapped.slice(-50)} | ${checked.slice(60, 120)}`,
@@ -5430,6 +5446,100 @@ heading("A start that runs out says what it had, in sentences");
       /time ran out before starting the kernel\. 1ms were left, too little for this to begin/.test(refused.message) &&
       refused.stage === "starting the kernel",
     refused?.message ?? String(refused),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// One duration read three ways (#38): the private path said "within 2.4s", the
+// broker client "within 302000ms", wolfram_status and doctor a setting divided
+// by a thousand, so a call timeout held to 24 days (#28) read "call 2073600s",
+// and the back-off "4m 05s", rounded the other way. Now one formatter, whose
+// unit fits the size and whose rounding fits the purpose: a budget is never
+// overstated, a wait never understated.
+heading("A duration reads one way on every path, rounded for what it is");
+{
+  const table = (fn, cases) =>
+    cases.map(([ms, want]) => [ms, want, typeof fn === "function" ? fn(ms) : "(not exported)"]);
+  const budgets = table(lib.budgetText, [
+    [400, "400ms"],
+    [999.9, "999ms"],
+    [2_499, "2.4s"],
+    [9_999, "9.9s"],
+    [45_900, "45s"],
+    [120_000, "2m"],
+    [245_900, "4m 05s"],
+    [3_600_000, "1h"],
+    [5_459_999, "1h 30m"],
+    [2_073_600_000, "24d"],
+    [0, "0ms"],
+  ]);
+  const waits = table(lib.waitText, [
+    [400.2, "401ms"],
+    [999.5, "1s"],
+    [2_401, "2.5s"],
+    [9_950, "10s"],
+    [59_000.5, "1m"],
+    [244_100, "4m 05s"],
+    [600_000, "10m"],
+    [3_599_001, "1h"],
+    [5_400_001, "1h 31m"],
+  ]);
+  const wrong = (rows) =>
+    rows
+      .filter(([, want, got]) => want !== got)
+      .map(([ms, want, got]) => `${ms}: ${got}, not ${want}`)
+      .join("; ");
+  check("a budget is said in units that fit it, rounded down", wrong(budgets) === "", wrong(budgets));
+  check("a wait is said the same way, rounded up", wrong(waits) === "", wrong(waits));
+  // And a time that has passed, which had three wordings of its own ("5 min
+  // ago", "5 h ago", "ready in 2.4s") and was said by the wait rule in a
+  // back-off's "failed … ago": rounded down, so never longer than it was.
+  const elapsed = table(lib.elapsedText, [
+    [9_910, "9.9s"],
+    [299_999, "4m 59s"],
+    [18_720_000, "5h 12m"],
+  ]);
+  check("and so is a time that has passed, rounded down", wrong(elapsed) === "", wrong(elapsed));
+
+  // The settings, as the two places a stuck user reads them say them.
+  const settings = {
+    WOLFRAM_MCP_START_TIMEOUT_SECONDS: "90",
+    WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "86400",
+    WOLFRAM_MCP_IDLE_MINUTES: "90",
+  };
+  const s = await connect(settings);
+  const status = (await s.client.callTool({ name: "wolfram_status", arguments: {} })).content?.[0]?.text ?? "";
+  await s.client.close();
+  check(
+    "wolfram_status says each timeout in units that fit it",
+    /timeouts\s+start 1m 30s, call 1d, idle 1h 30m\n/.test(`${status}\n`),
+    status.split("\n").find((l) => l.startsWith("timeouts")),
+  );
+  // The evaluator's own limit too, beside the number a user would write: its
+  // TimeConstraint is set in seconds, in MCP_TOOL_OPTIONS.
+  check(
+    "and the evaluator's limit with the TimeConstraint that sets it",
+    /evaluation\s+the evaluator stops itself at 1m \(TimeConstraint 60\) unless/.test(status),
+    status.split("\n").find((l) => l.startsWith("evaluation")),
+  );
+  const doctorSaid = spawnSync(process.execPath, [entry, "doctor"], {
+    encoding: "utf8",
+    env: {
+      PATH: process.env.PATH,
+      HOME: home,
+      XDG_CACHE_HOME: process.env.XDG_CACHE_HOME,
+      WOLFRAM_MCP_KERNEL: fakeKernel,
+      MCP_SERVER_NAME: "WolframLanguage",
+      WOLFRAM_MCP_SHARE: "0",
+      ...settings,
+    },
+  }).stdout;
+  const doctorLines = doctorSaid.split("\n").filter((l) => /idle shutdown|start timeout|call timeout/.test(l));
+  check(
+    "and so does doctor",
+    doctorLines.map((l) => l.trim().replace(/\s+/g, " ")).join("; ") ===
+      "idle shutdown 1h 30m; start timeout 1m 30s; call timeout 1d",
+    doctorLines.map((l) => l.trim()).join(" | "),
   );
 }
 

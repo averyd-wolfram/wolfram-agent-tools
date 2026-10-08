@@ -42,6 +42,7 @@ import {
 } from "./broker-protocol.js";
 import { deadlineDelay, DEFAULT_START_TIMEOUT_MS, timerDelay } from "./config.js";
 import type { KernelFlavour } from "./flavour.js";
+import { budgetText } from "./duration.js";
 import { DEFAULT_DEADLINE_MS } from "./kernel.js";
 import { bareMcpText, errorText, type Logger } from "./log.js";
 import type { Deadline } from "./prepare.js";
@@ -571,7 +572,9 @@ export class BrokerBackend implements KernelBackend {
               // A broker that has stopped answering is not coming back for this
               // session: give up on it so the next call can choose again.
               this.#closed = true;
-              reject(new Error(`the Wolfram broker did not answer ${op} within ${ceiling}ms`));
+              reject(
+                new Error(`the Wolfram broker did not answer ${op} within ${budgetText(ceiling)}`),
+              );
             }, timerDelay(ceiling));
       timer?.unref?.();
       const settle = {

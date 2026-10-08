@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { cacheKey, capabilityFile, readCache } from "./cache.js";
 import { loadConfig, MCP_SERVERS } from "./config.js";
+import { budgetText, elapsedText, idleText } from "./duration.js";
 import { installationEnv, readFacts, recordFacts, type KernelFacts } from "./inspect.js";
 import { KernelSession, listAllTools } from "./kernel.js";
 import {
@@ -79,12 +80,7 @@ export function sessionStatus(now: number = Date.now()): string {
       `looks further and says what is missing.`
     );
   }
-  const age = (at: number) => {
-    const minutes = Math.round((now - at) / 60_000);
-    if (minutes < 60) return `${minutes} min ago`;
-    const hours = Math.round(minutes / 60);
-    return hours < 48 ? `${hours} h ago` : `${Math.round(hours / 24)} days ago`;
-  };
+  const age = (at: number) => `${elapsedText(now - at)} ago`;
   const lines = [
     `Wolfram plugin: kernel ${install.version ?? "of unknown version"} at ${install.bin}, ` +
       `server ${config.serverName}.`,
@@ -192,9 +188,9 @@ export async function runDoctor(): Promise<number> {
     `  serverName            ${config.serverName}   (valid: ${Object.keys(MCP_SERVERS).join(", ")})`,
   );
   out(`  minimum version    ${config.minVersion}`);
-  out(`  idle shutdown      ${config.idleMs > 0 ? `${config.idleMs / 60_000} min` : "disabled"}`);
-  out(`  start timeout      ${config.startTimeoutMs / 1000}s`);
-  out(`  call timeout       ${config.callTimeoutMs / 1000}s`);
+  out(`  idle shutdown      ${idleText(config.idleMs)}`);
+  out(`  start timeout      ${budgetText(config.startTimeoutMs)}`);
+  out(`  call timeout       ${budgetText(config.callTimeoutMs)}`);
   out(`  tools/list cache   ${config.cacheEnabled ? "enabled" : "disabled"}`);
   const set = CONFIG_VARS.filter((name) => process.env[name]);
   out(`  environment        ${set.length ? set.join(", ") : "(nothing set, using defaults)"}`);
@@ -375,9 +371,9 @@ export async function runDoctor(): Promise<number> {
       const tools = await listAllTools(client, request);
       return { caps, tools, info: client.getServerVersion() };
     });
-    const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+    const elapsed = elapsedText(Date.now() - startedAt);
     out();
-    out(`  ok, ${elapsed}s`);
+    out(`  ok, ${elapsed}`);
     out(`  upstream      ${result.info?.name ?? "?"} ${result.info?.version ?? ""}`.trimEnd());
     out(`  capabilities  ${Object.keys(result.caps).join(", ") || "(none)"}`);
     out(`  tools         ${result.tools.map((tool) => tool.name).join(", ") || "(none)"}`);

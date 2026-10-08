@@ -34,7 +34,6 @@ import {
   Backoff,
   candidateIdentity,
   Deadline,
-  formatWait,
   MIN_START_MS,
   NOT_RESOLVED_ADVICE,
   NOT_RESOLVED_BACKOFF_MS,
@@ -51,6 +50,7 @@ import {
   KernelSession,
   listAllTools,
 } from "./kernel.js";
+import { elapsedText, waitText } from "./duration.js";
 import type { KernelInstall } from "./locate.js";
 import { errorText, type Logger } from "./log.js";
 import { PKG } from "./version.js";
@@ -371,8 +371,8 @@ export class DeferredBackend implements KernelBackend {
     if (waiting) {
       throw new Error(
         `the last attempt to prepare a Wolfram kernel failed ` +
-          `${formatWait(this.#clock() - waiting.failedAt)} ago, so this one was not made. ` +
-          `It is retried in ${formatWait(waiting.remainingMs)}` +
+          `${elapsedText(this.#clock() - waiting.failedAt)} ago, so this one was not made. ` +
+          `It is retried in ${waitText(waiting.remainingMs)}` +
           (waiting.advice
             ? `; ${waiting.advice}.`
             : `, or as soon as the installation changes. For a full report, run ${doctorCommand()}.`) +
@@ -407,7 +407,7 @@ export class DeferredBackend implements KernelBackend {
           unresolved ? NOT_RESOLVED_ADVICE : undefined,
         );
         this.#log?.(
-          `preparation failed; not retrying for ${formatWait(this.#backoffWindow())}: ${errorText(err)}`,
+          `preparation failed; not retrying for ${waitText(this.#backoffWindow())}: ${errorText(err)}`,
         );
         throw err;
       },
