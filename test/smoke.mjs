@@ -4412,6 +4412,97 @@ heading("Timeouts layer the right way round");
 }
 
 // ---------------------------------------------------------------------------
+// A numeric setting was read with parseFloat or parseInt, which take a leading
+// number and drop whatever follows, so one written with a unit was misread and
+// nothing said so: WOLFRAM_MCP_IDLE_MINUTES=24h meant 24 minutes, a call
+// timeout of 30m meant 30 seconds, a licence limit of 4x meant 4 (#35). A value
+// that is not a plain number is ignored now, with a line naming it and what is
+// used instead; a plain one, written however JavaScript reads numbers, is kept.
+heading("A numeric setting that is not a plain number is ignored, and the log says so");
+{
+  const names = [
+    "WOLFRAM_MCP_IDLE_MINUTES",
+    "WOLFRAM_IDLE_MINUTES",
+    "WOLFRAM_MCP_START_TIMEOUT_SECONDS",
+    "WOLFRAM_START_TIMEOUT_SECONDS",
+    "WOLFRAM_MCP_CALL_TIMEOUT_SECONDS",
+    "WOLFRAM_CALL_TIMEOUT_SECONDS",
+    "WOLFRAM_MCP_RESERVE_SEATS",
+    "WOLFRAM_MCP_MAX_KERNELS",
+    "WOLFRAM_MCP_LICENSE_LIMIT",
+  ];
+  const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  const loadWith = (env) => {
+    const said = [];
+    try {
+      for (const name of names) delete process.env[name];
+      Object.assign(process.env, env);
+      return { config: lib.loadConfig((message) => said.push(message)), said };
+    } finally {
+      for (const name of names) {
+        if (saved[name] === undefined) delete process.env[name];
+        else process.env[name] = saved[name];
+      }
+    }
+  };
+  const defaults = loadWith({}).config;
+  const units = loadWith({
+    WOLFRAM_MCP_IDLE_MINUTES: "24h",
+    WOLFRAM_MCP_START_TIMEOUT_SECONDS: "2m",
+    WOLFRAM_CALL_TIMEOUT_SECONDS: "30m",
+    WOLFRAM_MCP_RESERVE_SEATS: "2x",
+    WOLFRAM_MCP_MAX_KERNELS: "3 kernels",
+    WOLFRAM_MCP_LICENSE_LIMIT: "4x",
+  });
+  const read = units.config;
+  check(
+    "each is ignored for its default",
+    read.idleMs === defaults.idleMs &&
+      read.startTimeoutMs === defaults.startTimeoutMs &&
+      read.callTimeoutMs === defaults.callTimeoutMs &&
+      read.reserveSeats === defaults.reserveSeats &&
+      read.maxKernels === undefined &&
+      read.licenseLimit === undefined,
+    `idle=${read.idleMs} start=${read.startTimeoutMs} call=${read.callTimeoutMs} reserve=${read.reserveSeats} max=${read.maxKernels} licence=${read.licenseLimit}`,
+  );
+  const named = (name, raw) => units.said.some((line) => line.startsWith(`ignoring ${name}="${raw}"`));
+  check(
+    "and the log names each, by the variable that was set",
+    named("WOLFRAM_MCP_IDLE_MINUTES", "24h") &&
+      named("WOLFRAM_MCP_START_TIMEOUT_SECONDS", "2m") &&
+      named("WOLFRAM_CALL_TIMEOUT_SECONDS", "30m") &&
+      named("WOLFRAM_MCP_RESERVE_SEATS", "2x") &&
+      named("WOLFRAM_MCP_MAX_KERNELS", "3 kernels") &&
+      named("WOLFRAM_MCP_LICENSE_LIMIT", "4x"),
+    units.said.join(" | ").slice(0, 240),
+  );
+  check(
+    "saying what is used instead",
+    units.said.some((line) => /^ignoring WOLFRAM_CALL_TIMEOUT_SECONDS="30m": .*using 300 seconds/.test(line)),
+    units.said.find((line) => line.includes("CALL_TIMEOUT")) ?? "(no line)",
+  );
+  const plain = loadWith({
+    WOLFRAM_MCP_IDLE_MINUTES: "1.5",
+    WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "1e2",
+    WOLFRAM_MCP_START_TIMEOUT_SECONDS: "0",
+    WOLFRAM_MCP_RESERVE_SEATS: "2",
+    WOLFRAM_MCP_MAX_KERNELS: "3",
+    WOLFRAM_MCP_LICENSE_LIMIT: "unlimited",
+  });
+  check(
+    "a plain number, decimal or exponent, is read as before, and says nothing",
+    plain.config.idleMs === 90_000 &&
+      plain.config.callTimeoutMs === 100_000 &&
+      plain.config.startTimeoutMs === 0 &&
+      plain.config.reserveSeats === 2 &&
+      plain.config.maxKernels === 3 &&
+      plain.config.licenseLimit === "unlimited" &&
+      !plain.said.some((line) => line.startsWith("ignoring")),
+    `idle=${plain.config.idleMs} call=${plain.config.callTimeoutMs} max=${plain.config.maxKernels} | ${plain.said.join(" | ").slice(0, 120)}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Node keeps a timer's delay in a signed 32-bit integer, and fires one longer
 // than 2^31-1 ms, about 24.8 days, after 1 ms instead. So a time setting made
 // huge to mean "never" did the opposite: every start failed at once, every

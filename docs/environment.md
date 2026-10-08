@@ -203,6 +203,11 @@ a value set huge to mean "never" used to do the opposite — every start or call
 or the kernel was shut down after each call (#15). The margin covers the seconds of grace added
 on the way to a timer. To keep a kernel resident, use `0`, not a large idle time.
 
+No setting reads a unit. A value that is not a plain number — `30m`, `24h`, or `4x` for a
+licence limit — is ignored, with a log line naming it and what is used instead. Read as a
+leading number, a call timeout of `30m` used to mean 30 seconds, silently (#35). This holds for
+every number on this page.
+
 The 10-minute default is not arbitrary. With Poisson arrivals at rate λ and a kernel that
 dies `T` after the last request, `P(cold start) = e^(−λT)` and `P(resident) = 1 − e^(−λT)`,
 which sum to exactly 1 — so fixing your cold-start rate fixes residency, at any traffic
