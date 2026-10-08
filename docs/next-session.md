@@ -107,11 +107,15 @@ in `docs/design.md`.
     close unlinked a successor's socket. Now a broker binds under `.b<pid>-<n>`, links it into
     place and watches its address. It binds at the address directly when it can't link, as for
     an over-long address on Linux. It also fixes the umask and the empty-grace timer for two
-    brokers in one process. The suite now fails if anything ends it early.
+    brokers in one process. The suite now fails if anything ends it early. `onBound`, a broker
+    option for the suite like `DeferredOptions.clock`, lets a check replace the address the
+    moment a broker binds. It shows the broker never takes that socket for its own.
   - **Release PR #72** is in the milestone.
-  - **Filed from the reviews, both `needs design`:** #69 (a non-object schema still fails the
-    whole list, in zod) and #70 (the lists read after a kernel start keep the SDK's 60 s
-    timeout).
+  - **Filed from the reviews, all `needs design`:** #69 (a non-object schema still fails the
+    whole list, in zod), #70 (the lists read after a kernel start keep the SDK's 60 s timeout),
+    and #74. #74 was measured in #73's CI: on Node 26 (Linux) an over-long broker address gets
+    `listen EINVAL`, so no broker, and each session waits 5 s before going private. `main` binds
+    the same way. Node 22 truncates the path and shares.
 - **The backlog is GitHub issues** (`gh issue list`), labelled by type, `needs design` and area
   (*Working here* below). Other agents file there too, notably the downstream plugin's.
 - **The release pipeline versions itself** from the commit types on `main`. `docs/releasing.md`
@@ -168,7 +172,9 @@ in `docs/design.md`.
    fails the whole list in the SDK's parse: leave it out with a logged reason, or relay it).
    #70 (the lists read after a kernel start, `DirectOps` and `announceKernel`, keep the SDK's
    60 s timeout, which forgets the request) belongs with #12 and #16: a refresh isn't a caller,
-   so who waits on it has to be decided first. #29 (how to hear of the next advisory against what
+   so who waits on it has to be decided first. #74 (Node 26 refuses an over-long socket path,
+   so a deep runtime directory gets no broker) wants a choice between going private at once, a
+   short path that resolves to the directory, and Linux's abstract namespace. #29 (how to hear of the next advisory against what
    the bundle inlines) needs a design too; an audit gate tried in #27 was reverted. Smaller,
    from 0.1.2's reviews: #38 (durations read three ways) is fixed in #71, and #33 and #35
    shipped in 0.1.4. From #37's review: #40 (tighten #37's long-call check), whose third point is
