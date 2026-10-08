@@ -155,6 +155,20 @@ function relayable(err: McpError): Error {
   });
 }
 
+/**
+ * A kernel's answer to a request with no `isError` form — a list, a prompt, a
+ * resource — whose protocol error is relayed as `relayable` makes it. Only
+ * `tools/call` relayed one, so every other request's arrived doubled, on both
+ * paths (#62).
+ */
+async function relayed<T>(answer: Promise<T>): Promise<T> {
+  try {
+    return await answer;
+  } catch (err) {
+    throw err instanceof McpError ? relayable(err) : err;
+  }
+}
+
 const STATUS_TOOL = {
   name: "wolfram_status",
   title: "Wolfram Status",
@@ -545,7 +559,7 @@ export function createWolframServer(
     // `STATUS_TOOL` is added here rather than stored, so that what the cache
     // holds is exactly what the kernel reported and a refresh compares like
     // with like.
-    const live = await backend.listTools();
+    const live = await relayed(backend.listTools());
     return { tools: [...(live.tools ?? []), STATUS_TOOL] };
   });
 
@@ -639,25 +653,32 @@ export function createWolframServer(
       // drain inside one hold on a kernel and answer complete lists, so there is
       // no upstream paging state for anyone to page through.
       if (promptCache) return { prompts: promptCache };
-      return backend.listPrompts();
+      return relayed(backend.listPrompts());
     });
     // A prompt runs its own function in the kernel, so it waits as long as a
     // tool call would, and a cancel stops it as one does. Given no ceiling, it
     // was cut at the SDK's minute (#39).
     server.setRequestHandler(GetPromptRequestSchema, async (request, extra) =>
-      backend.getPrompt(request.params, { timeoutMs: config.callTimeoutMs, signal: extra.signal }),
+      relayed(
+        backend.getPrompt(request.params, {
+          timeoutMs: config.callTimeoutMs,
+          signal: extra.signal,
+        }),
+      ),
     );
   }
 
   if (capabilities.resources) {
     server.setRequestHandler(ListResourcesRequestSchema, async (request) =>
-      backend.listResources(request.params),
+      relayed(backend.listResources(request.params)),
     );
     server.setRequestHandler(ReadResourceRequestSchema, async (request, extra) =>
-      backend.readResource(request.params, {
-        timeoutMs: config.callTimeoutMs,
-        signal: extra.signal,
-      }),
+      relayed(
+        backend.readResource(request.params, {
+          timeoutMs: config.callTimeoutMs,
+          signal: extra.signal,
+        }),
+      ),
     );
   }
 

@@ -414,6 +414,12 @@ function run() {
       return;
     }
     if (msg.method === "prompts/get") {
+      // A name it does not have fails as AgentTools 2.2.7's does: getPrompt's
+      // Enclose fails, and processRequest answers its catch-all.
+      if (msg.params?.name !== "Search") {
+        send({ jsonrpc: "2.0", id: msg.id, error: { code: -32603, message: "Internal error" } });
+        return;
+      }
       evaluate(msg, Number(process.env.FAKE_PROMPT_DELAY_MS ?? "0"), () => ({
         messages: [
           {
@@ -438,6 +444,15 @@ function run() {
       return;
     }
     if (msg.method === "resources/read" && process.env.FAKE_RESOURCES) {
+      // As 2.2.7's resourceReadError answers a URI it has not registered.
+      if (msg.params?.uri !== "ui://fake/view") {
+        send({
+          jsonrpc: "2.0",
+          id: msg.id,
+          error: { code: -32602, message: `UI resource not found: ${msg.params?.uri}` },
+        });
+        return;
+      }
       evaluate(msg, Number(process.env.FAKE_RESOURCE_DELAY_MS ?? "0"), () => ({
         contents: [
           {
