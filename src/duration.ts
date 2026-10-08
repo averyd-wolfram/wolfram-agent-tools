@@ -59,3 +59,19 @@ export function budgetText(ms: number): string {
 export function waitText(ms: number): string {
   return durationText(ms, Math.ceil);
 }
+
+/**
+ * A time that has passed: how long ago something happened, how long it took.
+ * Rounded down, as a budget is, so it never says longer than it was. Each of
+ * these had its own wording — "5 min ago" beside a setting said "10m", "5 h
+ * ago", "3 days ago", "ready in 2.4s" — and a back-off's "failed 10s ago" was
+ * said by the wait rule, rounded up.
+ */
+export function elapsedText(ms: number): string {
+  return durationText(ms, Math.floor);
+}
+
+/** The idle setting, where 0 means a kernel is never shut down for idling. */
+export function idleText(ms: number): string {
+  return ms > 0 ? budgetText(ms) : "disabled";
+}

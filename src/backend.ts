@@ -50,7 +50,7 @@ import {
   KernelSession,
   listAllTools,
 } from "./kernel.js";
-import { waitText } from "./duration.js";
+import { elapsedText, waitText } from "./duration.js";
 import type { KernelInstall } from "./locate.js";
 import { errorText, type Logger } from "./log.js";
 import { PKG } from "./version.js";
@@ -371,7 +371,7 @@ export class DeferredBackend implements KernelBackend {
     if (waiting) {
       throw new Error(
         `the last attempt to prepare a Wolfram kernel failed ` +
-          `${waitText(this.#clock() - waiting.failedAt)} ago, so this one was not made. ` +
+          `${elapsedText(this.#clock() - waiting.failedAt)} ago, so this one was not made. ` +
           `It is retried in ${waitText(waiting.remainingMs)}` +
           (waiting.advice
             ? `; ${waiting.advice}.`

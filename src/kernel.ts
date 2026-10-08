@@ -24,7 +24,7 @@ import { deadlineDelay, MAX_TIMER_MS, timerDelay } from "./config.js";
 import { FilteringStdioTransport } from "./transport.js";
 import { applyFlavour, type KernelFlavour } from "./flavour.js";
 import { FACTS_EXPRESSION, isFactsLine, parseFacts, type KernelFacts } from "./inspect.js";
-import { budgetText } from "./duration.js";
+import { budgetText, elapsedText } from "./duration.js";
 import { errorText, type Logger } from "./log.js";
 
 /**
@@ -508,7 +508,7 @@ export class KernelSession {
       this.#handshaking = null;
     }
 
-    log(`kernel ready in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
+    log(`kernel ready in ${elapsedText(Date.now() - startedAt)}`);
     this.#client = client;
     this.#transport = transport;
 

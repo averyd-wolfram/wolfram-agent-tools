@@ -27,7 +27,7 @@ import { MAX_TIME_MS, type Config, type UpstreamCapabilities } from "./config.js
 import type { DirectOps, KernelBackend } from "./backend.js";
 import type { BrokerBackend } from "./broker-client.js";
 import { doctorCommand } from "./doctor.js";
-import { budgetText, waitText } from "./duration.js";
+import { budgetText, elapsedText, idleText, waitText } from "./duration.js";
 import type { BackoffState } from "./prepare.js";
 import { readFacts } from "./inspect.js";
 import { drainPages } from "./kernel.js";
@@ -90,6 +90,13 @@ function drainPrompts(ops: DirectOps): Promise<Prompt[]> {
  * server's vaguer "no answer within Ns".
  */
 const KERNEL_TIME_CONSTRAINT_S = 60;
+
+/**
+ * That default as a person reads it, with the number a user would write: the
+ * paclet's `TimeConstraint` is set in seconds, in `MCP_TOOL_OPTIONS`, so "1m"
+ * alone sends someone writing an override off to convert.
+ */
+const evaluatorDefault = `${budgetText(KERNEL_TIME_CONSTRAINT_S * 1000)} (TimeConstraint ${KERNEL_TIME_CONSTRAINT_S})`;
 
 /** Headroom over a requested time constraint, for transport and framing. */
 const TIME_CONSTRAINT_HEADROOM_MS = 30_000;
@@ -281,7 +288,7 @@ function describeStatus(
   if (!install) return describeMissingKernel(config);
 
   const facts = config.inspect ? readFacts(install.bin) : null;
-  const age = cache ? `${Math.round((Date.now() - cache.cachedAt) / 60_000)} min ago` : null;
+  const age = cache ? `${elapsedText(Date.now() - cache.cachedAt)} ago` : null;
   const lines = [
     `${PKG.name} ${PKG.version}`,
     "",
@@ -298,7 +305,7 @@ function describeStatus(
     lines.push("facts       unknown yet: every kernel reports them as it starts");
   } else {
     lines.push(
-      `facts       cached from a kernel ${Math.round((Date.now() - facts.probedAt) / 60_000)} min ago, ` +
+      `facts       cached from a kernel ${elapsedText(Date.now() - facts.probedAt)} ago, ` +
         `refreshed by every kernel start`,
       `AgentTools  ${facts.agentTools ?? "absent — every tool call will fail to load it"}`,
       `account     ${facts.wolframID ?? "not signed in — cloud-backed tools will fail on their own"}`,
@@ -323,8 +330,8 @@ function describeStatus(
     `tool list   ${describeToolList(config, cache, age)}`,
     `logs        ${process.env["WOLFRAM_MCP_LOG"] ?? "stderr, captured by your MCP client"}`,
     `timeouts    start ${budgetText(config.startTimeoutMs)}, call ${budgetText(config.callTimeoutMs)}, ` +
-      `idle ${config.idleMs > 0 ? budgetText(config.idleMs) : "disabled"}`,
-    `evaluation  the evaluator stops itself at ${budgetText(KERNEL_TIME_CONSTRAINT_S * 1000)} unless ` +
+      `idle ${idleText(config.idleMs)}`,
+    `evaluation  the evaluator stops itself at ${evaluatorDefault} unless ` +
       `MCP_TOOL_OPTIONS or a timeConstraint argument says otherwise`,
     `            past the call timeout this server stops waiting but leaves the kernel ` +
       `running, so a long call keeps its session`,
@@ -431,14 +438,14 @@ export function createWolframServer(
   if (config.callTimeoutMs < KERNEL_TIME_CONSTRAINT_S * 1000) {
     log(
       `call timeout is ${budgetText(config.callTimeoutMs)}, below the evaluator's default ` +
-        `${budgetText(KERNEL_TIME_CONSTRAINT_S * 1000)} time constraint: this server will stop waiting first, so ` +
+        `${evaluatorDefault} time constraint: this server will stop waiting first, so ` +
         `a slow evaluation is reported here rather than ending in the kernel's own ` +
         `"time constraint exceeded", which says more. The kernel is left running either way. ` +
         `Prompts and resource reads wait this same ceiling`,
     );
   }
   log(
-    `profile=${config.serverName} idle=${config.idleMs > 0 ? budgetText(config.idleMs) : "disabled"} ` +
+    `profile=${config.serverName} idle=${idleText(config.idleMs)} ` +
       `cache=${usableCache ? "hit" : "miss"}`,
   );
 

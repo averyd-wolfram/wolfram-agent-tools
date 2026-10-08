@@ -1132,6 +1132,13 @@ heading("End to end — idle shutdown");
   await client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "3+3" } });
   await new Promise((r) => setTimeout(r, 2500));
   check("the kernel is shut down when idle", stderr().includes("shutting the kernel down"));
+  // Said as every duration is: the startup line divided by a minute and read
+  // "idle=0.02min" (#38).
+  check(
+    "and the log says the idle time as it was set, once at start and once at shutdown",
+    /idle=1\.2s /.test(stderr()) && /idle for 1\.2s, shutting the kernel down/.test(stderr()),
+    stderr().split("\n").filter((l) => /idle/.test(l)).join(" | ").slice(0, 160),
+  );
 
   const before = startCount();
   const again = await client.callTool({
@@ -4443,7 +4450,7 @@ heading("Discovery spends no seat; doctor is the only route to wolframscript");
     });
     check(
       "the session-start status labels its facts as cached, with their age",
-      /Cached from a kernel \d+ min ago, not checked this session/.test(hook.stdout) &&
+      /Cached from a kernel \d+(\.\d)?(ms|s|m|h|d)( \d\d[smh])? ago, not checked this session/.test(hook.stdout) &&
         /Tool list cached/.test(hook.stdout) &&
         startCount() === before + 1,
       hook.stdout.trim().split("\n").slice(1).join(" | ").slice(0, 110),
@@ -4597,7 +4604,7 @@ heading("Timeouts layer the right way round");
   await new Promise((r) => setTimeout(r, 200));
   check(
     "a ceiling below the evaluator's own default is called out",
-    /call timeout is 30s, below the evaluator's default 1m time constraint/.test(s.stderr()),
+    /call timeout is 30s, below the evaluator's default 1m \(TimeConstraint 60\) time constraint/.test(s.stderr()),
     s.stderr().split("\n").filter((l) => /timeout/.test(l)).join(" | ").slice(0, 90),
   );
   await s.client.close();
@@ -5484,6 +5491,15 @@ heading("A duration reads one way on every path, rounded for what it is");
       .join("; ");
   check("a budget is said in units that fit it, rounded down", wrong(budgets) === "", wrong(budgets));
   check("a wait is said the same way, rounded up", wrong(waits) === "", wrong(waits));
+  // And a time that has passed, which had three wordings of its own ("5 min
+  // ago", "5 h ago", "ready in 2.4s") and was said by the wait rule in a
+  // back-off's "failed … ago": rounded down, so never longer than it was.
+  const elapsed = table(lib.elapsedText, [
+    [9_910, "9.9s"],
+    [299_999, "4m 59s"],
+    [18_720_000, "5h 12m"],
+  ]);
+  check("and so is a time that has passed, rounded down", wrong(elapsed) === "", wrong(elapsed));
 
   // The settings, as the two places a stuck user reads them say them.
   const settings = {
@@ -5498,6 +5514,13 @@ heading("A duration reads one way on every path, rounded for what it is");
     "wolfram_status says each timeout in units that fit it",
     /timeouts\s+start 1m 30s, call 1d, idle 1h 30m\n/.test(`${status}\n`),
     status.split("\n").find((l) => l.startsWith("timeouts")),
+  );
+  // The evaluator's own limit too, beside the number a user would write: its
+  // TimeConstraint is set in seconds, in MCP_TOOL_OPTIONS.
+  check(
+    "and the evaluator's limit with the TimeConstraint that sets it",
+    /evaluation\s+the evaluator stops itself at 1m \(TimeConstraint 60\) unless/.test(status),
+    status.split("\n").find((l) => l.startsWith("evaluation")),
   );
   const doctorSaid = spawnSync(process.execPath, [entry, "doctor"], {
     encoding: "utf8",

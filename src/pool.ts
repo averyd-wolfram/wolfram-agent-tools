@@ -25,7 +25,7 @@ import {
 } from "./kernel.js";
 import { baseDirectoryEnv, type KernelFacts } from "./inspect.js";
 import { errorText, type Logger } from "./log.js";
-import { waitText } from "./duration.js";
+import { elapsedText, waitText } from "./duration.js";
 import { NOT_RESOLVED_ADVICE, NOT_RESOLVED_BACKOFF_MS } from "./prepare.js";
 
 /**
@@ -558,7 +558,7 @@ export class KernelPool {
       return null;
     }
     return new ServerNotResolved(
-      `a kernel for this server could not start it ${waitText(age)} ago, so ` +
+      `a kernel for this server could not start it ${elapsedText(age)} ago, so ` +
         `none was started for this request; it is tried again in ` +
         `${waitText(NOT_RESOLVED_BACKOFF_MS - age)}; ${NOT_RESOLVED_ADVICE}.` +
         `\n\nThe failure was: ${known.reason}`,
