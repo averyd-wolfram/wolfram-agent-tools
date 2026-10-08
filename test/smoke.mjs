@@ -2060,6 +2060,46 @@ heading("A broker no longer at its address hands its sessions over and leaves");
 }
 
 // ---------------------------------------------------------------------------
+// An address too long for a socket path is bound truncated and connected to
+// truncated the same way, which is how sessions there still share a broker
+// (brokerAddress). Taking the address by linking a socket bound beside it broke
+// that on Linux: the name beside it is truncated too, nothing exists by its full
+// name to link, and no broker ever took the address — every session privately.
+// macOS binds the full path, so only Linux, as CI runs it, shows it.
+heading("Sessions share a broker even at an address too long for a socket path");
+{
+  wipeCache();
+  // Past Linux's 108-byte sun_path for a name in it, not only for the address.
+  const runtime = privateDir(join(home, "l".repeat(Math.max(1, 110 - home.length))));
+  const shared = {
+    WOLFRAM_MCP_SHARE: "1",
+    XDG_RUNTIME_DIR: runtime,
+    WOLFRAM_MCP_LICENSE_LIMIT: "4",
+    WOLFRAM_MCP_IDLE_MINUTES: "5",
+  };
+  const sessions = [await connect(shared), await connect(shared)];
+  const answered = await Promise.all(
+    sessions.map((s, i) =>
+      s.client
+        .callTool({ name: "WolframLanguageEvaluator", arguments: { code: `${i}+${i}` } }, undefined, { timeout: 30_000 })
+        .then((r) => !r.isError && answeredByFake(r), () => false),
+    ),
+  );
+  check(
+    "both are answered, by one broker they are both attached to",
+    answered.every(Boolean) &&
+      ownBrokers(runtime).length === 1 &&
+      sessions.every((s) => s.stderr().includes("attached to the broker")),
+    `answered ${answered}, brokers ${ownBrokers(runtime).length}, ` +
+      `attached ${sessions.map((s) => s.stderr().includes("attached to the broker"))}; ` +
+      sessions[0].stderr().split("\n").filter((l) => /broker|private/.test(l)).slice(-2).join(" | ").slice(0, 160),
+  );
+  for (const s of sessions) await s.client.close();
+  signalOwnBrokers("SIGKILL", runtime);
+  await new Promise((r) => setTimeout(r, 300));
+}
+
+// ---------------------------------------------------------------------------
 // Cancelling a call has to reach the kernel. Nothing in this server used to
 // carry it: the SDK handed the handler an AbortSignal and it was discarded, so
 // pressing Escape abandoned the request here while the evaluation ran on. The
