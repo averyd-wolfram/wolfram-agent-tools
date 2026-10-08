@@ -37,10 +37,12 @@ updates:
         update-types: [minor, patch]
         exclude-patterns: [esbuild]
     # Node's typings stay on the floor's line, or the compiler accepts APIs
-    # the floor lacks (#52). Move this bound with engines.
+    # the floor lacks (#52): patches only. Moving them to a new floor's line
+    # is a minor or major, made by hand with engines, so nothing here names
+    # the floor and goes stale when it moves.
     ignore:
       - dependency-name: "@types/node"
-        versions: [">=22.14.0"]
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
     labels: [dependencies]
 
   - package-ecosystem: github-actions
