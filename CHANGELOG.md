@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.3...v0.1.4) (2026-10-08)
+
+
+### Bug Fixes
+
+* give every kernel request this server's deadline, so a prompt longer than a minute is answered ([#63](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/63)) ([edb0346](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/edb03461f465989eea579a5d90b1db7360780fbc))
+
 ## [0.1.3](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.2...v0.1.3) (2026-10-06)
 
 
