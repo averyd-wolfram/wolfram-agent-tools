@@ -2085,12 +2085,36 @@ heading("Sessions share a broker even at an address too long for a socket path")
   wipeCache();
   // Past Linux's 108-byte sun_path for a name in it, not only for the address.
   const runtime = privateDir(join(home, "l".repeat(Math.max(1, 110 - home.length))));
+  const brokerLog = join(home, "long-broker.log");
   const shared = {
     WOLFRAM_MCP_SHARE: "1",
     XDG_RUNTIME_DIR: runtime,
     WOLFRAM_MCP_LICENSE_LIMIT: "4",
     WOLFRAM_MCP_IDLE_MINUTES: "5",
+    WOLFRAM_MCP_LOG: brokerLog,
   };
+  // Whether this Node can listen and connect at a path that long at all,
+  // measured rather than assumed: Linux's Node 22 truncates both ends alike
+  // and shares, but CI's Node 26 brought no broker up at such an address,
+  // where main binds exactly as this does.
+  // Beside the runtime directory, not in it, with a name that differs within
+  // the first 107 bytes: Linux truncates there, inside the directory's own
+  // name, so a probe in it left its socket on the very file the broker binds,
+  // where nothing could clear it, and the broker's bind failed EADDRINUSE.
+  const probeDir = privateDir(join(home, "p".repeat(Math.max(1, 110 - home.length))));
+  const probe = join(probeDir, `wm-${"0".repeat(12)}.sock`);
+  const usable = await new Promise((resolve) => {
+    const server = createServer((c) => c.end("ok"));
+    server.once("error", (err) => resolve(`listen: ${err.code ?? err.message}`));
+    server.listen(probe, () => {
+      const client = connectSocket(probe);
+      client.once("data", () => {
+        client.destroy();
+        server.close(() => resolve(true));
+      });
+      client.once("error", (err) => server.close(() => resolve(`connect: ${err.code ?? err.message}`)));
+    });
+  });
   const sessions = [await connect(shared), await connect(shared)];
   const answered = await Promise.all(
     sessions.map((s, i) =>
@@ -2099,15 +2123,27 @@ heading("Sessions share a broker even at an address too long for a socket path")
         .then((r) => !r.isError && answeredByFake(r), () => false),
     ),
   );
-  check(
-    "both are answered, by one broker they are both attached to",
-    answered.every(Boolean) &&
-      ownBrokers(runtime).length === 1 &&
-      sessions.every((s) => s.stderr().includes("attached to the broker")),
-    `answered ${answered}, brokers ${ownBrokers(runtime).length}, ` +
-      `attached ${sessions.map((s) => s.stderr().includes("attached to the broker"))}; ` +
-      sessions[0].stderr().split("\n").filter((l) => /broker|private/.test(l)).slice(-2).join(" | ").slice(0, 160),
-  );
+  const attached = sessions.map((s) => s.stderr().includes("attached to the broker"));
+  const detail =
+    `answered ${answered}, brokers ${ownBrokers(runtime).length}, attached ${attached}; ` +
+    (existsSync(brokerLog)
+      ? readFileSync(brokerLog, "utf8").split("\n").filter((l) => /bind|link|listening|attempt|gave up/.test(l)).join(" | ")
+      : sessions[0].stderr().split("\n").filter((l) => /broker|private/.test(l)).slice(-2).join(" | "))
+      .slice(0, 240);
+  const bytes = Buffer.byteLength(probe);
+  if (usable === true) {
+    check(
+      "both are answered, by one broker they are both attached to",
+      answered.every(Boolean) && ownBrokers(runtime).length === 1 && attached.every(Boolean),
+      detail,
+    );
+  } else {
+    check(
+      `this Node cannot use a ${bytes}-byte socket path (${usable}), so both are answered privately`,
+      answered.every(Boolean) && !attached.some(Boolean),
+      detail,
+    );
+  }
   for (const s of sessions) await s.client.close();
   signalOwnBrokers("SIGKILL", runtime);
   await new Promise((r) => setTimeout(r, 300));
