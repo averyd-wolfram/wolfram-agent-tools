@@ -4749,6 +4749,51 @@ heading("A time an option or the broker's socket hands a timer is held there too
       await client?.stop();
       await broker?.stop?.();
     }
+    // NaN on the shared path: JSON has no NaN, so a NaN written into the frame
+    // arrived as null, which the broker read as unset and replaced with its own
+    // five-minute default, where a private kernel waits the 24 days. A stub
+    // broker records the frame it is sent.
+    const stubAddress = join(privateDir(join(home, "run-nan-frame")), "broker.sock");
+    const frames = [];
+    const stub = createServer((socket) => {
+      socket.setEncoding("utf8");
+      socket.on("error", () => socket.destroy());
+      let buffered = "";
+      socket.on("data", (chunk) => {
+        buffered += chunk;
+        for (let at; (at = buffered.indexOf("\n")) !== -1; buffered = buffered.slice(at + 1)) {
+          const frame = JSON.parse(buffered.slice(0, at));
+          frames.push(frame);
+          const reply =
+            frame.op === "hello"
+              ? { id: frame.id, ok: true, result: { flavours: true, flavour: frame.params?.digest } }
+              : { id: frame.id, ok: true, result: { content: [{ type: "text", text: "evaluated" }] } };
+          if (socket.writable) socket.write(`${JSON.stringify(reply)}\n`);
+        }
+      });
+    });
+    await new Promise((resolve) => stub.listen(stubAddress, resolve));
+    let stubClient = null;
+    try {
+      stubClient = await lib.BrokerBackend.attachIfRunning({
+        address: stubAddress,
+        flavour: lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" }),
+        spawnCommand: join(home, "definitely-not-a-binary"),
+        spawnArgs: [],
+        spawnEnv: {},
+        log: () => {},
+      });
+      await stubClient?.callTool({ name: "WolframLanguageEvaluator", arguments: {} }, { timeoutMs: Number.NaN });
+    } finally {
+      await stubClient?.stop();
+      stub.close();
+    }
+    const sent = frames.find((frame) => frame.op === "callTool");
+    check(
+      "a NaN timeout reaches the broker as the deadline a private kernel holds, not as null",
+      sent?.timeoutMs === lib.MAX_TIME_MS,
+      `timeoutMs=${JSON.stringify(sent?.timeoutMs)}`,
+    );
     check("and no timer overflowed", overflowed.length === 0, overflowed.join(" | ").slice(0, 160));
   } finally {
     process.off("warning", onWarning);
