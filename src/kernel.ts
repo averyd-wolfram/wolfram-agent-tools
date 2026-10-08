@@ -9,6 +9,7 @@
  *    stdin, which is also the protocol channel, so startup is timed out
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import {
   ErrorCode,
   McpError,
@@ -90,16 +91,37 @@ export class HandshakeTimeout extends Error {
 }
 
 /**
- * The SDK request timeout for a tool call: the longest delay a timer can hold,
- * so that it never fires before this server's own deadline, which is held to
- * `MAX_TIME_MS` (#15). That deadline is the session's, kept apart from the
- * request so a late reply still arrives (`#fate`). Left unset, the SDK applied
- * its own 60 s default instead, cutting every call longer than a minute and
- * dropping the kernel's answer (#34).
+ * The SDK request timeout for every kernel request: the longest delay a timer
+ * can hold, so that it never fires before this server's own deadline, which is
+ * held to `MAX_TIME_MS` (#15). That deadline is the session's, kept apart from
+ * the request so a late reply still arrives (`#fate`). Left unset, the SDK
+ * applied its own 60 s default instead, cutting every call longer than a minute
+ * and dropping the kernel's answer (#34) — and, once only tool calls were given
+ * this, every prompt longer than a minute (#39).
  */
-export const CALL_REQUEST_TIMEOUT_MS = 2 ** 31 - 1;
+const SDK_REQUEST_TIMEOUT_MS = 2 ** 31 - 1;
 
-/** The SDK's own timeout, for ops this server gives no deadline of its own. */
+/**
+ * How long a caller waits for a request that names no deadline of its own: the
+ * lists, and whatever a library caller runs without saying. The minute the SDK
+ * gave every request by default, kept, but owned here, where its passing leaves
+ * the request outstanding for `#fate` to judge. The SDK's own minute forgot the
+ * request instead, so the kernel went on working out of sight, and the next
+ * request queued behind it (#39).
+ */
+export const DEFAULT_DEADLINE_MS = 60_000;
+
+/**
+ * The SDK options for a request to a kernel, and the only place they are built:
+ * `run` hands them to the work it runs. Each request site built its own, so
+ * only the two tool-call sites gave the timeout that cannot fire first, and
+ * `prompts/get` and `resources/read` were still cut at the SDK's minute (#39).
+ */
+function requestOptions(signal: AbortSignal | undefined): RequestOptions {
+  return { timeout: SDK_REQUEST_TIMEOUT_MS, ...(signal ? { signal } : {}) };
+}
+
+/** The SDK's own timeout, which a request given `requestOptions` never meets. */
 // Widened to number once: the SDK types McpError.code as a number while
 // ErrorCode is the enum of its values, and comparing them raw is an unsafe mix.
 const REQUEST_TIMEOUT: number = ErrorCode.RequestTimeout;
@@ -107,14 +129,33 @@ function isRequestTimeout(err: unknown): boolean {
   return err instanceof McpError && err.code === REQUEST_TIMEOUT;
 }
 
+/**
+ * A request dropped before it reached the kernel, because its caller cancelled
+ * while it waited: for its turn, for a kernel to be taken back, or for one to
+ * start. Typed so that a pool can tell it from a failure the kernel had a part
+ * in, and hand the kernel straight back rather than ask after its health.
+ */
+export class RequestDropped extends Error {
+  constructor(reason: unknown) {
+    super(`the request was cancelled before it reached the kernel (${errorText(reason)})`, {
+      cause: reason,
+    });
+    this.name = "RequestDropped";
+  }
+}
+
 /** How a single unit of work is to be run. */
 export interface RunOptions {
   /**
    * How long the caller will wait. Not a timeout on the request: when it passes
    * the caller is answered and the request is left outstanding on purpose.
+   * Unset is `DEFAULT_DEADLINE_MS`; `0` waits as long as the work takes.
    */
   deadlineMs?: number | undefined;
-  /** Fires when the caller cancels, which is the one case that kills a kernel. */
+  /**
+   * Fires when the caller cancels, which is the one case that kills a kernel —
+   * once the kernel has the work, and not before.
+   */
   signal?: AbortSignal | undefined;
 }
 
@@ -451,18 +492,37 @@ export class KernelSession {
    * Run `fn` with the kernel guaranteed up, serialized against other work.
    *
    * `deadlineMs` is how long the *caller* will wait, and deliberately not a
-   * timeout on the request: see `#fate`.
+   * timeout on the request: see `#fate`. `fn` is handed the options every
+   * request it sends the kernel must carry, which keep the SDK from ending the
+   * request before that deadline does.
    */
-  async run<T>(fn: (client: Client) => Promise<T>, options: RunOptions = {}): Promise<T> {
+  async run<T>(
+    fn: (client: Client, request: RequestOptions) => Promise<T>,
+    options: RunOptions = {},
+  ): Promise<T> {
     const task = this.#queue.then(async () => {
+      // Cancelled while it waited its turn, so the kernel never had it: there
+      // is nothing to stop, and no reason to start one. Sent on, the SDK
+      // refused it unsent and `#fate`, seeing the cancel, stopped a kernel that
+      // had never had the work — or one just started to receive it.
+      if (options.signal?.aborted) throw new RequestDropped(options.signal.reason);
       this.#clearIdle();
+      // Cancelled while abandoned work was taken back, or during the start:
+      // the same, and the kernel, if there is one, idles out like any other.
+      const dropIfCancelled = (): void => {
+        if (!options.signal?.aborted) return;
+        this.#scheduleIdle();
+        throw new RequestDropped(options.signal.reason);
+      };
       // Someone needs the kernel now, so this is the moment abandoned work
       // stops being free to finish.
       await this.#reclaim();
+      dropIfCancelled();
       const client = await this.ensure();
-      const work = fn(client);
+      dropIfCancelled();
+      const work = fn(client, requestOptions(options.signal));
       try {
-        return await this.#awaitWithin(work, options.deadlineMs);
+        return await this.#awaitWithin(work, options.deadlineMs ?? DEFAULT_DEADLINE_MS);
       } catch (err) {
         // Decided synchronously with the failure, so a caller that has just
         // learned of the rejection can already see the verdict: the pool reads
@@ -524,11 +584,14 @@ export class KernelSession {
    *    honours it. `notifications/cancelled` cannot: the serial loop will not
    *    read it until the evaluation it would cancel has already finished.
    *  - **The transport is gone.** Nothing to decide; it is already dead.
-   *  - **We stopped waiting** (our deadline, or the SDK's own on an op that
-   *    carries no deadline). The kernel may be working or hung, and there is no
-   *    way to tell — so it is left alone, and the reply it may yet send is
+   *  - **We stopped waiting.** The kernel may be working or hung, and there is
+   *    no way to tell — so it is left alone, and the reply it may yet send is
    *    taken as proof of life. Nobody is waiting for that reply, so the value
    *    is discarded; only the fact of it matters.
+   *  - **The SDK stopped waiting**, which `requestOptions` keeps from happening
+   *    but a library caller's own options can still do. The SDK forgets the
+   *    request, so no reply can prove anything: the kernel is presumed still
+   *    at work, and the next request takes it back.
    *  - **Anything else.** The kernel answered, which means it is alive and now
    *    idle: an unknown tool name, a malformed argument, a failed evaluation.
    *    Keep it. This is the case that used to cost a kernel and its sessions
@@ -543,8 +606,15 @@ export class KernelSession {
         return false;
       }
       if (!this.running) return false;
-      if (err instanceof DeadlineExceeded || isRequestTimeout(err)) {
+      if (err instanceof DeadlineExceeded) {
         this.#abandon(work, errorText(err));
+        return true;
+      }
+      if (isRequestTimeout(err)) {
+        // Not `work`: that is this rejection, so watching it marked the work
+        // finished at once, and the kernel, perhaps still computing, was handed
+        // the next request to queue behind what nobody could see (#39).
+        this.#abandon(null, errorText(err));
         return true;
       }
       log(`the kernel answered (${errorText(err)}), so it is alive and idle; keeping it`);
@@ -567,11 +637,21 @@ export class KernelSession {
    * The seat cannot be leaked this way: the broker exits 60s after its last
    * proxy detaches whatever its kernels are doing, and a private kernel dies
    * with the process it belongs to.
+   *
+   * `null` is work whose reply will never be seen, because the SDK has already
+   * given up on the request: it never settles, so the next request reclaims.
    */
-  #abandon(work: Promise<unknown>, reason: string): void {
+  #abandon(work: Promise<unknown> | null, reason: string): void {
     const { log } = this.#options;
     const abandoned: AbandonedWork = { settled: false };
     this.#abandoned = abandoned;
+    if (!work) {
+      log(
+        `the request to the kernel was given up on (${reason}), so its reply will not be ` +
+          `seen; presuming the kernel still busy, for the next request to take back`,
+      );
+      return;
+    }
     log(`stopped waiting for the kernel (${reason}); leaving it to finish, sessions intact`);
     abandoned.done = work.then(
       () => {

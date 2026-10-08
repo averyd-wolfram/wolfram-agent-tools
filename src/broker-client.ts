@@ -25,6 +25,7 @@ import type {
 } from "@modelcontextprotocol/sdk/types.js";
 import type {
   CallOptions,
+  EvaluationOptions,
   KernelBackend,
   KernelReadyHandler,
   PromptPage,
@@ -41,6 +42,7 @@ import {
 } from "./broker-protocol.js";
 import { DEFAULT_START_TIMEOUT_MS } from "./config.js";
 import type { KernelFlavour } from "./flavour.js";
+import { DEFAULT_DEADLINE_MS } from "./kernel.js";
 import { bareMcpText, errorText, type Logger } from "./log.js";
 import type { Deadline } from "./prepare.js";
 
@@ -59,8 +61,6 @@ const CONNECT_RETRY_MS = 100;
  * the client's own 20s ceiling, then threw a protocol error.
  */
 const REQUEST_GRACE_MS = 2_000;
-/** Ceiling for ops that carry no timeout of their own, once a kernel is up. */
-const DEFAULT_OP_TIMEOUT_MS = 60_000;
 
 /**
  * Whether the broker answers each op from a kernel, which it may first have to
@@ -104,7 +104,9 @@ export function brokerCeilingMs(
   if (timeoutMs === 0) return 0;
   if (timeoutMs !== undefined) return timeoutMs + REQUEST_GRACE_MS;
   const start = FROM_KERNEL[op] ? startTimeoutMs : 0;
-  return start + DEFAULT_OP_TIMEOUT_MS + REQUEST_GRACE_MS;
+  // The broker's kernel session gives a kernel op with no timeout this same
+  // deadline once a kernel is up, so one constant is both bounds.
+  return start + DEFAULT_DEADLINE_MS + REQUEST_GRACE_MS;
 }
 
 /**
@@ -621,14 +623,25 @@ export class BrokerBackend implements KernelBackend {
   listPrompts(cursor?: string): Promise<PromptPage> {
     return this.#request<PromptPage>("listPrompts", cursor ? { cursor } : undefined);
   }
-  getPrompt(params: GetPromptRequest["params"]): Promise<GetPromptResult> {
-    return this.#request<GetPromptResult>("getPrompt", params);
+  getPrompt(
+    params: GetPromptRequest["params"],
+    options?: EvaluationOptions,
+  ): Promise<GetPromptResult> {
+    return this.#request<GetPromptResult>("getPrompt", params, options?.timeoutMs, options?.signal);
   }
   listResources(params?: ListResourcesRequest["params"]): Promise<ListResourcesResult> {
     return this.#request<ListResourcesResult>("listResources", params);
   }
-  readResource(params: ReadResourceRequest["params"]): Promise<ReadResourceResult> {
-    return this.#request<ReadResourceResult>("readResource", params);
+  readResource(
+    params: ReadResourceRequest["params"],
+    options?: EvaluationOptions,
+  ): Promise<ReadResourceResult> {
+    return this.#request<ReadResourceResult>(
+      "readResource",
+      params,
+      options?.timeoutMs,
+      options?.signal,
+    );
   }
   callTool(params: CallToolRequest["params"], options: CallOptions): Promise<CallToolResult> {
     return this.#request<CallToolResult>(

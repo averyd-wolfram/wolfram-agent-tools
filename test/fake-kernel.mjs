@@ -45,15 +45,23 @@
  * still pass with FAKE_CALL_DELAY_MS set is not testing what it appears to test.
  *
  * FAKE_CALL_DELAY_MS  delay before answering tools/call; negative never answers
+ * FAKE_PROMPT_DELAY_MS  the same for prompts/get, which a real kernel evaluates
+ *                     as it does a call: the paclet's prompts run its searches
+ * FAKE_RESOURCE_DELAY_MS  the same for resources/read
  * FAKE_DELAY_FIRST_ONLY  apply that delay to the first call only, so a session
  *                     can have one call that outlives the server's ceiling and
  *                     then carry on normally — the shape of a real long build
  * FAKE_INIT_DELAY_MS  delay before answering initialize: a slow handshake, the
  *                     last stage of a preparation, that does eventually answer
  * FAKE_EMPTY_TOOLS    report zero tools, successfully
+ * FAKE_RESOURCES      declare the resources capability and serve one resource.
+ *                     AgentTools 2.2.7 answers resources/list and resources/read,
+ *                     for MCP Apps' UI resources, but declares no resources
+ *                     capability, so without this a session never offers them
  * FAKE_METHOD_LOG     append every method received, to see what reaches a kernel,
- *                     and "(replied tools/call)" as each call is answered, so a
- *                     check can wait for a reply instead of sleeping past it
+ *                     and "(replied tools/call)" as each call is answered — or
+ *                     prompts/get, or resources/read — so a check can wait for a
+ *                     reply instead of sleeping past it
  *
  * Installation facts. Every kernel's -run expression writes one line of JSON
  * between markers after loading AgentTools and before its server starts
@@ -290,6 +298,23 @@ function run() {
   // stdin while one is in progress, so nothing it is sent meanwhile — a ping
   // included — gets an answer until that call finishes.
   let outstanding = 0;
+  /**
+   * Answer an evaluation after `delay` ms, or never when it is negative, as
+   * outstanding work meanwhile — deaf to ping, as a busy kernel is.
+   */
+  function evaluate(msg, delay, result) {
+    outstanding++;
+    const answer = () => {
+      outstanding--;
+      if (process.env.FAKE_METHOD_LOG) {
+        appendFileSync(process.env.FAKE_METHOD_LOG, `(replied ${msg.method})\n`);
+      }
+      send({ jsonrpc: "2.0", id: msg.id, result: result() });
+    };
+    if (delay < 0) return;
+    if (delay === 0) answer();
+    else setTimeout(answer, delay);
+  }
   let buffer = "";
   process.stdin.setEncoding("utf8");
   process.stdin.on("data", (chunk) => {
@@ -313,7 +338,11 @@ function run() {
           id: msg.id,
           result: {
             protocolVersion: msg.params.protocolVersion,
-            capabilities: { tools: { listChanged: true }, prompts: {} },
+            capabilities: {
+              tools: { listChanged: true },
+              prompts: {},
+              ...(process.env.FAKE_RESOURCES ? { resources: {} } : {}),
+            },
             serverInfo: { name: "fake-wolfram", version: "1.0.0" },
           },
         });
@@ -384,6 +413,42 @@ function run() {
       });
       return;
     }
+    if (msg.method === "prompts/get") {
+      evaluate(msg, Number(process.env.FAKE_PROMPT_DELAY_MS ?? "0"), () => ({
+        messages: [
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: `prompted ${msg.params?.name} ${JSON.stringify(msg.params?.arguments ?? {})} server=${serverName}`,
+            },
+          },
+        ],
+      }));
+      return;
+    }
+    if (msg.method === "resources/list" && process.env.FAKE_RESOURCES) {
+      send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        result: {
+          resources: [{ uri: "ui://fake/view", name: "view", mimeType: "text/html;profile=mcp-app" }],
+        },
+      });
+      return;
+    }
+    if (msg.method === "resources/read" && process.env.FAKE_RESOURCES) {
+      evaluate(msg, Number(process.env.FAKE_RESOURCE_DELAY_MS ?? "0"), () => ({
+        contents: [
+          {
+            uri: msg.params?.uri,
+            mimeType: "text/html;profile=mcp-app",
+            text: `read ${msg.params?.uri} server=${serverName}`,
+          },
+        ],
+      }));
+      return;
+    }
     if (msg.method === "tools/call") {
       callsSeen++;
       if (!tools.some((t) => t.name === msg.params?.name)) {
@@ -430,40 +495,26 @@ function run() {
           );
         }
       }
-      outstanding++;
-      const answer = () => {
-        outstanding--;
-        if (process.env.FAKE_METHOD_LOG) {
-          appendFileSync(process.env.FAKE_METHOD_LOG, "(replied tools/call)\n");
-        }
-        send({
-          jsonrpc: "2.0",
-          id: msg.id,
-          result: {
-            content: [
-              {
-                type: "text",
-                text:
-                  `evaluated ${JSON.stringify(msg.params.arguments)} server=${serverName}` +
-                  ` base=${process.env.WOLFRAM_BASE ?? "(unset)"}` +
-                  ` userbase=${process.env.WOLFRAM_USERBASE ?? "(unset)"}` +
-                  // AgentTools reads MCP_TOOL_OPTIONS from the environment at
-                  // startup and it is what sets each tool's effective
-                  // TimeConstraint. It reaches the kernel only because kernel.ts
-                  // spreads process.env, so it is reported here to be checked.
-                  ` toolOptions=${process.env.MCP_TOOL_OPTIONS ?? "(unset)"}`,
-              },
-            ],
-          },
-        });
-      };
       // Holding a slot for the length of an evaluation is the normal case, not
       // the exception. A negative delay never answers at all.
       const slow = !delayFirstOnly || callsSeen === 1;
-      if (callDelay < 0 && slow) return;
-      const wait = Math.max(slow ? callDelay : 0, progressDone);
-      if (wait === 0) answer();
-      else setTimeout(answer, wait);
+      const wait = callDelay < 0 && slow ? -1 : Math.max(slow ? callDelay : 0, progressDone);
+      evaluate(msg, wait, () => ({
+        content: [
+          {
+            type: "text",
+            text:
+              `evaluated ${JSON.stringify(msg.params.arguments)} server=${serverName}` +
+              ` base=${process.env.WOLFRAM_BASE ?? "(unset)"}` +
+              ` userbase=${process.env.WOLFRAM_USERBASE ?? "(unset)"}` +
+              // AgentTools reads MCP_TOOL_OPTIONS from the environment at
+              // startup and it is what sets each tool's effective
+              // TimeConstraint. It reaches the kernel only because kernel.ts
+              // spreads process.env, so it is reported here to be checked.
+              ` toolOptions=${process.env.MCP_TOOL_OPTIONS ?? "(unset)"}`,
+          },
+        ],
+      }));
       return;
     }
     if (msg.id !== undefined) {

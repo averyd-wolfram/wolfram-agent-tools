@@ -9,7 +9,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, mkdtempSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { createServer } from "node:net";
+import { connect as connectSocket, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -171,6 +171,35 @@ const upstreamTools = (tools) => tools.filter((t) => t.name !== STATUS_TOOL);
 const hasStatusTool = (tools) => tools.some((t) => t.name === STATUS_TOOL);
 
 const answeredByFake = (result) => /^evaluated/.test(result?.content?.[0]?.text ?? "");
+
+/** Wait until `condition` holds, or `ms` passes, rather than sleeping past it. */
+const until = async (condition, ms = 10_000) => {
+  for (const by = Date.now() + ms; Date.now() < by && !condition(); ) {
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  return condition();
+};
+
+/** The methods a fake kernel logged under FAKE_METHOD_LOG, in order. */
+const methodLog = (path) => (existsSync(path) ? readFileSync(path, "utf8").trim().split("\n") : []);
+
+/**
+ * Start one kernel, quickly, so the next session's cache says what it offers.
+ * A session offers prompts and resources only once a kernel has been seen to.
+ */
+const warmCache = async (env = {}) => {
+  const warm = await connect(env);
+  await warm.client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } },
+    undefined, { timeout: 20_000 });
+  await warm.client.close();
+  await new Promise((r) => setTimeout(r, 300));
+};
+
+/** The `sharing` line of a session's wolfram_status, which says which path it took. */
+const sharingLine = async (client) =>
+  ((await client.callTool({ name: "wolfram_status", arguments: {} })).content?.[0]?.text ?? "")
+    .split("\n")
+    .find((line) => line.startsWith("sharing")) ?? "";
 
 /**
  * Brokers belonging to *this* run only — never anyone else's.
@@ -1975,6 +2004,302 @@ for (const sharing of ["0", "1"]) {
 }
 
 // ---------------------------------------------------------------------------
+// A prompt or a resource read is an evaluation too, and the proxy discarded its
+// cancel: harmless while the SDK cut either at a minute, but once each waits the
+// call ceiling (#39), a cancelled prompt would hold the kernel for five minutes,
+// with every call meanwhile queued behind it. Stopping the kernel honours the
+// cancel, as for a tool call.
+heading("Cancelling a prompt or a resource read reaches the kernel, on either path");
+{
+  wipeCache();
+  await warmCache({ FAKE_RESOURCES: "1" });
+
+  const ops = [
+    { what: "prompt", method: "prompts/get", send: (c, options) => c.getPrompt({ name: "Search", arguments: { query: "x" } }, options) },
+    { what: "resource read", method: "resources/read", send: (c, options) => c.readResource({ uri: "ui://fake/view" }, options) },
+  ];
+  for (const sharing of ["0", "1"]) {
+    for (const op of ops) {
+      const label = `${sharing === "1" ? "shared" : "private"} ${op.what}`;
+      const tag = `${sharing}-${op.what.replace(/ /g, "-")}`;
+      const runtime = privateDir(join(home, `run-cancel-eval-${tag}`));
+      const methods = join(home, `methods-eval-${tag}.log`);
+      const s = await connect({
+        WOLFRAM_MCP_SHARE: sharing,
+        XDG_RUNTIME_DIR: runtime,
+        WOLFRAM_MCP_IDLE_MINUTES: "5",
+        FAKE_PROMPT_DELAY_MS: "8000",
+        FAKE_RESOURCE_DELAY_MS: "8000",
+        FAKE_RESOURCES: "1",
+        FAKE_METHOD_LOG: methods,
+      });
+      const controller = new AbortController();
+      const cancelled = op
+        .send(s.client, { timeout: 30_000, signal: controller.signal })
+        .then(() => "resolved", () => "rejected");
+      // Only once the kernel holds the work, as for a call above.
+      await until(() => methodLog(methods).includes(op.method));
+      controller.abort();
+      check(`${label}: the cancelled request stops waiting`, (await cancelled) === "rejected");
+      const startedAt = Date.now();
+      const next = await s.client
+        .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 })
+        .catch((err) => ({ error: err }));
+      const elapsed = Date.now() - startedAt;
+      const log = methodLog(methods);
+      check(
+        `${label}: the next call is answered by a fresh kernel, not queued behind it`,
+        answeredByFake(next) && elapsed < 5000 && log.filter((m) => m === "initialize").length === 2,
+        `${elapsed}ms for an 8000ms ${op.what}; ${log.join(", ") || "(no log)"}`.slice(0, 160),
+      );
+      await s.client.close();
+      signalOwnBrokers("SIGTERM", runtime);
+      await new Promise((r) => setTimeout(r, 300));
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// A request cancelled while it waits its turn never reaches the kernel, so there
+// is nothing to stop. It used to be sent on anyway: the SDK refused it unsent,
+// and `#fate`, seeing the cancel, stopped the kernel — idle, sessions and all —
+// or started one only to stop it. Here a prompt waits behind a 3 s call, on the
+// one kernel either path has, and is cancelled there.
+heading("A request cancelled while it waits is dropped, and the kernel kept, on either path");
+{
+  wipeCache();
+  await warmCache();
+  for (const sharing of ["0", "1"]) {
+    const label = sharing === "1" ? "shared" : "private";
+    const runtime = privateDir(join(home, `run-queued-cancel-${sharing}`));
+    const methods = join(home, `methods-queued-cancel-${sharing}.log`);
+    const s = await connect({
+      WOLFRAM_MCP_SHARE: sharing,
+      XDG_RUNTIME_DIR: runtime,
+      WOLFRAM_MCP_IDLE_MINUTES: "5",
+      FAKE_CALL_DELAY_MS: "3000",
+      FAKE_DELAY_FIRST_ONLY: "1",
+      FAKE_METHOD_LOG: methods,
+    });
+    const first = s.client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "slow" } },
+      undefined, { timeout: 30_000 });
+    await until(() => methodLog(methods).includes("tools/call"));
+    const controller = new AbortController();
+    const queued = s.client
+      .getPrompt({ name: "Search", arguments: { query: "x" } }, { timeout: 30_000, signal: controller.signal })
+      .then(() => "resolved", () => "rejected");
+    // Long enough to be queued behind the call, well short of its end.
+    await new Promise((r) => setTimeout(r, 300));
+    controller.abort();
+    check(`${label}: the waiting prompt stops waiting`, (await queued) === "rejected");
+    const slow = await first;
+    const next = await s.client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "again" } },
+      undefined, { timeout: 30_000 });
+    const log = methodLog(methods);
+    check(
+      `${label}: it never reached the kernel, which is kept and answers on`,
+      answeredByFake(slow) && answeredByFake(next) && !log.includes("prompts/get") &&
+        log.filter((m) => m === "initialize").length === 1,
+      log.join(", ").slice(0, 160),
+    );
+    await s.client.close();
+    signalOwnBrokers("SIGTERM", runtime);
+    await new Promise((r) => setTimeout(r, 300));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The broker registered an evaluation for `cancel` only after it had awaited its
+// own preparation, so a cancel read before then found nothing and the
+// evaluation ran to its ceiling — on a cold broker, for as long as the licence
+// took to resolve. Sent in one write with its request, the cancel is read in the
+// same chunk, before any await, and must still stop it.
+heading("A cancel read with its own request still reaches it, at the broker");
+{
+  const methods = join(home, "methods-same-chunk.log");
+  const knobs = { FAKE_METHOD_LOG: methods, FAKE_PROMPT_DELAY_MS: "3000" };
+  const saved = Object.fromEntries(Object.keys(knobs).map((name) => [name, process.env[name]]));
+  Object.assign(process.env, knobs);
+  const address = join(privateDir(join(home, "run-same-chunk")), "broker.sock");
+  let broker = null;
+  let socket = null;
+  try {
+    broker = await lib.startBroker({
+      address,
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 10_000,
+      reserveSeats: 0,
+      allowInspect: false,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+    });
+    const replies = new Map();
+    let buffered = "";
+    socket = connectSocket(address);
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffered += chunk;
+      for (let at; (at = buffered.indexOf("\n")) !== -1; buffered = buffered.slice(at + 1)) {
+        const frame = JSON.parse(buffered.slice(0, at));
+        if (typeof frame.id === "number") replies.set(frame.id, frame);
+      }
+    });
+    const frame = (value) => `${JSON.stringify(value)}\n`;
+    socket.write(frame({ id: 1, op: "hello", params: lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" }) }));
+    await until(() => replies.has(1));
+    socket.write(
+      frame({ id: 2, op: "getPrompt", params: { name: "Search", arguments: {} }, timeoutMs: 20_000 }) +
+        frame({ id: 3, op: "cancel", target: 2 }),
+    );
+    await until(() => replies.has(2));
+    const reply = replies.get(2);
+    check(
+      "the request is answered as cancelled",
+      reply?.ok === false && /cancel/.test(reply.error ?? ""),
+      JSON.stringify(reply ?? null).slice(0, 100),
+    );
+    check(
+      "and the kernel never had it",
+      !methodLog(methods).includes("prompts/get"),
+      methodLog(methods).join(", ") || "(no kernel spoke)",
+    );
+  } finally {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    socket?.destroy();
+    await broker?.stop?.();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// A cancelled request must cost nobody a kernel. The session drops one that
+// never reached its kernel, but the pool let it in first: a request cancelled
+// before it got there, or while it queued, was still served by the pool's
+// tiers — a kernel grown, or another session's idle one retired to make room —
+// for a request then dropped. And the session started a kernel for a request
+// cancelled while it was taking back abandoned work. One seat each, so making
+// room means retiring the other project's kernel, which a second start shows.
+heading("A cancelled request makes no room for itself, in the pool or the session");
+{
+  const savedEnv = { ...process.env };
+  const evaluate = (client, request) =>
+    client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, request);
+  const project = (marker, server, timings = {}) =>
+    lib.kernelFlavour({
+      MCP_SERVER_NAME: server,
+      FAKE_MARKER: marker,
+      ...timings,
+      WOLFRAM_MCP_KERNEL_ENV: ["FAKE_MARKER", ...Object.keys(timings)].join(","),
+    });
+  const onePool = () =>
+    new lib.KernelPool({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 1, type: null },
+      learnFromKernels: false,
+    });
+  const cancelled = () => {
+    const controller = new AbortController();
+    controller.abort(new Error("cancelled by the caller"));
+    return controller.signal;
+  };
+  const outcome = (promise) => promise.then(() => "served", (err) => err.message);
+  try {
+    // Before the pool: project B's kernel idles in the only seat.
+    {
+      const marker = join(home, "starts-cancel-before-pool.log");
+      const pool = onePool();
+      const b = project(marker, "WolframAlpha");
+      await pool.run(b, evaluate);
+      const early = await outcome(pool.run(project(marker, "WolframLanguage"), evaluate, { signal: cancelled() }));
+      await pool.run(b, evaluate);
+      await pool.stop();
+      check(
+        "a request cancelled before it reaches the pool is turned away there",
+        /cancelled before it reached the kernel/.test(early),
+        early.slice(0, 90),
+      );
+      check(
+        "and the idle kernel it would have displaced is kept",
+        starts(marker) === 1,
+        `${starts(marker)} kernel start(s)`,
+      );
+    }
+    // While it queues: project A's 2 s call holds the only seat, and B waits.
+    {
+      const marker = join(home, "starts-cancel-in-queue.log");
+      const pool = onePool();
+      const a = project(marker, "WolframLanguage", { FAKE_CALL_DELAY_MS: "2000", FAKE_DELAY_FIRST_ONLY: "1" });
+      const call = pool.run(a, evaluate);
+      await new Promise((r) => setTimeout(r, 300));
+      const controller = new AbortController();
+      const queuedAt = Date.now();
+      const queued = outcome(pool.run(project(marker, "WolframAlpha"), evaluate, { signal: controller.signal }));
+      await new Promise((r) => setTimeout(r, 200));
+      controller.abort(new Error("cancelled by the caller"));
+      const left = await queued;
+      const leftMs = Date.now() - queuedAt;
+      await call;
+      await pool.run(a, evaluate);
+      await pool.stop();
+      check(
+        "a request cancelled while it queues leaves the queue at once",
+        /cancelled before it reached the kernel/.test(left) && leftMs < 1_500,
+        `${leftMs}ms behind a 2000ms call: ${left.slice(0, 70)}`,
+      );
+      check(
+        "and the kernel it would have displaced is kept",
+        starts(marker) === 1,
+        `${starts(marker)} kernel start(s)`,
+      );
+    }
+    // While the session takes back a kernel holding abandoned work. Cancelled
+    // from the session's own log line as the taking back begins, so the timing
+    // is the session's, not this check's.
+    {
+      const marker = join(home, "starts-cancel-in-reclaim.log");
+      const controller = new AbortController();
+      const session = new lib.KernelSession({
+        bin: fakeKernel,
+        serverName: "WolframLanguage",
+        idleMs: 0,
+        startTimeoutMs: 10_000,
+        clientInfo: { name: "smoke", version: "1.0.0" },
+        log: (line) => {
+          if (/abandoned call has not finished; stopping it/.test(line)) {
+            controller.abort(new Error("cancelled by the caller"));
+          }
+        },
+        extraEnv: { FAKE_CALL_DELAY_MS: "-1", FAKE_MARKER: marker },
+      });
+      try {
+        await outcome(session.run(evaluate, { deadlineMs: 300 }));
+        const dropped = await outcome(session.run(evaluate, { signal: controller.signal }));
+        check(
+          "a request cancelled while abandoned work is taken back starts no kernel for itself",
+          /cancelled before it reached the kernel/.test(dropped) && starts(marker) === 1,
+          `${starts(marker)} kernel start(s): ${dropped.slice(0, 70)}`,
+        );
+      } finally {
+        await session.stop();
+      }
+    }
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key];
+    Object.assign(process.env, savedEnv);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // A long evaluation used to show the caller nothing and then die at the call
 // timeout, however busy the kernel had been: the progress token was never
 // forwarded, and upstream progress had nowhere to go.
@@ -2404,6 +2729,113 @@ heading("An abandoned call is reclaimed the moment the seat is needed");
 }
 
 // ---------------------------------------------------------------------------
+// A prompt is an evaluation too — the paclet's run its searches — and it had no
+// deadline of this server's: the SDK's own minute ended it, which forgets the
+// request, so the work it left on the kernel looked finished the moment it was
+// given up on. Nothing took the kernel back, and the next request queued behind
+// an evaluation nobody could see (#39). Under a 1 s ceiling, the prompt must be
+// answered at the ceiling and the next call must reclaim the kernel, on each
+// path. The shared one runs on the pool's single kernel, so it has nowhere to
+// go but back to the kernel holding the prompt.
+heading("A prompt given up on is reclaimed the moment the seat is needed, on either path");
+{
+  wipeCache();
+  await warmCache();
+
+  const results = await Promise.all(["private", "shared"].map(async (path) => {
+    const sectionMarker = join(home, `starts-prompt-${path}.log`);
+    const runtime = privateDir(join(home, `run-prompt-${path}`));
+    const s = await connect({
+      WOLFRAM_MCP_SHARE: path === "shared" ? "1" : "0",
+      XDG_RUNTIME_DIR: runtime,
+      WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "1",
+      WOLFRAM_MCP_IDLE_MINUTES: "5",
+      FAKE_PROMPT_DELAY_MS: "-1",
+      FAKE_MARKER: sectionMarker,
+    });
+    const promptStarted = Date.now();
+    const prompt = await s.client
+      .getPrompt({ name: "Search", arguments: { query: "x" } }, { timeout: 20_000 })
+      .then(() => "answered", (err) => err.message);
+    const promptElapsed = Date.now() - promptStarted;
+    const callStarted = Date.now();
+    const call = await s.client
+      .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "again" } }, undefined, { timeout: 20_000 })
+      .catch((err) => ({ error: err }));
+    const callElapsed = Date.now() - callStarted;
+    const result = { path, prompt, promptElapsed, call, callElapsed, kernels: starts(sectionMarker), stderr: s.stderr() };
+    await s.client.close();
+    signalOwnBrokers("SIGTERM", runtime);
+    return result;
+  }));
+  for (const { path, prompt, promptElapsed, call, callElapsed, kernels, stderr } of results) {
+    check(
+      `${path}: the prompt is answered at its ceiling, in this server's words`,
+      /no answer from the Wolfram kernel within 1s/.test(prompt) && promptElapsed < 4000,
+      `${promptElapsed}ms: ${prompt.slice(0, 90)}`,
+    );
+    check(
+      `${path}: the next call takes the kernel back, and is answered by a fresh one`,
+      answeredByFake(call) && kernels === 2 && callElapsed < 4000,
+      `kernels=${kernels}, ${callElapsed}ms: ${(call.error?.message ?? call.content?.[0]?.text ?? "").slice(0, 60)}`,
+    );
+    if (path === "private") {
+      // Only the private path's log is this process's own stderr.
+      check(
+        `${path}: and says why it stopped the kernel`,
+        /abandoned call has not finished; stopping it/.test(stderr),
+        stderr.split("\n").filter((l) => /abandon/.test(l)).join(" | ").slice(0, 100),
+      );
+    }
+  }
+  await new Promise((r) => setTimeout(r, 300));
+}
+
+// ---------------------------------------------------------------------------
+// The SDK's own timeout forgets the request, so the kernel's reply, if it ever
+// comes, is dropped and can prove nothing. `#fate` watched the rejected request
+// for that reply, found it settled at once, and kept the kernel as idle — so
+// the next request went to a kernel that might still be computing, to queue
+// behind what nobody could see (#39). Every request this server sends carries a
+// timeout that cannot fire first now, but a library caller's own options still
+// can, so that kernel is presumed busy and reclaimed by the next request.
+heading("A request the SDK gave up on leaves its kernel to be reclaimed, not reused");
+{
+  const sectionMarker = join(home, "starts-sdk-timeout.log");
+  const session = new lib.KernelSession({
+    bin: fakeKernel,
+    serverName: "WolframLanguage",
+    idleMs: 0,
+    startTimeoutMs: 10_000,
+    clientInfo: { name: "smoke", version: "1.0.0" },
+    log: () => {},
+    extraEnv: { FAKE_CALL_DELAY_MS: "-1", FAKE_MARKER: sectionMarker },
+  });
+  try {
+    const cut = await session
+      .run((client) =>
+        client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "forever" } }, undefined, { timeout: 300 }),
+      )
+      .then(() => "answered", (err) => err.message);
+    await new Promise((r) => setTimeout(r, 100));
+    check(
+      "the caller's own SDK timeout ends the request",
+      /Request timed out/.test(cut),
+      cut.slice(0, 80),
+    );
+    check("and the kernel is held as still busy", session.abandoned === true, `abandoned=${session.abandoned}`);
+    const listed = await session.run((client, request) => client.listTools(undefined, request));
+    check(
+      "the next request takes the kernel back, and a fresh one answers",
+      listed.tools?.length > 0 && starts(sectionMarker) === 2,
+      `kernels=${starts(sectionMarker)}`,
+    );
+  } finally {
+    await session.stop();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // The other half of the wedged-kernel story, and the one that was wrong for
 // longer. Retiring on sight meant *every* rejection killed the kernel, so a
 // model guessing a tool name wrong destroyed the evaluator sessions of every
@@ -2494,15 +2926,11 @@ heading("wolfram_status says whether this session's kernels are shared");
   wipeCache();
   const runtime = privateDir(join(home, "run-status-sharing"));
   const s = await connect({ WOLFRAM_MCP_SHARE: "1", WOLFRAM_MCP_INSPECT: "1", XDG_RUNTIME_DIR: runtime });
-  const statusText = async () =>
-    ((await s.client.callTool({ name: "wolfram_status", arguments: {} })).content?.[0]?.text ?? "")
-      .split("\n")
-      .find((line) => line.startsWith("sharing")) ?? "";
-  const before = await statusText();
+  const before = await sharingLine(s.client);
   const brokersBefore = ownBrokers(runtime).length;
   await s.client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } },
     undefined, { timeout: 30_000 });
-  const after = await statusText();
+  const after = await sharingLine(s.client);
   check(
     "before any call it says no broker runs, and starts none",
     /no broker running/.test(before) && brokersBefore === 0,
@@ -2551,10 +2979,7 @@ heading("wolfram_status says whether this session's kernels are shared");
   });
   await new Promise((resolve) => slow.listen(join(runtime, sock ?? "missing.sock"), resolve));
   const late = await connect({ WOLFRAM_MCP_SHARE: "1", WOLFRAM_MCP_INSPECT: "1", XDG_RUNTIME_DIR: runtime });
-  const lateLine =
-    ((await late.client.callTool({ name: "wolfram_status", arguments: {} })).content?.[0]?.text ?? "")
-      .split("\n")
-      .find((line) => line.startsWith("sharing")) ?? "";
+  const lateLine = await sharingLine(late.client);
   await new Promise((r) => setTimeout(r, 2_500));
   check(
     "a broker too slow to answer is not reported as absent",
@@ -2578,10 +3003,7 @@ heading("wolfram_status says whether this session's kernels are shared");
   const alone = await connect({ WOLFRAM_MCP_SHARE: "1", WOLFRAM_MCP_RUNTIME_DIR: exposedRun });
   await alone.client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } },
     undefined, { timeout: 30_000 });
-  const aloneLine =
-    ((await alone.client.callTool({ name: "wolfram_status", arguments: {} })).content?.[0]?.text ?? "")
-      .split("\n")
-      .find((line) => line.startsWith("sharing")) ?? "";
+  const aloneLine = await sharingLine(alone.client);
   check(
     "a session that fell back to a private kernel says so",
     /private kernel/.test(aloneLine),
@@ -4098,39 +4520,83 @@ heading("A time too long for a timer is held to the longest one can hold");
 // server sends a kernel told it nothing: their deadline is the session's, kept
 // apart so that a late reply is still received. So every call longer than a
 // minute — a raised timeConstraint, a paclet build — was cut at 60 s with
-// "Request timed out", and the kernel's answer dropped (#34). A 65 s call under
-// a 120 s ceiling must be answered, on each path; both run at once, so the
-// suite waits the minute once.
-heading("A call longer than a minute is answered, on either path");
+// "Request timed out", and the kernel's answer dropped (#34). #37 fixed the tool
+// call only, and a prompt, which runs the prompt's own function in the kernel,
+// was still cut at a minute, as was a resource read (#39). Each of the three,
+// 65 s long under a 120 s ceiling, must be answered on each path; all six run
+// at once, so the suite waits the minute once.
+heading("A call, a prompt or a resource read longer than a minute is answered, on either path");
 {
   wipeCache();
+  await warmCache({ FAKE_RESOURCES: "1" });
+
   const runtime = join(home, "run-long-call");
   privateDir(runtime);
-  const slow = { WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "120", FAKE_CALL_DELAY_MS: "65000" };
-  const [privately, shared] = await Promise.all([
-    connect(slow),
-    connect({ ...slow, WOLFRAM_MCP_SHARE: "1", XDG_RUNTIME_DIR: runtime }),
-  ]);
-  // This client's own SDK would stop at 60 s too.
-  const call = async (s) => {
-    const started = Date.now();
-    const result = await s.client.callTool(
-      { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } },
-      undefined,
-      { timeout: 150_000 },
-    );
-    return { result, elapsed: Date.now() - started };
+  const slow = {
+    WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "120",
+    FAKE_CALL_DELAY_MS: "65000",
+    FAKE_PROMPT_DELAY_MS: "65000",
+    FAKE_RESOURCE_DELAY_MS: "65000",
+    FAKE_RESOURCES: "1",
   };
-  const outcomes = await Promise.all([call(privately), call(shared)]);
-  for (const [label, { result, elapsed }] of [["a private kernel", outcomes[0]], ["a shared one", outcomes[1]]]) {
+  // Three kernels' budget, so the shared three run side by side rather than
+  // queueing for one kernel, a minute each.
+  const shared = { ...slow, WOLFRAM_MCP_SHARE: "1", XDG_RUNTIME_DIR: runtime, WOLFRAM_MCP_LICENSE_LIMIT: "4" };
+  // This client's own SDK would stop at 60 s too.
+  const patient = { timeout: 150_000 };
+  const ops = [
+    {
+      what: "call",
+      send: (c) => c.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, patient),
+      // The kernel's own answer, not merely one that is not an error.
+      answered: (r) => answeredByFake(r),
+      text: (r) => r.content?.[0]?.text ?? "",
+    },
+    {
+      what: "prompt",
+      send: (c) => c.getPrompt({ name: "Search", arguments: { query: "x" } }, patient),
+      answered: (r) => /^prompted Search/.test(r.messages?.[0]?.content?.text ?? ""),
+      text: (r) => r.messages?.[0]?.content?.text ?? "",
+    },
+    {
+      what: "resource read",
+      send: (c) => c.readResource({ uri: "ui://fake/view" }, patient),
+      answered: (r) => /^read ui:\/\/fake\/view/.test(r.contents?.[0]?.text ?? ""),
+      text: (r) => r.contents?.[0]?.text ?? "",
+    },
+  ];
+  const sessions = await Promise.all(
+    ["private", "shared"].flatMap((path) =>
+      ops.map(async (op) => ({ path, op, s: await connect(path === "shared" ? shared : slow) })),
+    ),
+  );
+  const outcomes = await Promise.all(
+    sessions.map(async ({ path, op, s }) => {
+      const started = Date.now();
+      const result = await op.send(s.client).catch((err) => ({ error: err }));
+      return { path, op, s, result, elapsed: Date.now() - started };
+    }),
+  );
+  for (const { path, op, result, elapsed } of outcomes) {
     check(
-      `${label} answers a 65 s call under a 120 s ceiling`,
-      !result.isError && elapsed >= 64_000,
-      `${elapsed}ms: ${(result.content?.[0]?.text ?? "").slice(0, 90)}`,
+      `a ${path === "shared" ? "shared" : "private"} kernel answers a 65 s ${op.what} under a 120 s ceiling`,
+      !result.error && op.answered(result) && elapsed >= 64_000,
+      `${elapsed}ms: ${(result.error ? result.error.message : op.text(result)).slice(0, 90)}`,
     );
   }
-  await privately.client.close();
-  await shared.client.close();
+  // A shared session that could not attach falls back to a private kernel,
+  // which answers just as well, so the answer alone does not say which path
+  // it took; the session's own status does.
+  for (const { path, op, s } of outcomes) {
+    if (path !== "shared") continue;
+    const line = await sharingLine(s.client);
+    check(
+      `and the shared ${op.what} went through the broker`,
+      /broker pid \d+/.test(line) && !/private kernel/.test(line),
+      line.trim(),
+    );
+  }
+  await Promise.all(sessions.map(({ s }) => s.client.close()));
   signalOwnBrokers("SIGTERM", runtime);
   await new Promise((r) => setTimeout(r, 300));
 }

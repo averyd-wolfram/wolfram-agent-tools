@@ -44,12 +44,7 @@ import {
   type BackoffState,
   type CandidateIdentity,
 } from "./prepare.js";
-import {
-  CALL_REQUEST_TIMEOUT_MS,
-  HandshakeTimeout,
-  isServerNotResolved,
-  KernelSession,
-} from "./kernel.js";
+import { HandshakeTimeout, isServerNotResolved, KernelSession } from "./kernel.js";
 import type { KernelInstall } from "./locate.js";
 import { errorText, type Logger } from "./log.js";
 import { PKG } from "./version.js";
@@ -92,21 +87,36 @@ async function drainPages<T>(
   return all;
 }
 
-/** How a single tool call is to be run. */
-export interface CallOptions {
+/**
+ * How a request the kernel evaluates is to be run: a tool call, a prompt or a
+ * resource read, which are alike in every way this server can see.
+ */
+export interface EvaluationOptions {
+  /**
+   * The call ceiling, the same for a prompt and a resource read as for a tool
+   * call: a prompt runs its own function in the kernel — the paclet's built-in
+   * prompts run the same searches as its context tools — so it can take as
+   * long. A deadline for the caller, not the kernel (`KernelSession.#fate`).
+   */
   timeoutMs: number;
   /**
-   * Aborts the call, and tells the kernel to stop if it can. A client pressing
-   * Escape used to leave the kernel working: the request was abandoned at the
-   * proxy while the evaluation ran on, so the next call queued behind work
-   * nobody was waiting for — measured at 9877ms for a call that should have
-   * taken 5000.
+   * Aborts the request, and tells the kernel to stop if it can. A client
+   * pressing Escape used to leave the kernel working: the request was abandoned
+   * at the proxy while the evaluation ran on, so the next call queued behind
+   * work nobody was waiting for — measured at 9877ms for a call that should
+   * have taken 5000. A prompt ignored it until it waited as long as a call
+   * (#39), and would then have held the kernel for the whole ceiling.
    */
   signal?: AbortSignal | undefined;
+}
+
+/** How a single tool call is to be run. */
+export interface CallOptions extends EvaluationOptions {
   /**
-   * Relays the kernel's progress to the caller. Also keeps a long evaluation
-   * alive: a call that is reporting progress is not a call that has stalled, so
-   * the timeout resets each time one arrives.
+   * Relays the kernel's progress to the caller. It does not extend the
+   * deadline, which is the session's: progress once reset the SDK's own
+   * timeout, which since #34 cannot fire first, so resetting it bounded nothing
+   * (#40). Measured, AgentTools sends no progress at all.
    */
   onprogress?: ((progress: Progress) => void) | undefined;
 }
@@ -117,9 +127,17 @@ export interface KernelBackend {
   capabilities(): Promise<ServerCapabilities>;
   listTools(cursor?: string): Promise<ToolPage>;
   listPrompts(cursor?: string): Promise<PromptPage>;
-  getPrompt(params: GetPromptRequest["params"]): Promise<GetPromptResult>;
+  /** Without `options`, the session's default minute (`DEFAULT_DEADLINE_MS`). */
+  getPrompt(
+    params: GetPromptRequest["params"],
+    options?: EvaluationOptions,
+  ): Promise<GetPromptResult>;
   listResources(params?: ListResourcesRequest["params"]): Promise<ListResourcesResult>;
-  readResource(params: ReadResourceRequest["params"]): Promise<ReadResourceResult>;
+  /** Without `options`, the session's default minute (`DEFAULT_DEADLINE_MS`). */
+  readResource(
+    params: ReadResourceRequest["params"],
+    options?: EvaluationOptions,
+  ): Promise<ReadResourceResult>;
   callTool(params: CallToolRequest["params"], options: CallOptions): Promise<CallToolResult>;
   /**
    * Registers a handler to run whenever a freshly started kernel becomes
@@ -223,9 +241,9 @@ export class LocalBackend implements KernelBackend {
    * complete lists and neither ever returns a `nextCursor`.
    */
   async listTools(): Promise<ToolPage> {
-    const tools = await this.#session.run((c) =>
+    const tools = await this.#session.run((c, request) =>
       drainPages(async (cursor) => {
-        const page = await c.listTools(cursor ? { cursor } : undefined);
+        const page = await c.listTools(cursor ? { cursor } : undefined, request);
         return { items: page.tools ?? [], nextCursor: page.nextCursor };
       }),
     );
@@ -233,25 +251,37 @@ export class LocalBackend implements KernelBackend {
   }
 
   async listPrompts(): Promise<PromptPage> {
-    const prompts = await this.#session.run((c) =>
+    const prompts = await this.#session.run((c, request) =>
       drainPages(async (cursor) => {
-        const page = await c.listPrompts(cursor ? { cursor } : undefined);
+        const page = await c.listPrompts(cursor ? { cursor } : undefined, request);
         return { items: page.prompts ?? [], nextCursor: page.nextCursor };
       }),
     );
     return { prompts };
   }
 
-  async getPrompt(params: GetPromptRequest["params"]): Promise<GetPromptResult> {
-    return this.#session.run((c) => c.getPrompt(params));
+  async getPrompt(
+    params: GetPromptRequest["params"],
+    options?: EvaluationOptions,
+  ): Promise<GetPromptResult> {
+    return this.#session.run((c, request) => c.getPrompt(params, request), {
+      deadlineMs: options?.timeoutMs,
+      signal: options?.signal,
+    });
   }
 
   async listResources(params?: ListResourcesRequest["params"]): Promise<ListResourcesResult> {
-    return this.#session.run((c) => c.listResources(params));
+    return this.#session.run((c, request) => c.listResources(params, request));
   }
 
-  async readResource(params: ReadResourceRequest["params"]): Promise<ReadResourceResult> {
-    return this.#session.run((c) => c.readResource(params));
+  async readResource(
+    params: ReadResourceRequest["params"],
+    options?: EvaluationOptions,
+  ): Promise<ReadResourceResult> {
+    return this.#session.run((c, request) => c.readResource(params, request), {
+      deadlineMs: options?.timeoutMs,
+      signal: options?.signal,
+    });
   }
 
   async callTool(params: CallToolRequest["params"], options: CallOptions): Promise<CallToolResult> {
@@ -259,16 +289,13 @@ export class LocalBackend implements KernelBackend {
     // as a request timeout: the SDK's timeout cancels the request and forgets
     // it, discarding the kernel's eventual reply, which is the only proof of
     // life this server can get from a kernel that answers nothing while it
-    // computes. See KernelSession.#fate. The SDK is still given a timeout, one
-    // that cannot fire first, or it applies its own 60 s default (#34).
+    // computes. See KernelSession.#fate. The session's `request` carries the
+    // signal, and an SDK timeout that cannot fire first (#34).
     return this.#session.run(
-      (c) =>
+      (c, request) =>
         c.callTool(params, undefined, {
-          timeout: CALL_REQUEST_TIMEOUT_MS,
-          ...(options.signal ? { signal: options.signal } : {}),
-          ...(options.onprogress
-            ? { onprogress: options.onprogress, resetTimeoutOnProgress: true }
-            : {}),
+          ...request,
+          ...(options.onprogress ? { onprogress: options.onprogress } : {}),
         }),
       { deadlineMs: options.timeoutMs, signal: options.signal },
     ) as Promise<CallToolResult>;
@@ -453,14 +480,20 @@ export class DeferredBackend implements KernelBackend {
   async listPrompts(cursor?: string): Promise<PromptPage> {
     return (await this.#get()).listPrompts(cursor);
   }
-  async getPrompt(params: GetPromptRequest["params"]): Promise<GetPromptResult> {
-    return (await this.#get()).getPrompt(params);
+  async getPrompt(
+    params: GetPromptRequest["params"],
+    options?: EvaluationOptions,
+  ): Promise<GetPromptResult> {
+    return (await this.#get()).getPrompt(params, options);
   }
   async listResources(params?: ListResourcesRequest["params"]): Promise<ListResourcesResult> {
     return (await this.#get()).listResources(params);
   }
-  async readResource(params: ReadResourceRequest["params"]): Promise<ReadResourceResult> {
-    return (await this.#get()).readResource(params);
+  async readResource(
+    params: ReadResourceRequest["params"],
+    options?: EvaluationOptions,
+  ): Promise<ReadResourceResult> {
+    return (await this.#get()).readResource(params, options);
   }
   async callTool(params: CallToolRequest["params"], options: CallOptions): Promise<CallToolResult> {
     return (await this.#get()).callTool(params, options);

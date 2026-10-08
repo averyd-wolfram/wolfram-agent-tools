@@ -14,10 +14,12 @@
  * a probe and then the serving kernel was the cold start's whole budget.
  */
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { KernelFlavour } from "./flavour.js";
 import {
   isServerNotResolved,
   KernelSession,
+  RequestDropped,
   ServerNotResolved,
   type RunOptions,
 } from "./kernel.js";
@@ -108,7 +110,7 @@ interface Slot {
 interface Waiter {
   flavour: KernelFlavour;
   resolve: (slot: Slot) => void;
-  reject: (err: Error) => void;
+  reject: (err: unknown) => void;
 }
 
 /**
@@ -309,7 +311,7 @@ export class KernelPool {
    * Five tiers, and the order is what keeps sharing wide while never serving a
    * session from a kernel that is not its own kind.
    */
-  async #acquire(flavour: KernelFlavour): Promise<Slot> {
+  async #acquire(flavour: KernelFlavour, signal?: AbortSignal): Promise<Slot> {
     const mine = (s: Slot) => s.flavour.digest === flavour.digest;
 
     const free = this.#slots.find((s) => !s.busy && !s.session.abandoned && mine(s));
@@ -338,7 +340,22 @@ export class KernelPool {
       `all ${this.#slots.length} kernel(s) busy and budget reached; queueing ` +
         `(${this.#waiters.length + 1} waiting)`,
     );
-    return new Promise<Slot>((resolve, reject) => this.#waiters.push({ flavour, resolve, reject }));
+    return new Promise<Slot>((resolve, reject) => {
+      const waiter: Waiter = { flavour, resolve, reject };
+      this.#waiters.push(waiter);
+      // Cancelled in the queue, it leaves the queue: left in, it was served
+      // like any other, by a kernel grown or another session's retired for it.
+      signal?.addEventListener(
+        "abort",
+        () => {
+          const at = this.#waiters.indexOf(waiter);
+          if (at === -1) return; // already served; `session.run` drops it
+          this.#waiters.splice(at, 1);
+          reject(new RequestDropped(signal.reason));
+        },
+        { once: true },
+      );
+    });
   }
 
   #release(slot: Slot): void {
@@ -489,17 +506,27 @@ export class KernelPool {
    */
   async run<T>(
     flavour: KernelFlavour,
-    fn: (client: Client) => Promise<T>,
+    fn: (client: Client, request: RequestOptions) => Promise<T>,
     options: RunOptions = {},
   ): Promise<T> {
     const refusal = this.#refusal(flavour);
     if (refusal) throw refusal;
-    const slot = await this.#acquire(flavour);
+    // Cancelled before it reached the pool, so no room is made for it: let in,
+    // it could grow a kernel, or retire another session's idle one, for a
+    // request `session.run` then dropped.
+    if (options.signal?.aborted) throw new RequestDropped(options.signal.reason);
+    const slot = await this.#acquire(flavour, options.signal);
     try {
       const result = await slot.session.run(fn, options);
       this.#release(slot);
       return result;
     } catch (err) {
+      // The kernel never had it, so there is nothing to vouch for: it goes
+      // straight back. Quarantined, its log said the kernel had answered.
+      if (err instanceof RequestDropped) {
+        this.#release(slot);
+        throw err;
+      }
       if (isServerNotResolved(err)) this.#recordUnresolved(flavour.digest, err);
       this.#quarantine(slot, errorText(err));
       throw err;

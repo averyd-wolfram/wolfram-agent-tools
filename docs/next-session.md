@@ -71,6 +71,13 @@ in `docs/design.md`.
   release-please input — how #21 was dropped (#24). #25 tried to check descriptions instead,
   imitating how GitHub builds the commit; two review rounds kept finding more of GitHub to
   imitate, and it was closed unmerged.
+- **Node's typings are held to the Node floor, and Dependabot's dev updates are in** (2026-10-08).
+  #61 (`51af643`, fixes #52) pinned `@types/node` to `~22.13.0`, had Dependabot ignore its
+  minors and majors, and added a check that the installed typings are the floor's line;
+  Dependabot's #55 (`@types/node` 26) was closed. #54 (`ad86ca2`: eslint 10.11, prettier 3.9.9,
+  typescript-eslint 8.71, all dev-only) was rebased onto it so CI tested the pair, then merged.
+  Both went through the merge process now under *Working here*: Codex's review, then the
+  maintainer's approval. Neither changes what ships, so neither makes a release.
 - **The backlog is GitHub issues** (`gh issue list`), labelled by type, `needs design` and area
   (*Working here* below). Other agents file there too, notably the downstream plugin's.
 - **The release pipeline versions itself** from the commit types on `main`. `docs/releasing.md`
@@ -80,30 +87,46 @@ in `docs/design.md`.
 
 ## What to do next, in order
 
-1. **The one link of #7 left unobserved**: Claude Code running the auto-update pass itself, in
+1. **PR #63 (fixes #39) waits on the maintainer's approval** (2026-10-08).
+   Every kernel request now carries this server's deadline. `KernelSession.run` hands the work
+   it runs the SDK options from one helper (`requestOptions`, a timeout that cannot fire
+   first) and gives every run a deadline: the call timeout for a tool call, a prompt and a
+   resource read — the proxy passes it, and it crosses the socket as `timeoutMs` — and
+   `DEFAULT_DEADLINE_MS`, the SDK's old minute, for the lists. An SDK timeout that still
+   fires, from a library caller's own options, leaves the kernel presumed busy for the next
+   request to reclaim. Prompts and resource reads are cancellable as tool calls are, since
+   waiting the call ceiling a cancelled one would otherwise hold the kernel for five minutes.
+   Three `/code-review high` rounds added: a request cancelled before it reaches the kernel
+   is dropped (`RequestDropped`) without stopping or starting one, the pool makes no room for
+   it, and the broker registers an evaluation for `cancel` as its frame is read. The third
+   round and Codex both found nothing on `3b7a0cf`, with CI green there.
+   - **The maintainer's call.** Prompts and resource reads take the call ceiling, not a
+     minute of their own: the setting is documented as giving up on a single evaluation, and
+     the paclet's prompts run its searches. The PR description puts it, and the round-two
+     thread on `proxy.ts` says the alternative is a one-line change.
+   - **Left.** This handoff, committed last, is a new head and gets its own review round and
+     Codex's, as every push does; then the maintainer's approval and the squash-merge. Then
+     comment on #40 that #63 did its first, second and fourth points, leaving the third
+     (overlap the minute with an earlier section).
+   - **From this work.** Filed #62: a kernel's own error on `prompts/get` or `resources/read`
+     reaches the client with its prefix doubled, on the private path only. Noted on #16 that
+     prompts and resource reads now share `callTool`'s broker ceiling, and on #33 that the
+     proxy's two new ceilings are not held to `MAX_TIME_MS` for a library-built `Config`.
+2. **The one link of #7 left unobserved**: Claude Code running the auto-update pass itself, in
    an interactive session up to ten minutes after the first message, and saying `Plugin updated:
    wolfram`. Check it at the next release, in a project following `release`; and try the route at
    the 2.1.75 client floor, unmeasured for it. `docs/releasing.md` has the headless check.
-2. **Dependabot's open PRs**, which the maintainer wants assessed, not merged by default.
-   **#52 is PR #61** (2026-10-08): `@types/node` held to `~22.13.0` and Dependabot told to ignore
-   its minors and majors, with a check that the installed typings are the floor's line. Three
-   review rounds; three threads are left open for the maintainer, each answered without a
-   change (TypeScript 7, tracked on #56; a version check rather than a compile probe; the
-   suite's other `package.json` reads). Once it merges, close #55 (`@types/node` 26) with
-   `@dependabot close`; the ignore keeps it from returning.
-   **#54** (eslint 10.11, prettier 3.9.9, typescript-eslint 8.71; green) was assessed on
-   2026-10-08 and is ready for the maintainer: dev-only, eslint 10.11's engines still accept
-   `^22.13.0`, and its new transitive packages (`file-entry-cache` 11 and the `cacheable` and
-   `keyv` 5 family under it) are dev-only too. eslint's range skips `file-entry-cache` 11.1.6,
-   which was pulled from the registry; the lock takes 11.1.5. **#56** (TypeScript 7) still
-   waits: typescript-eslint 8.71.1 accepts TypeScript `<6.1.0` (checked 2026-10-08). It will
-   also need `"types": ["node"]` in `tsconfig.json`, since TypeScript 7 no longer includes
-   `@types/*` by default; with it, 7.0.2 compiles `src/` on either typings (measured, noted on
-   #56). `tsconfig.json` ships, so that change is a `fix:`. Filed last
-   session: #58 (tag every version the branch skips, and check a tag's commit), and #46 to #49
-   (pin actions to commits, provenance, immutable releases, CI on the release PR). The rulesets
-   for `release` and `wolfram--v*` are on (ids 24615785 and 24615786).
-3. **Design the kernel-start cluster before code** (`needs design`, `area: startup` and
+3. **Dependabot's one open PR, #56** (TypeScript 7), which waits: typescript-eslint 8.71.1
+   accepts TypeScript `<6.1.0` (checked 2026-10-08). It will also need `"types": ["node"]` in
+   `tsconfig.json`, since TypeScript 7 no longer includes `@types/*` by default; with it, 7.0.2
+   compiles `src/` on either typings (measured, noted on #56). `tsconfig.json` ships, so that
+   change is a `fix:`. The maintainer wants Dependabot's PRs assessed, not merged by default;
+   one that merges cleanly but was tested on an older `main` gets `@dependabot rebase` first, so
+   CI tests what will land. Also open: #58 (tag every version the branch skips, and check a
+   tag's commit), and #46 to #49 (pin actions to commits, provenance, immutable releases, CI on
+   the release PR). The rulesets for `release` and `wolfram--v*` are on (ids 24615785 and
+   24615786).
+4. **Design the kernel-start cluster before code** (`needs design`, `area: startup` and
    `area: broker`): #22 (back off by what failed — a start refused for lack of time is not a
    broken installation), #20 (any failed start in the pool, and a private restart after idling),
    #19 (a burst for a server that will not start, at a shared broker), #16 (the session guessing
@@ -120,13 +143,12 @@ in `docs/design.md`.
    from 0.1.2's reviews: #33 (timers fed by library-built options can still overflow; clamp at
    each timer), #35 (a numeric setting with a unit suffix is misread silently) and #38
    (durations read three ways across the private path, the broker client and
-   `wolfram_status`). From #37's review: #39 (`prompts/get` and `resources/read` still cut at
-   the SDK's 60 s default, and the busy kernel not reclaimed — a bug, wants a deadline for
-   those ops) and #40 (tighten #37's long-call check).
-4. **Restructure the agent instructions** (#36, `needs design`): a trimmed `AGENTS.md`, the
+   `wolfram_status`). From #37's review: #40 (tighten #37's long-call check), whose third
+   point is all #63 leaves of it.
+5. **Restructure the agent instructions** (#36, `needs design`): a trimmed `AGENTS.md`, the
    handoff's durable rules moved out of it, and the project rules now in the maintainer's
    private Claude Code memory moved into the repository. Agree the design first.
-5. **MA's experiments**, each a ledger row (plan §5 MA, *Order of work*): Codex installing a
+6. **MA's experiments**, each a ledger row (plan §5 MA, *Order of work*): Codex installing a
    Claude Code marketplace entry and trusting our hook; Cursor importing an installed Claude Code
    plugin, and whether its `sessionStart` injects context; Copilot honouring `userConfig`; the
    Agent Plugins precedence in VS Code; Codex's filtered environment against our broker.
@@ -137,11 +159,11 @@ in `docs/design.md`.
    aborted on an uncaught stub-broker error. Its work list — a supported
    userbase route, diagnostics that name the failing directory, a socket-free test partition —
    overlaps #4, #12 and #22.
-6. **The restructure** (MA). M1's `archive` install, update and bad-digest rows need only public
+7. **The restructure** (MA). M1's `archive` install, update and bad-digest rows need only public
    releases (`v0.1.0` then `v0.1.1` is an update), as does a Claude run of the plugin installed
    from the archive.
-7. **MD, downstream packages** (plan §5 MD, D33), after the restructure: another project's
-   plugin built on the release bundle. Item 3's defect for today's users — a server not found
+8. **MD, downstream packages** (plan §5 MD, D33), after the restructure: another project's
+   plugin built on the release bundle. Item 4's defect for today's users — a server not found
    held off by the long back-off — is fixed in 0.1.2 (#5); its `test:custom` counterpart
    remains. #59 (filed 2026-10-08 from the downstream WolframVerifier, `needs design`) measured
    MD-2's split: two releases' bundles on one machine run two brokers, each sizing a pool from
@@ -149,11 +171,11 @@ in `docs/design.md`.
    `wolfram` plugin and a downstream copy and across one plugin's update. It asks for MD-2's
    second candidate, a broker address keyed on `BROKER_PROTOCOL` rather than the version and
    the bundle's bytes, which needs its own argument that sharing never changes an answer.
-8. **The rest of M1**: the chat checklist and M1b's client version, `SessionStart` and file
+9. **The rest of M1**: the chat checklist and M1b's client version, `SessionStart` and file
    workflow (run by a maintainer); entitlement leases outliving clean kernel exits by about an hour
    (measured, cause not found, matters only to entitlement users); a resumed Claude Desktop
    session after a re-upload may lose the LSP (a new session works).
-9. **M2's design checkpoint**, which starts with the stable-2.2.0 union experiment and needs
+10. **M2's design checkpoint**, which starts with the stable-2.2.0 union experiment and needs
    AgentTools 2.2.7 disabled — agree it with the maintainers first.
 
 ## How releases work

@@ -90,7 +90,7 @@ export interface BrokerRequest {
   id: number;
   op: BrokerOp;
   params?: unknown;
-  /** Per-call ceiling, for callTool. */
+  /** Per-request ceiling, for callTool, getPrompt and readResource. */
   timeoutMs?: number;
   /** For `cancel`: the id of the in-flight request to abandon. */
   target?: number;

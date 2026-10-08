@@ -447,8 +447,8 @@ Against a real kernel and the installed paclet, not inferred:
    `tools/call` calls `evaluateTool` inline (`Kernel/Server/Shared.wl`). Measured: a `ping` sent
    500 ms into a 20 s evaluation was not answered until 22.8 s.
 2. **No progress, ever.** `grep -i progress` over the paclet's `Kernel` tree returns nothing.
-   There is no liveness signal during a call, and `resetTimeoutOnProgress` never fires in
-   production.
+   There is no liveness signal during a call, so nothing can extend a deadline on the kernel's
+   behalf; progress is relayed to the caller, and that is all it does.
 3. **The per-tool bound is a user setting.** `WolframLanguageEvaluator`'s 60 s is
    `toolOptionValue["WolframLanguageEvaluator", "TimeConstraint"]`, which reads
    **`MCP_TOOL_OPTIONS`** — a JSON environment variable the user puts in their client config
@@ -514,14 +514,33 @@ guards the whole design — if dispatch ever becomes concurrent, all of this nee
 - "Being wrong about the timeout no longer destroys anything" — was written after the ping
   probe landed and is false: it held only for failures that return promptly.
 
-### Still open, and small
+### Every request has this server's deadline
 
-Nothing about tools. The remaining wart is the SDK's unchosen 60 s default on every op that
-carries no deadline of its own (`listTools`, `capabilities`, `getPrompt`, …). Those now flow
-through the same abandonment machinery when they time out, so the damage is bounded, but the
-number is still nobody's choice. The handshake's `initialize` is no longer among them: the SDK's default
-cut it off below the default start timeout, so `KernelSession` now sends it with the start
-timeout plus a beat, and the handshake's own timer, which names the cause, is what fires.
+The SDK gives a request 60 s unless told otherwise, and its timeout is not a deadline for the
+caller: it cancels the request and forgets it, so the kernel's reply is dropped and the work goes
+on out of sight. #37 gave a tool call an SDK timeout that cannot fire first (#34), and nothing
+else: a prompt, which runs its own function in the kernel — the paclet's run its searches — was
+still cut at a minute, and `#fate`, watching a request the SDK had already rejected, took the
+work as finished, so the next request queued behind it (#39).
+
+So `KernelSession.run` owns both halves now. It hands the work it runs the SDK options for every
+request, built in one place, with a timeout that cannot fire first, and it gives every run a
+deadline: the call timeout for a tool call, a prompt and a resource read, and
+`DEFAULT_DEADLINE_MS` — the SDK's minute, now this server's — for the lists. Should the SDK's own
+timeout fire anyway, from a library caller's options, the kernel is presumed busy and the next
+request reclaims it.
+
+The handshake's `initialize` is sent with the start timeout plus a beat, so the handshake's own
+timer, which names the cause, is what fires. What remains on the SDK's minute is the lists the
+kernel-ready hook reads: inside a start, and again outside the queue whenever the kernel says a
+list changed. Neither has a caller to answer, and a failure is logged and ignored.
+
+A cancel stops the kernel only once the kernel has the work. A request cancelled while it
+waited — in the session's queue, the pool's, while abandoned work was taken back, or during a
+kernel's start — is dropped before it is sent (`RequestDropped`); sent on, the SDK refused it
+unsent, and `#fate`, seeing the cancel, stopped a kernel that never had it. The pool turns such a
+request away before its tiers run, and a waiter cancelled in its queue leaves it, so no kernel is
+grown, and no other session's retired, to make room for a request nobody wants.
 
 ## Teardown reaps the kernel's descendants
 
