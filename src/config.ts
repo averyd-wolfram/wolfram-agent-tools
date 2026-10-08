@@ -135,11 +135,43 @@ function readEnvEntry(...names: string[]): [name: string, value: string] | undef
   return undefined;
 }
 
-function readNumber(fallback: number, ...names: string[]): number {
-  const raw = readEnv(...names);
-  if (raw === undefined) return fallback;
-  const parsed = Number.parseFloat(raw);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+/**
+ * A setting's number, read whole. `Number.parseFloat` read a leading number and
+ * dropped the rest, so a value written with a unit was misread without a word:
+ * `WOLFRAM_MCP_IDLE_MINUTES=24h` meant 24 minutes, a call timeout of `30m` meant
+ * 30 seconds (#35). `Number` reads a plain number however JavaScript writes one
+ * — `1.5`, `1e3` — and anything else is `NaN`.
+ */
+function plainNumber(raw: string): number {
+  return /^inf(inity)?$/i.test(raw) ? Infinity : Number(raw);
+}
+
+function readNumber(fallback: number, log: Logger, ...names: string[]): number {
+  const entry = readEnvEntry(...names);
+  if (entry === undefined) return fallback;
+  const [name, raw] = entry;
+  const parsed = plainNumber(raw);
+  if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+  log(`ignoring ${name}="${raw}": expected a finite number, 0 or more; using ${fallback}`);
+  return fallback;
+}
+
+/**
+ * A setting that counts something: a positive integer, read whole, or nothing.
+ * `Number.parseInt` took `4x` for 4 and `2.5` for 2 (#35). The log line says
+ * what was `expected` and what is used `instead`.
+ */
+function readCount(
+  name: string,
+  log: Logger,
+  { expected = "a positive integer", instead }: { expected?: string; instead: string },
+): number | undefined {
+  const raw = readEnv(name);
+  if (raw === undefined) return undefined;
+  const parsed = Number(raw);
+  if (Number.isInteger(parsed) && parsed > 0) return parsed;
+  log(`ignoring ${name}="${raw}": expected ${expected}; using ${instead}`);
+  return undefined;
 }
 
 /**
@@ -157,8 +189,14 @@ function readTime(
   const entry = readEnvEntry(...names);
   if (entry === undefined) return fallback * unit.ms;
   const [name, raw] = entry;
-  const parsed = /^inf(inity)?$/i.test(raw) ? Infinity : Number.parseFloat(raw);
-  if (Number.isNaN(parsed) || parsed < 0) return fallback * unit.ms;
+  const parsed = plainNumber(raw);
+  if (Number.isNaN(parsed) || parsed < 0) {
+    log(
+      `ignoring ${name}="${raw}": expected a number of ${unit.name}, 0 or more and without ` +
+        `a unit, or Infinity; using ${fallback} ${unit.name}`,
+    );
+    return fallback * unit.ms;
+  }
   const ms = parsed * unit.ms;
   if (ms <= MAX_TIME_MS) return ms;
   log(
@@ -254,24 +292,16 @@ export function loadConfig(log: Logger): Config {
     ),
     cacheEnabled: readBoolean(true, "WOLFRAM_MCP_CACHE"),
     share: readBoolean(true, "WOLFRAM_MCP_SHARE"),
-    maxKernels: (() => {
-      const raw = readEnv("WOLFRAM_MCP_MAX_KERNELS");
-      if (raw === undefined) return undefined;
-      const parsed = Number.parseInt(raw, 10);
-      return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
-    })(),
-    reserveSeats: Math.max(0, Math.round(readNumber(1, "WOLFRAM_MCP_RESERVE_SEATS"))),
-    licenseLimit: (() => {
-      const raw = readEnv("WOLFRAM_MCP_LICENSE_LIMIT");
-      if (raw === undefined) return undefined;
-      if (/^(unlimited|infinity|inf)$/i.test(raw)) return "unlimited" as const;
-      const parsed = Number.parseInt(raw, 10);
-      if (Number.isFinite(parsed) && parsed > 0) return parsed;
-      log(
-        `ignoring WOLFRAM_MCP_LICENSE_LIMIT="${raw}": expected a positive integer or "unlimited"`,
-      );
-      return undefined;
-    })(),
+    maxKernels: readCount("WOLFRAM_MCP_MAX_KERNELS", log, {
+      instead: "the budget the licence gives",
+    }),
+    reserveSeats: Math.max(0, Math.round(readNumber(1, log, "WOLFRAM_MCP_RESERVE_SEATS"))),
+    licenseLimit: /^(unlimited|infinity|inf)$/i.test(readEnv("WOLFRAM_MCP_LICENSE_LIMIT") ?? "")
+      ? ("unlimited" as const)
+      : readCount("WOLFRAM_MCP_LICENSE_LIMIT", log, {
+          expected: 'a positive integer or "unlimited"',
+          instead: "what kernels report",
+        }),
     inspect: readBoolean(true, "WOLFRAM_MCP_INSPECT"),
     // Over the resolved name, because that is the one a kernel is started with.
     flavour: kernelFlavour({ ...process.env, MCP_SERVER_NAME: serverName }),
