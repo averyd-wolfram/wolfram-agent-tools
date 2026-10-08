@@ -403,6 +403,27 @@ those is on the real repo:
   amd64 runner) passes. `setup-node`'s `cache: npm` also warns that it found no cache under `act` —
   harmless, there is no GitHub cache backend locally.
 
+## Checking the release branch as a project would
+
+What another project gets from the `release` branch can be checked headlessly, without signing in
+and without touching your own Claude Code: a fresh config directory, a project holding only the
+README's snippet, and the folder marked trusted, since a project's marketplaces apply only in a
+trusted folder.
+
+```bash
+mkdir -p /tmp/rb/config /tmp/rb/project/.claude      # put the README's snippet in project/.claude/settings.json
+P=$(cd /tmp/rb/project && pwd -P)
+echo "{\"projects\": {\"$P\": {\"hasTrustDialogAccepted\": true}}}" > /tmp/rb/config/.claude.json
+cd "$P" && CLAUDE_CONFIG_DIR=/tmp/rb/config CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1 CLAUDE_CODE_SYNC_PLUGIN_INSTALL=1 \
+  claude -p ok --output-format stream-json --verbose < /dev/null | grep '"subtype":"init"'
+```
+
+The `init` event's `plugins` lists `wolfram@wolfram-agent-tools` and its version; the model call
+then fails for want of a sign-in, which doesn't matter. A headless session never runs the
+auto-update pass, which is interactive only: `claude plugin marketplace update wolfram-agent-tools`
+makes the same refresh, and the next session loads what the branch carries. Set `"ref"` to a
+`wolfram--v<version>` tag to check a pin.
+
 ## Trying the plugin as a local install
 
 There are two ways to try the built plugin locally; which one depends on whether you want it
