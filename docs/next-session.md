@@ -104,7 +104,8 @@ in `docs/design.md`.
     setting. Units fit the size, `400ms` to `24d`.
   - **#73 is under review** (fixes #32). The cause was reproduced by widening the stat-to-unlink
     gap: one broker unlinked a winner's fresh socket. A follow-on was measured too: libuv's
-    close unlinked a successor's socket. Now a broker binds under `.b<pid>-<n>`, links it into
+    close unlinked a successor's socket. Now a broker binds under a staging name,
+    `.b<pid>-<8 random hex>`, never cleared first, then links it into
     place and watches its address. It binds at the address directly when it can't link, as for
     an over-long address on Linux. It also fixes the umask and the empty-grace timer for two
     brokers in one process. The suite now fails if anything ends it early. `onBound`, a broker
@@ -136,8 +137,9 @@ in `docs/design.md`.
     - **#75** (`bug`): a call in flight when its broker stops waits out its whole ceiling, and
       forever with none. The cause is `shuttingDown` setting `#closed`, after which `#failAll`
       skips the pending waiters. It is reproduced on `main`'s client through SIGTERM, and
-      #73's retire path is a second way in. The fix is small and needs no design. Whether it
-      rides in 0.1.5 is the maintainer's call.
+      #73's retire path is a second way in. Codex found the same thing on #73 (P2), citing
+      *Sharing is an optimisation, never a dependency*. The maintainer put it in 0.1.5, as a
+      PR of its own (2026-10-08). The fix is small and needs no design.
 - **The backlog is GitHub issues** (`gh issue list`), labelled by type, `needs design` and area
   (*Working here* below). Other agents file there too, notably the downstream plugin's.
 - **The release pipeline versions itself** from the commit types on `main`. `docs/releasing.md`
@@ -148,12 +150,13 @@ in `docs/design.md`.
 ## What to do next, in order
 
 1. **Finish 0.1.5** (milestone `0.1.5`).
-   - **#73**: its fourth review round is answered (above). Once CI passes on its head, comment
-     `@codex review`, answer anything Codex finds, and ask the maintainer to approve the
-     merge. If `main` moved meanwhile, run the suite on the combination first.
-   - **#75**, if the maintainer wants it in 0.1.5: give it the milestone, then fix it with the
-     suite section its issue describes.
-   - **Release PR #72**: merge it once its changelog lists #68, #71 and #73.
+   - **#73**: its fourth review round is answered (above). Codex reviewed `864be5c` and found
+     two things. A P2 is #75, and a P3 was this handoff still naming the old staging name,
+     now fixed. Once CI and Codex pass on its head, ask the maintainer to approve the merge.
+     If `main` moved meanwhile, run the suite on the combination first.
+   - **#75** (milestone `0.1.5`): fix it in its own PR, with the suite section its issue
+     describes, failing first.
+   - **Release PR #72**: merge it once its changelog lists #68, #71, #73 and #75.
    - **Then verify the release as 0.1.4 was**: `v0.1.5` is Latest, `release` has moved and is
      tagged `wolfram--v0.1.5`, and the assets fetched through `releases/latest/download/…`
      match `SHA256SUMS.txt` and say 0.1.5.
