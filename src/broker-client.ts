@@ -457,7 +457,19 @@ export class BrokerBackend implements KernelBackend {
         this.#asking = null;
         if (!alive && !this.#closed) {
           this.#options.log("the broker did not answer; will choose again");
-          this.#closed = true;
+          // Every call still on it is lost with it, so each is failed now,
+          // with the reason. Only marked closed, the connection waited for the
+          // next request to close it, and with none a call with a long ceiling
+          // waited its whole ceiling, or for ever with none (Codex, on #79).
+          // Closed too, so a broker that wakes reads its proxy as gone and
+          // stops the work it was given, which nobody is waiting for any more.
+          this.#failAll(
+            new Error(
+              `the Wolfram broker stopped answering: ${op} ran out, and it did not answer ` +
+                "when asked whether it was still running",
+            ),
+          );
+          this.#socket.destroy();
         }
         return alive;
       });

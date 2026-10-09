@@ -137,6 +137,12 @@ in `docs/design.md`.
       and gives it up only if the ping goes unanswered. `DeferredBackend.#get` waits for that
       verdict (`KernelBackend.settled`), so no request goes blind to a frozen broker in the
       meantime. A timed-out request's progress handler is cleared.
+    - **Codex on `4efa193` (P1), fixed:** a broker given up on was only marked closed, so
+      calls already on it went on waiting their own ceilings, up to 24 days with a long one,
+      and forever with none, unless a later request closed the connection. Now giving the
+      broker up fails every call still on it, with the reason, and closes the socket.
+      *Once a broker stops answering, every call still on it fails, not only the one that
+      ran out* failed on `4efa193` first.
     - **Review split it (the maintainer's call, 2026-10-08).** The second head waited, while
       the broker answered, for a queued request to be answered as a private session's would
       be. Its review found that this let a request queued behind *another session's* call

@@ -3911,6 +3911,57 @@ heading("Regression — a wedged broker cannot outlive the call timeout");
 }
 
 // ---------------------------------------------------------------------------
+// A broker that fails the question has stopped answering, and every call still
+// on it is lost with it. Giving it up only marked the connection closed, so
+// that the next request would choose again, and only that request's close
+// failed the rest. With none, a call with a long ceiling went on waiting for
+// an answer that could never come, its whole ceiling, or for ever with none.
+// Measured: still waiting 3s after the broker was given up, with over 80s of
+// its ceiling to go (Codex, on #79).
+heading("Once a broker stops answering, every call still on it fails, not only the one that ran out");
+{
+  wipeCache();
+  const runtime = privateDir(join(home, "run-stops-answering"));
+  const s = await connect({
+    WOLFRAM_MCP_SHARE: "1",
+    XDG_RUNTIME_DIR: runtime,
+    WOLFRAM_MCP_LICENSE_LIMIT: "4",
+    WOLFRAM_MCP_IDLE_MINUTES: "5",
+    WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "2",
+  });
+  const call = (code, extra = {}) =>
+    s.client
+      .callTool({ name: "WolframLanguageEvaluator", arguments: { code, ...extra } }, undefined, { timeout: 120_000 })
+      .catch((err) => ({ isError: true, content: [{ type: "text", text: `rejected: ${err.message}` }] }));
+  check("a first call is answered through a broker", answeredByFake(await call("1+1")));
+  const frozen = signalOwnBrokers("SIGSTOP", runtime);
+  const startedAt = Date.now();
+  let longAt = null;
+  // A ceiling of a minute and a half: asked for, so the default does not end it.
+  const long = call("2+2", { timeConstraint: 60 }).then((r) => {
+    longAt = Date.now() - startedAt;
+    return r;
+  });
+  await call("3+3");
+  const gaveUp = await until(() => s.stderr().includes("the broker did not answer; will choose again"), 5_000);
+  // No request follows, so nothing but the verdict itself can end it.
+  const settled = await until(() => longAt !== null, 3_000);
+  const longResult = settled ? await long : null;
+  check(
+    "the call with a long ceiling fails once the broker is given up, saying why",
+    frozen === 1 && gaveUp && settled && longResult?.isError === true && /stopped answering/.test(longResult.content?.[0]?.text ?? ""),
+    `froze ${frozen}, ${gaveUp ? "gave it up" : "kept it"}; ` +
+      (settled
+        ? `settled at ${(longAt / 1000).toFixed(1)}s: ${(longResult.content?.[0]?.text ?? "").slice(0, 120)}`
+        : "still waiting 3s after the broker was given up"),
+  );
+  signalOwnBrokers("SIGKILL", runtime);
+  await s.client.close();
+  await long;
+  await new Promise((r) => setTimeout(r, 300));
+}
+
+// ---------------------------------------------------------------------------
 heading("Regression — a frozen broker is not mistaken for a live one at attach");
 {
   wipeCache();
