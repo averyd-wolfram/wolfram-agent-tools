@@ -577,12 +577,26 @@ export class BrokerBackend implements KernelBackend {
           ? undefined
           : setTimeout(() => {
               this.#pending.delete(id);
-              // A broker that has stopped answering is not coming back for this
-              // session: give up on it so the next call can choose again.
-              this.#closed = true;
               reject(
                 new Error(`the Wolfram broker did not answer ${op} within ${budgetText(ceiling)}`),
               );
+              // One request running out is not the broker going. Taken for it,
+              // the connection was marked closed, the session's next request
+              // chose again and closed it, and the broker, reading that as its
+              // proxy vanishing, aborted every other call the session had there
+              // on a broker that was only busy (#78). A busy broker answers ping
+              // from its event loop, ahead of its pool; one that has stopped
+              // answering does not, and only that one is given up, so the next
+              // call can choose again. A request made in the moment the ping
+              // takes still goes here, and a wedged broker holds it to its own
+              // ceiling, as it held this one.
+              void this.#answers().then((alive) => {
+                if (alive || this.#closed) return;
+                this.#options.log(
+                  `the broker did not answer after ${op} ran out; will choose again`,
+                );
+                this.#closed = true;
+              });
             }, timerDelay(ceiling));
       timer?.unref?.();
       const settle = {
