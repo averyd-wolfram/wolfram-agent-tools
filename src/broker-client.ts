@@ -213,6 +213,8 @@ export class BrokerBackend implements KernelBackend {
   #onKernelReady: KernelReadyHandler | undefined;
   /** No new work goes out on this connection; the next call chooses again. */
   #closed = false;
+  /** Whether the broker still answers, while that is being asked (`#stillAnswering`). */
+  #asking: Promise<boolean> | null = null;
 
   private constructor(options: BrokerClientOptions, socket: Socket) {
     this.#options = options;
@@ -436,6 +438,51 @@ export class BrokerBackend implements KernelBackend {
   }
 
   /**
+   * Ask whether the broker still answers, once for however many requests ran
+   * out together, and give it up if it does not.
+   *
+   * A request running out is a question about the broker, not an answer. It
+   * used to be taken as the broker going: the connection was marked closed, the
+   * session's next request chose again and closed it, and the broker, reading
+   * that as its proxy vanishing, aborted every other call the session had there,
+   * on a broker that was only busy (#78). A busy broker answers ping from its
+   * event loop, ahead of its pool; one that has stopped answering does not.
+   * `settled()` holds the session's next request until this is known: sent to
+   * a frozen broker meanwhile, it was held to its own whole ceiling.
+   */
+  #stillAnswering(op: BrokerOp): Promise<boolean> {
+    if (!this.#asking) {
+      this.#options.log(`${op} ran out; asking the broker whether it is still running`);
+      this.#asking = this.#answers().then((alive) => {
+        this.#asking = null;
+        if (!alive && !this.#closed) {
+          this.#options.log("the broker did not answer; will choose again");
+          // Every call still on it is lost with it, so each is failed now,
+          // with the reason. Only marked closed, the connection waited for the
+          // next request to close it, and with none a call with a long ceiling
+          // waited its whole ceiling, or for ever with none (Codex, on #79).
+          // Closed too, so a broker that wakes reads its proxy as gone and
+          // stops the work it was given, which nobody is waiting for any more.
+          this.#failAll(
+            new Error(
+              `the Wolfram broker stopped answering: ${op} ran out, and it did not answer ` +
+                "when asked whether it was still running",
+            ),
+          );
+          this.#socket.destroy();
+        }
+        return alive;
+      });
+    }
+    return this.#asking;
+  }
+
+  /** See `KernelBackend.settled`: whether the broker still answers, once asked. */
+  async settled(): Promise<void> {
+    await this.#asking;
+  }
+
+  /**
    * Tell the broker what this session's kernels must be started with.
    *
    * The values travel, not just their digest, because the broker is what starts
@@ -577,12 +624,16 @@ export class BrokerBackend implements KernelBackend {
           ? undefined
           : setTimeout(() => {
               this.#pending.delete(id);
-              // A broker that has stopped answering is not coming back for this
-              // session: give up on it so the next call can choose again.
-              this.#closed = true;
+              // Its handler too: the connection may now outlive the request,
+              // and a late progress event belongs to a caller already answered.
+              this.#progress.delete(id);
               reject(
                 new Error(`the Wolfram broker did not answer ${op} within ${budgetText(ceiling)}`),
               );
+              // The caller is answered; whether the broker is gone is another
+              // question (`#stillAnswering`). How long a queued request may
+              // wait, on either path, is #80.
+              void this.#stillAnswering(op);
             }, timerDelay(ceiling));
       timer?.unref?.();
       const settle = {

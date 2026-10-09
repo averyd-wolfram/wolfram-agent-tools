@@ -498,6 +498,15 @@ because the budget leaves nothing else — one holding an abandoned call. No sea
 way: the broker exits 60 s after its last proxy detaches whatever its kernels are doing
 (`pool.quiet` was never consulted and has been removed), and a private kernel dies with its process.
 
+On the shared path, a request that runs out is answered at its ceiling, as before. What changed
+is what that says about the broker (#78). It used to be taken as the broker going: the
+connection was closed under every other call the session had there, on a broker that was only
+busy. Now the broker client asks the *broker*, not a kernel, whether it is still running. The
+broker answers `ping` from its event loop, ahead of its pool, so the question is answerable,
+unlike the kernel probe below. Only a broker that doesn't answer is given up, and
+`DeferredBackend` waits for that verdict before sending anything else. How long a queued request
+may wait, on either path, is #80.
+
 ### What was removed, and why
 
 An earlier commit in that work added a `ping` health probe on the theory that a failure leaves

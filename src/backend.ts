@@ -140,6 +140,15 @@ export interface KernelBackend {
    */
   usable?(): boolean;
   /**
+   * Settles once any open question about whether this backend can still serve
+   * is answered. `DeferredBackend` waits on it before reading `usable()`. A
+   * broker being asked, after a request of its ran out, either still answers
+   * and keeps the session, or is given up and the request goes elsewhere: sent
+   * to it in the meantime, a frozen one held each request to its whole ceiling.
+   * Backends with no such question may leave it undefined.
+   */
+  settled?(): Promise<void>;
+  /**
    * Bring this backend to the point where a request reaches a kernel, within
    * `deadline` — the last stage of a preparation `DeferredBackend` runs.
    * Backends that need no such step may leave it undefined.
@@ -353,6 +362,7 @@ export class DeferredBackend implements KernelBackend {
   }
 
   async #get(): Promise<KernelBackend> {
+    await this.#resolved?.settled?.();
     // A backend that has died is worse than no backend: holding it made every
     // later call in the session fail identically, with no way back short of
     // restarting the MCP client.

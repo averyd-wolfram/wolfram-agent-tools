@@ -93,7 +93,7 @@ in `docs/design.md`.
   moved, also had the suite run on `main` combined with them first. Codex's findings were real
   each time: the protocol bump on #65, and on #67 the deadline's tie with the SDK and a NaN
   reaching the broker as `null`.
-- **0.1.5 is three fixes in, one under review** (2026-10-08, milestone `0.1.5`).
+- **0.1.5 is four fixes in, one under review** (2026-10-08, milestone `0.1.5`).
   - **#68 is merged** (`136b59f`, fixes #31). A kernel's client is a `RelayClient` whose
     `listTools` is a plain request, so no `outputSchema` is compiled and the relay judges no
     result. `listAllTools` drains every page, so doctor now shows them all. Claude Code 2.1.290
@@ -115,9 +115,10 @@ in `docs/design.md`.
       early.
     - **Left to issues:** its over-long-address findings are `main`'s behaviour and went to
       #74. The in-flight-call hang Codex found is #75.
-  - **#75 is under review** in #77. A call in flight when its
-    broker stops waited out its whole ceiling, and forever with none. `shuttingDown` set
-    `#closed`, and `#failAll` skipped the waiters once it was set.
+  - **#77 is merged** (`26a3251`, fixes #75), after one `/code-review high` round and a
+    clean Codex review. A call in flight when its broker stops waited out its whole ceiling,
+    and forever with none. `shuttingDown` set `#closed`, and `#failAll` skipped the waiters
+    once it was set.
     - **The fix:** `#failAll` has no guard, so it fails the waiters whatever set `#closed`.
       Nothing can join a map once `#closed` is set, so running it twice is harmless. The
       client's `stop()` fails what is pending with a reason that is true.
@@ -125,6 +126,37 @@ in `docs/design.md`.
       SIGTERM mid-call, and a session that chooses again while its broker is retiring.
     - **#76** (`enhancement`): a call still on a retiring broker should be answered by it
       rather than failed. It is filed, not in this fix.
+  - **#78 is under review** in #79. The maintainer put it in 0.1.5
+    (2026-10-08). One request running out marked the whole connection closed. The session's
+    next request then chose again and closed it, and the broker aborted every other call
+    the session had there.
+    - **Reproduced:** a call that asked for 30 s, and would have been answered at 8 s, failed
+      at 5 s because a default-ceiling call queued behind it ran out. The session then
+      reattached to the same, healthy broker.
+    - **The fix:** a request still fails at its ceiling. The session then pings the broker,
+      and gives it up only if the ping goes unanswered. `DeferredBackend.#get` waits for that
+      verdict (`KernelBackend.settled`), so no request goes blind to a frozen broker in the
+      meantime. A timed-out request's progress handler is cleared.
+    - **Codex on `4efa193` (P1), fixed:** a broker given up on was only marked closed, so
+      calls already on it went on waiting their own ceilings, up to 24 days with a long one,
+      and forever with none, unless a later request closed the connection. Now giving the
+      broker up fails every call still on it, with the reason, and closes the socket.
+      *Once a broker stops answering, every call still on it fails, not only the one that
+      ran out* failed on `4efa193` first.
+    - **Review split it (the maintainer's call, 2026-10-08).** The second head waited, while
+      the broker answered, for a queued request to be answered as a private session's would
+      be. Its review found that this let a request queued behind *another session's* call
+      wait until that call ended, which could be hours. It was reverted to the fix above.
+      The question went to #80 (`needs design`): the two paths answer a queued request
+      differently, neither bounds its wait by its own ceiling, and a request that timed out
+      still runs later on the broker.
+    - **Checks:**
+      - *A request that runs out on a busy broker costs the session no other call* failed
+        on `main` first. It now also requires the request made after the timeout to be
+        answered.
+      - The frozen-broker section checks that a call made while the broker is being asked
+        waits for the verdict and is answered elsewhere. On #79's first head, it waited out
+        its own ceiling.
   - **Release PR #72** is in the milestone.
   - **Filed from the reviews:**
     - **#69** (`needs design`): a non-object schema still fails the whole list, in zod.
@@ -136,16 +168,18 @@ in `docs/design.md`.
       comment from #73's fourth round adds the graceful-close, security and macOS findings
       above.
     - **#75** (`bug`, milestone `0.1.5`): Codex found it on #73 (P2), citing *Sharing is an
-      optimisation, never a dependency*. The maintainer put it in 0.1.5 as a PR of its own
-      (2026-10-08). It is under review (above).
+      optimisation, never a dependency*. Fixed by #77 (above).
     - **#76** (`enhancement`, `area: broker`): a session that chooses again while its broker
       is leaving cancels the call still on it. A comment from #77's review widens it: a
       request the broker never read could be resent safely, if the broker acknowledged what it
       took.
-    - **#78** (`bug`, `area: broker`, from #77's review, traced): one request's timeout marks
-      the whole connection closed, so the session's next request cancels every other call
-      still running on a healthy broker. Suggested fix: `ping` before giving up on the
-      connection.
+    - **#78** (`bug`, `area: broker`, milestone `0.1.5`, from #77's review): one request's
+      timeout cancelled every other call on a healthy broker. Under review (above).
+    - **#80** (`bug`, `needs design`, `area: broker`, from #79's review): how long a queued
+      request may wait. The shared path fails it at its ceiling, and the broker still runs
+      it afterwards. The private path waits however long the queue takes. A shared request
+      can also queue behind another session's call. #79's second head tried to match the
+      private path, and the issue records why that was reverted.
 - **The backlog is GitHub issues** (`gh issue list`), labelled by type, `needs design` and area
   (*Working here* below). Other agents file there too, notably the downstream plugin's.
 - **The release pipeline versions itself** from the commit types on `main`. `docs/releasing.md`
@@ -156,11 +190,11 @@ in `docs/design.md`.
 ## What to do next, in order
 
 1. **Finish 0.1.5** (milestone `0.1.5`).
-   - **#77** (fixes #75): run `/code-review high` on its head and answer the findings. Once CI passes, comment `@codex review`, and read *every* comment
+   - **#79** (fixes #78): run `/code-review high` on its head and answer the findings. Once CI passes, comment `@codex review`, and read *every* comment
      Codex leaves; the comments API pages at 30. Then ask the maintainer to approve the merge.
      If `main` moved meanwhile, run the suite on the combination first.
-   - **Release PR #72**: merge it once its changelog lists #68, #71, #73 and #75. It listed
-     the first three after #73 merged.
+   - **Release PR #72**: merge it once its changelog lists #68, #71, #73, #77 and #79.
+     Ask the maintainer first.
    - **Then verify the release as 0.1.4 was**: `v0.1.5` is Latest, `release` has moved and is
      tagged `wolfram--v0.1.5`, and the assets fetched through `releases/latest/download/…`
      match `SHA256SUMS.txt` and say 0.1.5.
@@ -207,7 +241,9 @@ in `docs/design.md`.
    so a deep runtime directory gets no broker) wants a choice between going private at once, a
    short path that resolves to the directory, and Linux's abstract namespace. Since #73's
    fourth round it also holds a security finding: a truncated socket can land in a
-   world-writable ancestor of the checked directory, so it should come early in item 4. #29 (how to hear of the next advisory against what
+   world-writable ancestor of the checked directory, so it should come early in item 4. #80
+   (how long a queued request may wait, on either path) belongs in the same design: it is
+   the pool's queue and the call ceiling, and #79's second head records one rejected answer. #29 (how to hear of the next advisory against what
    the bundle inlines) needs a design too; an audit gate tried in #27 was reverted. Smaller,
    from 0.1.2's reviews: #38 (durations read three ways) is fixed in #71, and #33 and #35
    shipped in 0.1.4. From #37's review: #40 (tighten #37's long-call check), whose third point is
