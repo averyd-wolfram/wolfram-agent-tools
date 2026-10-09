@@ -126,7 +126,7 @@ in `docs/design.md`.
       SIGTERM mid-call, and a session that chooses again while its broker is retiring.
     - **#76** (`enhancement`): a call still on a retiring broker should be answered by it
       rather than failed. It is filed, not in this fix.
-  - **#78 is under review** on `fix/timeout-keeps-connection`. The maintainer put it in 0.1.5
+  - **#78 is under review** in #79. The maintainer put it in 0.1.5
     (2026-10-08). One request running out marked the whole connection closed. The session's
     next request then chose again and closed it, and the broker aborted every other call
     the session had there.
@@ -166,11 +166,10 @@ in `docs/design.md`.
 ## What to do next, in order
 
 1. **Finish 0.1.5** (milestone `0.1.5`).
-   - **#78's PR** (`fix/timeout-keeps-connection`): run `/code-review high` on its head and
-     answer the findings. Once CI passes, comment `@codex review`, and read *every* comment
+   - **#79** (fixes #78): run `/code-review high` on its head and answer the findings. Once CI passes, comment `@codex review`, and read *every* comment
      Codex leaves; the comments API pages at 30. Then ask the maintainer to approve the merge.
      If `main` moved meanwhile, run the suite on the combination first.
-   - **Release PR #72**: merge it once its changelog lists #68, #71, #73, #77 and #78's fix.
+   - **Release PR #72**: merge it once its changelog lists #68, #71, #73, #77 and #79.
      Ask the maintainer first.
    - **Then verify the release as 0.1.4 was**: `v0.1.5` is Latest, `release` has moved and is
      tagged `wolfram--v0.1.5`, and the assets fetched through `releases/latest/download/…`
