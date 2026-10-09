@@ -11,8 +11,10 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { McpError, type Prompt } from "@modelcontextprotocol/sdk/types.js";
 import { createServer, type Server, type Socket } from "node:net";
-import { statSync, unlinkSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { linkSync, statSync, unlinkSync } from "node:fs";
 import { connect } from "node:net";
+import { dirname, join } from "node:path";
 import { KernelPool, type LicenceInfo } from "./pool.js";
 import { installationEnv, readFacts, recordFacts } from "./inspect.js";
 import {
@@ -22,6 +24,7 @@ import {
   type BrokerOp,
   type BrokerRequest,
   type BrokerResponse,
+  MAX_SOCKET_PATH,
   socketFault,
   SOCKET_MODE,
 } from "./broker-protocol.js";
@@ -31,6 +34,20 @@ import { errorText, type Logger } from "./log.js";
 
 /** How long to linger with no connections before exiting. */
 const EMPTY_GRACE_MS = 60_000;
+
+/**
+ * How often a broker checks that its address still holds the socket it bound.
+ *
+ * Two brokers can both take the address (#32). Each judges the same dead
+ * socket, and one removes it and takes the address; the other, descheduled
+ * between checking the file's identity and unlinking it, then unlinks the
+ * winner's fresh socket and takes the address itself. Nothing atomic removes a
+ * path only if it is still the file judged dead. The winner went on serving the sessions attached to it, holding its
+ * pool's seats, on a socket no new session could find. So a broker that finds
+ * its address no longer holds its own socket leaves: whatever removed or
+ * replaced it, a session can reach only the broker at the address.
+ */
+const ADDRESS_CHECK_MS = 500;
 
 /** The ops a kernel evaluates, which a `cancel` frame may stop. */
 const EVALUATIONS: ReadonlySet<BrokerOp> = new Set<BrokerOp>([
@@ -53,6 +70,13 @@ export interface BrokerOptions {
   allowInspect: boolean;
   clientInfo: { name: string; version: string };
   log: Logger;
+  /**
+   * For the suite: called the moment a socket is bound, before its identity is
+   * read, which is where another broker's removal of a stale socket can land
+   * (#32). A check replaces the address here, as that broker would, to show
+   * that whatever is put there meanwhile is never taken for this broker's own.
+   */
+  onBound?: ((path: string) => void) | undefined;
 }
 
 /**
@@ -144,6 +168,14 @@ function removeStaleSocket(address: string, expected: string | null, log: Logger
 const BIND_ATTEMPTS = 4;
 const jitter = () => new Promise<void>((r) => setTimeout(r, 40 + Math.random() * 120));
 
+/** The address taken: the server, its socket's identity, and whether it is bound there itself. */
+interface Claim {
+  server: Server;
+  identity: string | null;
+  /** Bound at the address rather than linked to it, so closing unlinks the address. */
+  atAddress: boolean;
+}
+
 export interface RunningBroker {
   server: Server;
   stop(): Promise<void>;
@@ -176,6 +208,15 @@ function resolveLicence(options: BrokerOptions): LicenceInfo {
   return { maxProcesses: facts.maxLicenseProcesses, type: facts.licenseType };
 }
 
+/**
+ * Serve kernels to proxies at `options.address`, or return null when another
+ * broker already does, or the address cannot be used safely.
+ *
+ * A broker owns its process, so a library caller that starts one in its own
+ * gives that process up to it: it exits once nobody has been attached for
+ * `EMPTY_GRACE_MS`, and as soon as its address no longer holds its socket
+ * (`ADDRESS_CHECK_MS`) and what its sessions asked is answered.
+ */
 export async function startBroker(options: BrokerOptions): Promise<RunningBroker | null> {
   const { address, log } = options;
   /**
@@ -189,8 +230,16 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
   const connections = new Map<Socket, { flavour: KernelFlavour | null }>();
   let emptyTimer: NodeJS.Timeout | null = null;
   let stopping = false;
-  /** dev:ino of the socket this broker actually bound, so it only removes its own. */
-  let boundIdentity: string | null = null;
+  /** Requests being served, so a broker that is leaving lets them finish. */
+  let outstanding = 0;
+  /** Set once this broker has found another at its address, or none. */
+  let retiring = false;
+  let addressWatch: NodeJS.Timeout | null = null;
+  /**
+   * What this broker took (`claimSocket`), once it has: its server, and the
+   * dev:ino of the socket it actually bound, so it only ever removes its own.
+   */
+  let claim: Claim | null = null;
 
   /**
    * The pool, once we know what the licence permits.
@@ -492,9 +541,14 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
       const emit = (frame: BrokerEvent) => {
         if (socket.writable) socket.write(encodeFrame(frame));
       };
-      void handle(request, state, inFlight, emit).then((response) => {
-        if (socket.writable) socket.write(encodeFrame(response));
-      });
+      outstanding++;
+      void handle(request, state, inFlight, emit)
+        .then((response) => {
+          if (socket.writable) socket.write(encodeFrame(response));
+        })
+        .finally(() => {
+          outstanding--;
+        });
     });
     socket.on("data", (chunk: string) => reader.push(chunk));
     socket.on("error", () => socket.destroy());
@@ -513,92 +567,244 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
   function scheduleExit(): void {
     if (emptyTimer || stopping) return;
     emptyTimer = setTimeout(() => {
-      if (connections.size > 0) return;
+      if (connections.size > 0 || stopping) return;
       log("no proxies attached, shutting down");
       void stop().then(() => process.exit(0));
     }, EMPTY_GRACE_MS);
     emptyTimer.unref?.();
   }
 
+  /**
+   * Leave, once this broker is no longer the one at its address (see
+   * `ADDRESS_CHECK_MS`). Its sessions are told now, so each chooses again on its
+   * next request and finds the broker that is there; what they asked before
+   * that is answered first, and then it stops.
+   */
+  function checkAddress(): void {
+    if (stopping) return;
+    if (!retiring) {
+      const now = socketIdentity(address);
+      if (now === (claim?.identity ?? null)) return;
+      retiring = true;
+      log(
+        `${now === null ? "the socket at this address is gone" : "another broker owns this address now"}; ` +
+          `telling ${connections.size} proxies to choose again, and leaving once their requests are answered`,
+      );
+      broadcast({ event: "shuttingDown" });
+    }
+    if (outstanding > 0) return;
+    void stop().then(() => process.exit(0));
+  }
+
   async function stop(): Promise<void> {
     if (stopping) return;
     stopping = true;
+    if (addressWatch) clearInterval(addressWatch);
+    // Held otherwise: a broker stopped by a library caller that carries on
+    // still ended that caller's process when the timer fired, 60s later.
+    if (emptyTimer) clearTimeout(emptyTimer);
     const pool = await preparing.catch(() => null);
     broadcast({ event: "shuttingDown" });
     for (const socket of connections.keys()) socket.destroy();
-    // stop() only ever runs on a broker that won the socket, but the binding
-    // happens after this is defined, so the compiler cannot see that.
-    await new Promise<void>((resolve) => {
-      if (server) server.close(() => resolve());
-      else resolve();
-    });
-    await pool?.stop();
-    if (process.platform !== "win32") {
+    // Give up the address while still listening, and only if it is still this
+    // broker's: a broker probing it meanwhile finds it alive and stands down, so
+    // nothing can replace it between the check and the unlink. Unlinked after
+    // closing, it could have been a successor's by then — removed, and that
+    // broker orphaned in turn. A linked socket's close unlinks only the staging
+    // name, long gone.
+    // stop() only ever runs on a broker that took the address, but the claim
+    // is made after this is defined, so the compiler cannot see that.
+    const taken = claim;
+    const identity = taken?.identity ?? null;
+    const ours = identity === null || socketIdentity(address) === identity;
+    // Said, because this log is how a race like #32 is read afterwards, and an
+    // address that survived its broker's exit is otherwise unexplained.
+    if (!ours) log("the address no longer holds this broker's socket; leaving it alone");
+    if (ours && identity !== null && !taken?.atAddress) {
       try {
-        // libuv already unlinked the bound path during server.close(), so
-        // anything here now belongs to a successor that bound during
-        // pool.stop() — which can take seconds.
-        const here = statSync(address);
-        if (boundIdentity !== null && `${here.dev}:${here.ino}` !== boundIdentity) {
-          log("a newer broker owns the socket; leaving it alone");
-        } else {
-          unlinkSync(address);
-        }
+        unlinkSync(address);
       } catch {
-        // Someone else already tidied it.
+        // Already gone.
       }
     }
+    // A socket bound at the address itself is unlinked by its close, whatever
+    // is at the address by then: so one that is no longer there is left open,
+    // and goes with the process, which unlinks nothing. Unreferenced, though:
+    // left holding the event loop, it kept a library caller that stopped its
+    // broker and carried on from ever exiting.
+    await new Promise<void>((resolve) => {
+      if (!taken) resolve();
+      else if (ours || !taken.atAddress) taken.server.close(() => resolve());
+      else {
+        taken.server.unref();
+        resolve();
+      }
+    });
+    await pool?.stop();
   }
 
   /**
-   * Take the socket, or stand down.
+   * Listen on `path` with a fresh handle, or say why not.
+   *
+   * Fresh each time, because retrying on the same handle after a failed bind
+   * left three brokers all reporting the address in use while nothing at all
+   * was listening.
+   */
+  async function listenAt(path: string, attempt: number): Promise<Server | null> {
+    const candidate = createServer(onConnection);
+    // Create it 0600 rather than narrow it afterwards. A chmod has to name the
+    // file, and an over-long address is truncated by bind, so the path we
+    // would chmod is not always the path that exists — measured, a 152-byte
+    // address bound successfully while the directory we asked for stayed
+    // empty. A umask needs no path, and it also closes the window in which the
+    // socket exists at the umask's default 755, connectable by anyone.
+    //
+    // Process-global, so it is held for exactly the bind, which listen() makes
+    // before it returns: the socket's file exists, 0600, by then (measured on
+    // macOS and Linux). Held until the bind's callback instead, two brokers
+    // binding at once in one process put back each other's, and the second
+    // restored the first's 0177 for good — every directory the process made
+    // after that came out untraversable.
+    const previousMask = process.umask(0o777 & ~SOCKET_MODE);
+    try {
+      candidate.listen(path);
+    } finally {
+      process.umask(previousMask);
+    }
+    const bound = await new Promise<boolean>((resolve) => {
+      candidate.once("error", (err: NodeJS.ErrnoException) => {
+        // Always say why. A bind that fails for a reason nobody logged is
+        // what made this take three investigations to understand.
+        log(`bind attempt ${attempt} failed: ${err.code ?? "?"} ${err.message}`);
+        resolve(false);
+      });
+      candidate.once("listening", () => resolve(true));
+    });
+    if (bound) return candidate;
+    candidate.close();
+    return null;
+  }
+
+  /**
+   * Whether the address can be taken now: false when a broker answers there,
+   * true once whatever dead socket was there has been cleared.
+   *
+   * The file is identified *before* asking whether it is alive, so the answer
+   * and the file it describes cannot drift apart. Taking it afterwards means a
+   * broker that bound while the probe was in flight looks exactly like the dead
+   * socket the probe judged — and removing it under that mistake left two
+   * brokers running, one of them on an unlinked inode.
+   */
+  async function addressIsFree(): Promise<boolean> {
+    const judged = socketIdentity(address);
+    if (await socketIsLive(address)) {
+      log("another broker is already listening; standing down");
+      return false;
+    }
+    removeStaleSocket(address, judged, log);
+    return true;
+  }
+
+  /**
+   * Take the address, or stand down.
    *
    * Explicitly ordered — ask whether anyone is listening, clear only a file we
-   * have just seen to be dead, then bind a *fresh* handle — because the previous
+   * have just seen to be dead, then take the address — because the previous
    * shape reacted to libuv's error codes instead. A stale unix socket surfaces as
    * EADDRINUSE or EEXIST depending on timing, only one of those was handled, and
-   * retrying on the same handle after a failed bind left three brokers all
-   * reporting the address in use while nothing at all was listening. Losing the
-   * race is normal and expected here: whoever loses attaches as a client.
+   * three brokers ended up reporting the address in use while nothing at all
+   * was listening. Losing the race is normal and expected here: whoever loses
+   * attaches as a client.
+   *
+   * The socket is bound under a name only this process uses, beside the address,
+   * and then linked to it, which fails if anything is there. Two things follow
+   * (#32). The identity recorded is this socket's own, read where nothing else
+   * can replace it: read at the address after binding there, it was whatever
+   * another broker had put there meanwhile, so two brokers could each believe
+   * one socket theirs and neither would notice it was not. And libuv unlinks a
+   * server's own path when it closes, whatever is at that path by then: bound
+   * at the address, a broker whose socket had been removed under it took the
+   * live broker's socket with it on the way out. Its own path is now the
+   * staging name, unlinked as soon as the link is made.
    */
-  async function claimSocket(): Promise<Server | null> {
-    for (let attempt = 1; attempt <= BIND_ATTEMPTS; attempt++) {
-      // Identify the file *before* asking whether it is alive, so the answer and
-      // the file it describes cannot drift apart. Taking it afterwards means a
-      // broker that bound while the probe was in flight looks exactly like the
-      // dead socket the probe judged — and removing it under that mistake left
-      // two brokers running, one of them on an unlinked inode.
-      const judged = socketIdentity(address);
-      if (await socketIsLive(address)) {
-        log("another broker is already listening; standing down");
-        return null;
+  async function claimSocket(): Promise<Claim | null> {
+    // A named pipe has no file to link, and nothing can replace one. An address
+    // too long for a socket path is bound truncated, and connected to truncated
+    // the same way, which is how sharing survives it (`brokerAddress`); but on
+    // Linux the staging name beside it is truncated too, so there is no file by
+    // its full name to link, and no broker would ever take the address.
+    if (process.platform === "win32" || Buffer.byteLength(address) > MAX_SOCKET_PATH) {
+      return claimDirect();
+    }
+
+    // Short, so it fits wherever the address does: sun_path is 104 bytes on
+    // macOS, and this is shorter than the terse `wm-<digest>.sock`. Random, and
+    // never cleared first. Named for the process and a count of its claims, it
+    // was cleared on the reasoning that any file of that name was left by a
+    // process that died with this pid. That holds inside one PID namespace only:
+    // two containers sharing this directory can each run a broker as the same
+    // pid, and clearing the name removed the other's socket between its bind
+    // and its link. A name already taken fails the bind, and the claim stands
+    // down rather than take it.
+    const staging = join(dirname(address), `.b${process.pid}-${randomBytes(4).toString("hex")}`);
+    const server = await listenAt(staging, 1);
+    if (!server) return null;
+    options.onBound?.(staging);
+    const identity = socketIdentity(staging);
+    let unlinkable = false;
+    try {
+      for (let attempt = 1; attempt <= BIND_ATTEMPTS; attempt++) {
+        if (!(await addressIsFree())) break;
+        try {
+          linkSync(staging, address);
+          return { server, identity, atAddress: false };
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException).code ?? "?";
+          log(`link attempt ${attempt} failed: ${code} ${errorText(err)}`);
+          // Anything but a file in the way is this filesystem refusing a hard
+          // link to a socket, and binding at the address is what worked before.
+          if (code !== "EEXIST") {
+            unlinkable = true;
+            break;
+          }
+        }
+        if (attempt < BIND_ATTEMPTS) await jitter();
+        else log(`gave up trying to take ${address} after ${BIND_ATTEMPTS} attempts`);
       }
-      removeStaleSocket(address, judged, log);
+    } finally {
+      // Linked or not, the staging name has done its work.
+      try {
+        unlinkSync(staging);
+      } catch {
+        // Already gone.
+      }
+    }
+    server.close();
+    return unlinkable ? claimDirect() : null;
+  }
 
-      const candidate = createServer(onConnection);
-      // Create it 0600 rather than narrow it afterwards. A chmod has to name the
-      // file, and an over-long address is truncated by bind, so the path we
-      // would chmod is not always the path that exists — measured, a 152-byte
-      // address bound successfully while the directory we asked for stayed
-      // empty. A umask needs no path, and it also closes the window in which the
-      // socket exists at the umask's default 755, connectable by anyone.
-      const previousMask = process.umask(0o777 & ~SOCKET_MODE);
-      const bound = await new Promise<boolean>((resolve) => {
-        candidate.once("error", (err: NodeJS.ErrnoException) => {
-          // Always say why. A bind that fails for a reason nobody logged is
-          // what made this take three investigations to understand.
-          log(`bind attempt ${attempt} failed: ${err.code ?? "?"} ${err.message}`);
-          resolve(false);
-        });
-        candidate.listen(address, () => resolve(true));
-      }).finally(() => {
-        // Process-global, so it is held for exactly as long as the bind and put
-        // back whichever way that went.
-        process.umask(previousMask);
-      });
-      if (bound) return candidate;
-
-      candidate.close();
+  /**
+   * Bind at the address itself, where nothing can be linked: a named pipe, an
+   * address too long for a socket path, a filesystem without hard links. The
+   * identity is read from the address after binding, which another broker may
+   * have replaced by then, and for a truncated address there is none to read.
+   * Closing such a server unlinks the address, whatever is there — except a
+   * truncated one: libuv unlinks the full path it was given, which never
+   * existed, and the truncated socket stays where no check here can see it, so
+   * no later broker can bind (#74).
+   */
+  async function claimDirect(): Promise<Claim | null> {
+    for (let attempt = 1; attempt <= BIND_ATTEMPTS; attempt++) {
+      if (!(await addressIsFree())) return null;
+      const server = await listenAt(address, attempt);
+      if (server) {
+        options.onBound?.(address);
+        return {
+          server,
+          identity: process.platform === "win32" ? null : socketIdentity(address),
+          atAddress: true,
+        };
+      }
       if (attempt < BIND_ATTEMPTS) await jitter();
     }
     log(`gave up trying to bind ${address} after ${BIND_ATTEMPTS} attempts`);
@@ -616,22 +822,18 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
     return null;
   }
 
-  const server = await claimSocket();
-  const listened = server !== null;
-
-  if (!listened) return null;
-
-  try {
-    const bound = statSync(address);
-    boundIdentity = `${bound.dev}:${bound.ino}`;
-  } catch {
-    boundIdentity = null; // win32 pipes, or a path we cannot stat
-  }
+  claim = await claimSocket();
+  if (!claim) return null;
   log(`broker listening on ${address} (pid ${process.pid})`);
   scheduleExit();
+  // Named pipes have no identity to compare, and nothing can replace one.
+  if (claim.identity !== null) {
+    addressWatch = setInterval(checkAddress, ADDRESS_CHECK_MS);
+    addressWatch.unref?.();
+  }
 
   process.on("SIGINT", () => void stop().then(() => process.exit(0)));
   process.on("SIGTERM", () => void stop().then(() => process.exit(0)));
 
-  return { server, stop };
+  return { server: claim.server, stop };
 }

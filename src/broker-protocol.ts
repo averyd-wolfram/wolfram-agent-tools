@@ -44,7 +44,7 @@ export const BROKER_PROTOCOL = 6;
  * Longest socket path we will use, leaving room inside the 104-byte
  * `sockaddr_un.sun_path` on macOS for the trailing NUL and a little slack.
  */
-const MAX_SOCKET_PATH = 100;
+export const MAX_SOCKET_PATH = 100;
 
 export type BrokerOp =
   | "capabilities"

@@ -52,8 +52,22 @@ let sections = 0;
 // holds fewer call sites than the run holds checks. Printing the total is what
 // retires `grep -c PASS`, which is how every check count the docs ever quoted
 // was obtained — and how each of them went stale unnoticed.
+// Anything in this process that ends it early — an in-process broker's own
+// exit, say — ends the run with the code it chose, and that was 0: every check
+// after that point unrun, and the suite green. Measured: a broker stopped by a
+// section still held its 60s empty-grace timer, which then exited the suite
+// with 0 two sections later.
+let finished = false;
+let lastHeading = "(before the first section)";
+process.on("exit", (code) => {
+  if (finished) return;
+  console.error(`\nThe suite ended early, with code ${code}, in "${lastHeading}".`);
+  process.exitCode = 1;
+});
+
 const heading = (title) => {
   sections++;
+  lastHeading = title;
   console.log(`\n${title}`);
 };
 const check = (label, ok, detail = "") => {
@@ -1905,6 +1919,7 @@ heading("Regression — several sessions recovering at once produce one broker")
   wipeCache();
   const runtime = join(home, "run-race");
   privateDir(runtime);
+  const raceLog = join(home, "race-broker.log");
   const shared = {
     WOLFRAM_MCP_SHARE: "1",
     XDG_RUNTIME_DIR: runtime,
@@ -1913,6 +1928,7 @@ heading("Regression — several sessions recovering at once produce one broker")
     WOLFRAM_MCP_IDLE_MINUTES: "5",
     // Slow enough that the recoveries genuinely overlap.
     FAKE_CALL_DELAY_MS: "250",
+    WOLFRAM_MCP_LOG: raceLog,
   };
   const sessions = [];
   for (let i = 0; i < 3; i++) sessions.push(await connect(shared));
@@ -1937,12 +1953,448 @@ heading("Regression — several sessions recovering at once produce one broker")
   // three brokers ran, each deriving a full pool budget from one licence.
   const recovered = await Promise.all(sessions.map((s, i) => evaluate(s, i + 10)));
   check("every session recovers", recovered.every(Boolean), `${recovered.filter(Boolean).length}/3`);
-  await new Promise((r) => setTimeout(r, 2000));
-  const brokers = ownBrokers(runtime).length;
-  check("and exactly one broker is left holding the licence", brokers === 1, `brokers: ${brokers}`);
+  // Waited for rather than read at 2s: a broker the race below orphans now
+  // leaves by itself, once its work is done. On failure the brokers' own log
+  // says which broker bound, which stood down and which removed what — two CI
+  // failures went unexplained for want of it (#32).
+  const one = await until(() => ownBrokers(runtime).length === 1, 10_000);
+  check(
+    "and exactly one broker is left holding the licence",
+    one,
+    `brokers: ${ownBrokers(runtime).length}; ${
+      existsSync(raceLog)
+        ? readFileSync(raceLog, "utf8")
+            .split("\n")
+            .filter((l) => /listening|stale|replaced|standing down|attempt|address|socket/.test(l))
+            .join(" | ")
+        : "(no broker log)"
+    }`,
+  );
 
   for (const s of sessions) await s.client.close();
   await new Promise((r) => setTimeout(r, 400));
+}
+
+// ---------------------------------------------------------------------------
+// The race above, made to happen. Two brokers judge the same dead socket; one
+// removes it and binds, and the other — descheduled between checking the
+// file's identity and unlinking it — unlinks the winner's fresh socket and
+// binds its own (#32; reproduced by widening that gap, 3 rounds in 10). The
+// winner kept serving its sessions and holding its pool's seats on a socket no
+// new session could find. Removing a live broker's socket file makes the same
+// state at will.
+//
+// Worse, a broker in that state that stopped — its proxies gone, or SIGTERM —
+// closed its server, and libuv unlinks a Unix socket's path on close: whatever
+// is there by then, the other broker's socket included. That broker was
+// orphaned in turn, and the next session started a third.
+heading("A broker no longer at its address hands its sessions over and leaves");
+{
+  wipeCache();
+  const runtime = join(home, "run-orphan");
+  privateDir(runtime);
+  const shared = {
+    WOLFRAM_MCP_SHARE: "1",
+    XDG_RUNTIME_DIR: runtime,
+    WOLFRAM_MCP_LICENSE_LIMIT: "4",
+    WOLFRAM_MCP_IDLE_MINUTES: "5",
+    WOLFRAM_MCP_LOG: join(home, "orphan-broker.log"),
+  };
+  const call = (s, code) =>
+    s.client
+      .callTool({ name: "WolframLanguageEvaluator", arguments: { code } }, undefined, { timeout: 30_000 })
+      .then((r) => !r.isError && answeredByFake(r), () => false);
+  const socketPath = () => readdirSync(runtime).filter((f) => f.endsWith(".sock")).map((f) => join(runtime, f))[0];
+  const inode = (path) => {
+    try {
+      return statSync(path).ino;
+    } catch {
+      return null;
+    }
+  };
+
+  const first = await connect(shared);
+  check("a first session starts a broker", await call(first, "1+1"));
+  const [orphan] = ownBrokers(runtime);
+  const address = socketPath();
+  rmSync(address); // the race's outcome: the first broker's socket unlinked under it
+
+  const second = await connect(shared);
+  check("a second session finds no broker and starts another", await call(second, "2+2"));
+  const successor = ownBrokers(runtime).find((pid) => pid !== orphan);
+  const successorInode = inode(address);
+
+  const left = await until(() => !ownBrokers(runtime).includes(orphan), 10_000);
+  check(
+    "the broker that lost its address leaves, while its session is still attached",
+    left && ownBrokers(runtime).length === 1,
+    `brokers: ${ownBrokers(runtime).join(", ")}, orphan ${orphan}`,
+  );
+  check(
+    "and its session's next call is served by the broker at the address",
+    (await call(first, "3+3")) && ownBrokers(runtime).join() === String(successor),
+    `brokers: ${ownBrokers(runtime).join(", ")}, successor ${successor}`,
+  );
+  check(
+    "whose socket it left where it was",
+    successorInode !== null && inode(address) === successorInode,
+    `inode ${successorInode} then ${inode(address)}`,
+  );
+  await first.client.close();
+  await second.client.close();
+  signalOwnBrokers("SIGKILL", runtime);
+  await new Promise((r) => setTimeout(r, 300));
+
+  // The cascade on its own: an orphan with nobody attached, told to stop.
+  wipeCache();
+  const lone = await connect(shared);
+  await call(lone, "4+4");
+  const [lonely] = ownBrokers(runtime);
+  const brokerLog = shared.WOLFRAM_MCP_LOG;
+  const logFrom = existsSync(brokerLog) ? readFileSync(brokerLog, "utf8").length : 0;
+  rmSync(socketPath());
+  await lone.client.close();
+  const next = await connect(shared);
+  await call(next, "5+5");
+  const liveInode = inode(socketPath());
+  // Told to stop, unless it has already left by itself: either way through
+  // stop(), which is where the close that unlinks the path lives.
+  try {
+    process.kill(lonely, "SIGTERM");
+  } catch {
+    /* gone already */
+  }
+  await until(() => !ownBrokers(runtime).includes(lonely), 10_000);
+  check(
+    "an orphaned broker that stops leaves the live broker's socket alone",
+    liveInode !== null && inode(socketPath()) === liveInode,
+    `live inode ${liveInode}, now ${inode(socketPath())}`,
+  );
+  // And says so. Its log is how a race like #32 is read afterwards, and the
+  // line saying why the address survived went missing with the unlink it
+  // explained.
+  const leaving = existsSync(brokerLog) ? readFileSync(brokerLog, "utf8").slice(logFrom) : "";
+  check(
+    "and says in its log that it left the address alone",
+    /no longer holds this broker's socket; leaving it alone/.test(leaving),
+    leaving.split("\n").filter((l) => /address|socket|leaving/.test(l)).join(" | ").slice(0, 240),
+  );
+  await next.client.close();
+  signalOwnBrokers("SIGKILL", runtime);
+  await new Promise((r) => setTimeout(r, 300));
+}
+
+// ---------------------------------------------------------------------------
+// An address too long for a socket path is bound truncated and connected to
+// truncated the same way, which is how sessions there still share a broker
+// (brokerAddress). Taking the address by linking a socket bound beside it broke
+// that on Linux: the name beside it is truncated too, nothing exists by its full
+// name to link, and no broker ever took the address — every session privately.
+// macOS binds the full path, so only Linux, as CI runs it, shows it.
+heading("Sessions share a broker even at an address too long for a socket path");
+{
+  wipeCache();
+  // Past Linux's 108-byte sun_path for a name in it, not only for the address.
+  const runtime = privateDir(join(home, "l".repeat(Math.max(1, 110 - home.length))));
+  const brokerLog = join(home, "long-broker.log");
+  const shared = {
+    WOLFRAM_MCP_SHARE: "1",
+    XDG_RUNTIME_DIR: runtime,
+    WOLFRAM_MCP_LICENSE_LIMIT: "4",
+    WOLFRAM_MCP_IDLE_MINUTES: "5",
+    WOLFRAM_MCP_LOG: brokerLog,
+  };
+  // Whether this Node can listen and connect at a path that long at all,
+  // measured rather than assumed: Linux's Node 22 truncates both ends alike
+  // and shares, but CI's Node 26 brought no broker up at such an address,
+  // where main binds exactly as this does.
+  // Beside the runtime directory, not in it, with a name that differs within
+  // the first 107 bytes: Linux truncates there, inside the directory's own
+  // name, so a probe in it left its socket on the very file the broker binds,
+  // where nothing could clear it, and the broker's bind failed EADDRINUSE.
+  const probeDir = privateDir(join(home, "p".repeat(Math.max(1, 110 - home.length))));
+  const probe = join(probeDir, `wm-${"0".repeat(12)}.sock`);
+  const usable = await new Promise((resolve) => {
+    const server = createServer((c) => c.end("ok"));
+    server.once("error", (err) => resolve(`listen: ${err.code ?? err.message}`));
+    server.listen(probe, () => {
+      const client = connectSocket(probe);
+      client.once("data", () => {
+        client.destroy();
+        server.close(() => resolve(true));
+      });
+      client.once("error", (err) => server.close(() => resolve(`connect: ${err.code ?? err.message}`)));
+    });
+  });
+  const sessions = [await connect(shared), await connect(shared)];
+  const answered = await Promise.all(
+    sessions.map((s, i) =>
+      s.client
+        .callTool({ name: "WolframLanguageEvaluator", arguments: { code: `${i}+${i}` } }, undefined, { timeout: 30_000 })
+        .then((r) => !r.isError && answeredByFake(r), () => false),
+    ),
+  );
+  const attached = sessions.map((s) => s.stderr().includes("attached to the broker"));
+  const detail =
+    `answered ${answered}, brokers ${ownBrokers(runtime).length}, attached ${attached}; ` +
+    (existsSync(brokerLog)
+      ? readFileSync(brokerLog, "utf8").split("\n").filter((l) => /bind|link|listening|attempt|gave up/.test(l)).join(" | ")
+      : sessions[0].stderr().split("\n").filter((l) => /broker|private/.test(l)).slice(-2).join(" | "))
+      .slice(0, 240);
+  const bytes = Buffer.byteLength(probe);
+  if (usable === true) {
+    check(
+      "both are answered, by one broker they are both attached to",
+      answered.every(Boolean) && ownBrokers(runtime).length === 1 && attached.every(Boolean),
+      detail,
+    );
+  } else {
+    check(
+      `this Node cannot use a ${bytes}-byte socket path (${usable}), so both are answered privately`,
+      answered.every(Boolean) && !attached.some(Boolean),
+      detail,
+    );
+  }
+  for (const s of sessions) await s.client.close();
+  signalOwnBrokers("SIGKILL", runtime);
+  await new Promise((r) => setTimeout(r, 300));
+}
+
+// ---------------------------------------------------------------------------
+// The name a broker binds under before linking it to its address was the
+// process's, and a library caller can run two brokers in one process: claiming
+// at once in one directory, the second replaced the first's socket under that
+// name between its bind and its link, so the first linked the second's socket
+// to its own address.
+heading("Two brokers claiming at once in one process each take their own address");
+{
+  const dir = privateDir(join(home, "run-two-in-one"));
+  const logs = [[], []];
+  const start = (i) =>
+    lib.startBroker({
+      address: join(dir, `b${i}.sock`),
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 10_000,
+      reserveSeats: 0,
+      allowInspect: false,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: (message) => logs[i].push(message),
+    });
+  // Read by setting and putting back, which is all umask() without an
+  // argument does, and which Node has deprecated as a way to read it.
+  const umask = () => {
+    const mask = process.umask(0o022);
+    process.umask(mask);
+    return mask;
+  };
+  const maskBefore = umask();
+  const brokers = await Promise.all([start(0), start(1)]);
+  const maskAfter = umask();
+  const reached = [];
+  for (let i = 0; i < 2; i++) {
+    const seen = logs.map((l) => l.length);
+    const answeredBy = () =>
+      logs.findIndex((l, j) => l.slice(seen[j]).some((m) => /proxy connected/.test(m)));
+    const probe = connectSocket(join(dir, `b${i}.sock`));
+    probe.on("error", () => {});
+    await until(() => answeredBy() !== -1, 3_000);
+    reached.push(answeredBy());
+    probe.destroy();
+  }
+  check(
+    "each address reaches the broker that claimed it",
+    brokers.every(Boolean) && reached[0] === 0 && reached[1] === 1,
+    `b0.sock reached broker ${reached[0]}, b1.sock reached broker ${reached[1]}`,
+  );
+  // The umask is the process's, and each bind holds it to create its socket
+  // 0600. Held until the bind's callback, two at once put back each other's:
+  // the second restored the first's 0177 for good, and every directory this
+  // process and its children made after that came out untraversable — the
+  // suite's capability cache stopped being written from here on.
+  check(
+    "and the process's umask is as it was",
+    maskAfter === maskBefore,
+    `${maskBefore.toString(8)} before, ${maskAfter.toString(8)} after`,
+  );
+  for (const broker of brokers) await broker?.stop();
+}
+
+// ---------------------------------------------------------------------------
+// The narrower half of #32. A broker that bound at its address and then read
+// the address's identity as its own took whatever was there by then: if
+// another broker's removal of a stale socket landed between the two, it took
+// that broker's socket. The two then each believed one socket theirs, and the
+// orphan's address watch, comparing that socket with itself, never noticed.
+// Under the address watch alone, with the gap widened, that left two brokers 1
+// round in 10. onBound is that moment, and the check plays the other broker in it.
+heading("A socket put at the address the moment a broker binds is never taken for its own");
+{
+  const dir = privateDir(join(home, "run-replaced-at-bind"));
+  const address = join(dir, "broker.sock");
+  const logs = [];
+  let decoy = null;
+  let boundAt = null;
+  let decoyConnections = 0;
+  const broker = await lib.startBroker({
+    address,
+    bin: fakeKernel,
+    serverName: "WolframLanguage",
+    idleMs: 60_000,
+    startTimeoutMs: 10_000,
+    reserveSeats: 0,
+    allowInspect: false,
+    clientInfo: { name: "smoke", version: "1.0.0" },
+    log: (message) => logs.push(message),
+    // The other broker, at the one moment it can do harm: whatever is at the
+    // address goes, and its own socket is bound there. listen() makes the file
+    // before it returns, so the replacement is complete when this does.
+    onBound: (path) => {
+      if (decoy) return;
+      boundAt = path;
+      rmSync(address, { force: true });
+      decoy = createServer((c) => {
+        decoyConnections++;
+        c.end();
+      });
+      decoy.listen(address);
+    },
+  });
+  const decoyBefore = decoyConnections;
+  const probe = connectSocket(address);
+  probe.on("error", () => {});
+  const reached = await until(
+    () => decoyConnections > decoyBefore || logs.some((m) => /proxy connected/.test(m)),
+    3_000,
+  ).then(() =>
+    decoyConnections > decoyBefore ? "the other broker" : logs.some((m) => /proxy connected/.test(m)) ? "itself" : "nothing",
+  );
+  probe.destroy();
+  // Standing down counts only for the reason this check is about: it asked
+  // the address, and the other broker answered. A claim that gave up for any
+  // other reason also returns null, and passed here as though it had seen it.
+  const sawOther = decoyBefore > 0 && logs.some((m) => /another broker is already listening; standing down/.test(m));
+  check(
+    "a broker either stands down because the other answers, or is the one at its address",
+    boundAt !== null && (broker === null ? sawOther : reached === "itself"),
+    `bound at ${boundAt === null ? "nothing (the hook never ran)" : boundAt.slice(dir.length + 1)}; ` +
+      `${broker ? "running" : `stood down, ${sawOther ? "having reached the other" : "without reaching the other"}`}; ` +
+      `its address reached ${reached}`,
+  );
+  await broker?.stop();
+  await new Promise((resolve) => (decoy ? decoy.close(() => resolve()) : resolve()));
+}
+
+// ---------------------------------------------------------------------------
+// The name a broker binds under before linking was its pid and a count, cleared
+// first on the reasoning that any file of that name was left by a process that
+// died with this pid. That holds inside one PID namespace only: two containers
+// sharing a runtime or cache directory can each run a broker as the same pid,
+// and the one that cleared the name removed the other's socket between that
+// one's bind and its link. This process plays the other: a live socket under
+// every name a broker here could have picked.
+heading("A broker's staging name never takes another process's socket");
+{
+  const dir = privateDir(join(home, "run-same-pid"));
+  const address = join(dir, "broker.sock");
+  const ino = (path) => {
+    try {
+      return statSync(path).ino;
+    } catch {
+      return null;
+    }
+  };
+  const others = [];
+  for (let k = 0; k < 64; k++) {
+    const path = join(dir, `.b${process.pid}-${k}`);
+    const server = createServer((c) => c.end());
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(path, resolve);
+    });
+    others.push({ path, server, ino: ino(path) });
+  }
+  const logs = [];
+  const broker = await lib.startBroker({
+    address,
+    bin: fakeKernel,
+    serverName: "WolframLanguage",
+    idleMs: 60_000,
+    startTimeoutMs: 10_000,
+    reserveSeats: 0,
+    allowInspect: false,
+    clientInfo: { name: "smoke", version: "1.0.0" },
+    log: (message) => logs.push(message),
+  });
+  const taken = others.filter((o) => ino(o.path) !== o.ino).map((o) => o.path.slice(dir.length + 1));
+  check(
+    "it takes its address, and every other process's socket is where it was",
+    broker !== null && taken.length === 0,
+    `${broker ? "listening" : "stood down"}; ${taken.length} of ${others.length} taken${taken.length ? `: ${taken.join(", ")}` : ""}`,
+  );
+  await broker?.stop();
+  for (const o of others) await new Promise((resolve) => o.server.close(() => resolve()));
+}
+
+// ---------------------------------------------------------------------------
+// A socket bound at the address itself, where none can be linked to it, is
+// unlinked by its own close whatever is at the address by then, so a broker
+// that has lost its address stops without closing it. That server still held
+// the event loop, and a library caller that stopped its broker and carried on
+// never exited. macOS binds an address too long for a socket path in full,
+// which is that case; a Linux that truncates it has no identity there to lose,
+// and closes. A child process, because what is measured is its exit.
+heading("A broker that stops after losing its address leaves its process free to exit");
+{
+  const dir = privateDir(join(home, "q".repeat(Math.max(1, 110 - home.length))));
+  const address = join(dir, `wm-${"1".repeat(12)}.sock`);
+  const script = `
+    const lib = await import(${JSON.stringify(pathToFileURL(join(root, "dist", "lib.js")).href)});
+    const { createServer } = await import("node:net");
+    const { rmSync, statSync } = await import("node:fs");
+    const [address, bin] = process.argv.slice(1);
+    const broker = await lib.startBroker({
+      address, bin, serverName: "WolframLanguage", idleMs: 60000, startTimeoutMs: 10000,
+      reserveSeats: 0, allowInspect: false, clientInfo: { name: "smoke", version: "1.0.0" },
+      log: (m) => process.stderr.write(m + "\\n"),
+    });
+    let said = "no broker";
+    if (broker) {
+      let held = false;
+      try { statSync(address); held = true; } catch {}
+      said = held ? "its socket at the full address" : "no file at the full address";
+      // The other broker, between two of the address watch's looks.
+      rmSync(address, { force: true });
+      const other = createServer((c) => c.end());
+      other.on("error", () => {});
+      other.listen(address);
+      await broker.stop();
+      other.close();
+    }
+    process.stdout.write(said);
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script, address, fakeKernel], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let said = "";
+  let logged = "";
+  child.stdout.on("data", (d) => (said += d));
+  child.stderr.on("data", (d) => (logged += d));
+  const exited = await new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), 10_000);
+    child.on("exit", () => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
+  if (!exited) child.kill("SIGKILL");
+  check(
+    "it exits by itself once its broker has stopped",
+    exited,
+    `${said || "(nothing said)"}; ` +
+      logged.split("\n").filter((l) => /listening|bind|address|socket|Error/.test(l)).join(" | ").slice(0, 200),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -7211,4 +7663,5 @@ console.log(
     ? `\n${checks} checks across ${sections} sections, all passed.\n`
     : `\n${failures} of ${checks} checks failed.\n`,
 );
+finished = true;
 process.exit(failures === 0 ? 0 : 1);
