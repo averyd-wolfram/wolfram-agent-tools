@@ -93,7 +93,7 @@ in `docs/design.md`.
   moved, also had the suite run on `main` combined with them first. Codex's findings were real
   each time: the protocol bump on #65, and on #67 the deadline's tie with the SDK and a NaN
   reaching the broker as `null`.
-- **0.1.5 is three fixes in, one under review** (2026-10-08, milestone `0.1.5`).
+- **0.1.5 is four fixes in, one under review** (2026-10-08, milestone `0.1.5`).
   - **#68 is merged** (`136b59f`, fixes #31). A kernel's client is a `RelayClient` whose
     `listTools` is a plain request, so no `outputSchema` is compiled and the relay judges no
     result. `listAllTools` drains every page, so doctor now shows them all. Claude Code 2.1.290
@@ -115,9 +115,10 @@ in `docs/design.md`.
       early.
     - **Left to issues:** its over-long-address findings are `main`'s behaviour and went to
       #74. The in-flight-call hang Codex found is #75.
-  - **#75 is under review** in #77. A call in flight when its
-    broker stops waited out its whole ceiling, and forever with none. `shuttingDown` set
-    `#closed`, and `#failAll` skipped the waiters once it was set.
+  - **#77 is merged** (`26a3251`, fixes #75), after one `/code-review high` round and a
+    clean Codex review. A call in flight when its broker stops waited out its whole ceiling,
+    and forever with none. `shuttingDown` set `#closed`, and `#failAll` skipped the waiters
+    once it was set.
     - **The fix:** `#failAll` has no guard, so it fails the waiters whatever set `#closed`.
       Nothing can join a map once `#closed` is set, so running it twice is harmless. The
       client's `stop()` fails what is pending with a reason that is true.
@@ -125,6 +126,18 @@ in `docs/design.md`.
       SIGTERM mid-call, and a session that chooses again while its broker is retiring.
     - **#76** (`enhancement`): a call still on a retiring broker should be answered by it
       rather than failed. It is filed, not in this fix.
+  - **#78 is under review** on `fix/timeout-keeps-connection`. The maintainer put it in 0.1.5
+    (2026-10-08). One request running out marked the whole connection closed. The session's
+    next request then chose again and closed it, and the broker aborted every other call
+    the session had there.
+    - **Reproduced:** a call that asked for 30 s, and would have been answered at 8 s, failed
+      at 5 s because a default-ceiling call queued behind it ran out. The session then
+      reattached to the same, healthy broker.
+    - **The fix:** a request's timeout pings the broker, and gives the connection up only if
+      that goes unanswered. A busy broker answers ping ahead of its pool.
+    - **Checks:** *A request that runs out on a busy broker costs the session no other call*
+      failed on `main` first. The frozen-broker section now also checks that a broker that
+      fails the ping is still given up.
   - **Release PR #72** is in the milestone.
   - **Filed from the reviews:**
     - **#69** (`needs design`): a non-object schema still fails the whole list, in zod.
@@ -136,16 +149,13 @@ in `docs/design.md`.
       comment from #73's fourth round adds the graceful-close, security and macOS findings
       above.
     - **#75** (`bug`, milestone `0.1.5`): Codex found it on #73 (P2), citing *Sharing is an
-      optimisation, never a dependency*. The maintainer put it in 0.1.5 as a PR of its own
-      (2026-10-08). It is under review (above).
+      optimisation, never a dependency*. Fixed by #77 (above).
     - **#76** (`enhancement`, `area: broker`): a session that chooses again while its broker
       is leaving cancels the call still on it. A comment from #77's review widens it: a
       request the broker never read could be resent safely, if the broker acknowledged what it
       took.
-    - **#78** (`bug`, `area: broker`, from #77's review, traced): one request's timeout marks
-      the whole connection closed, so the session's next request cancels every other call
-      still running on a healthy broker. Suggested fix: `ping` before giving up on the
-      connection.
+    - **#78** (`bug`, `area: broker`, milestone `0.1.5`, from #77's review): one request's
+      timeout cancelled every other call on a healthy broker. Under review (above).
 - **The backlog is GitHub issues** (`gh issue list`), labelled by type, `needs design` and area
   (*Working here* below). Other agents file there too, notably the downstream plugin's.
 - **The release pipeline versions itself** from the commit types on `main`. `docs/releasing.md`
@@ -156,11 +166,12 @@ in `docs/design.md`.
 ## What to do next, in order
 
 1. **Finish 0.1.5** (milestone `0.1.5`).
-   - **#77** (fixes #75): run `/code-review high` on its head and answer the findings. Once CI passes, comment `@codex review`, and read *every* comment
+   - **#78's PR** (`fix/timeout-keeps-connection`): run `/code-review high` on its head and
+     answer the findings. Once CI passes, comment `@codex review`, and read *every* comment
      Codex leaves; the comments API pages at 30. Then ask the maintainer to approve the merge.
      If `main` moved meanwhile, run the suite on the combination first.
-   - **Release PR #72**: merge it once its changelog lists #68, #71, #73 and #75. It listed
-     the first three after #73 merged.
+   - **Release PR #72**: merge it once its changelog lists #68, #71, #73, #77 and #78's fix.
+     Ask the maintainer first.
    - **Then verify the release as 0.1.4 was**: `v0.1.5` is Latest, `release` has moved and is
      tagged `wolfram--v0.1.5`, and the assets fetched through `releases/latest/download/…`
      match `SHA256SUMS.txt` and say 0.1.5.
