@@ -1968,19 +1968,28 @@ heading("A call in flight when its broker stops fails at once, not at its ceilin
   const told = () => s.stderr().split("the broker is shutting down").length - 1;
   const toldBefore = told();
   const aStarted = Date.now();
-  const a = call("4+4");
+  let aSettled = false;
+  const a = call("4+4").finally(() => (aSettled = true));
   await new Promise((r) => setTimeout(r, 300));
   const socket = readdirSync(runtime).find((f) => f.endsWith(".sock"));
   if (socket) rmSync(join(runtime, socket));
   const heard = await until(() => told() > toldBefore, 3_000);
+  // Only a call still out when the session chooses again is the case: one the
+  // broker had already answered passes the rest of this check on any code.
+  const pendingAtChoice = !aSettled;
   const b = call("5+5");
   const aResult = await a;
   const aTook = Date.now() - aStarted;
   const aText = aResult.content?.[0]?.text ?? "";
   check(
     "a call still on a broker that is leaving settles when the session chooses again",
-    heard && aTook < 8_000 && (answeredByFake(aResult) || /session closed its connection/.test(aText)),
-    `${heard ? "told it was shutting down" : "never told"}; settled after ${(aTook / 1000).toFixed(1)}s: ${aText.slice(0, 120)}`,
+    heard &&
+      pendingAtChoice &&
+      aTook < 8_000 &&
+      (answeredByFake(aResult) || /session closed its connection/.test(aText)),
+    `${heard ? "told it was shutting down" : "never told"}, ` +
+      `${pendingAtChoice ? "the call still out" : "the call already settled"} when it chose again; ` +
+      `settled after ${(aTook / 1000).toFixed(1)}s: ${aText.slice(0, 120)}`,
   );
   const bResult = await b;
   check(

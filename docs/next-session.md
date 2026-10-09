@@ -115,11 +115,12 @@ in `docs/design.md`.
       early.
     - **Left to issues:** its over-long-address findings are `main`'s behaviour and went to
       #74. The in-flight-call hang Codex found is #75.
-  - **#75 is under review** on `fix/in-flight-call-broker-stops`. A call in flight when its
+  - **#75 is under review** in #77. A call in flight when its
     broker stops waited out its whole ceiling, and forever with none. `shuttingDown` set
     `#closed`, and `#failAll` skipped the waiters once it was set.
-    - **The fix:** `#failed` is split from `#closed`, and the client's `stop()` fails what is
-      pending with a reason that is true.
+    - **The fix:** `#failAll` has no guard, so it fails the waiters whatever set `#closed`.
+      Nothing can join a map once `#closed` is set, so running it twice is harmless. The
+      client's `stop()` fails what is pending with a reason that is true.
     - **Two ways in, each a suite check that failed at 22.0 s first:** a broker stopped by
       SIGTERM mid-call, and a session that chooses again while its broker is retiring.
     - **#76** (`enhancement`): a call still on a retiring broker should be answered by it
@@ -138,7 +139,13 @@ in `docs/design.md`.
       optimisation, never a dependency*. The maintainer put it in 0.1.5 as a PR of its own
       (2026-10-08). It is under review (above).
     - **#76** (`enhancement`, `area: broker`): a session that chooses again while its broker
-      is leaving cancels the call still on it.
+      is leaving cancels the call still on it. A comment from #77's review widens it: a
+      request the broker never read could be resent safely, if the broker acknowledged what it
+      took.
+    - **#78** (`bug`, `area: broker`, from #77's review, traced): one request's timeout marks
+      the whole connection closed, so the session's next request cancels every other call
+      still running on a healthy broker. Suggested fix: `ping` before giving up on the
+      connection.
 - **The backlog is GitHub issues** (`gh issue list`), labelled by type, `needs design` and area
   (*Working here* below). Other agents file there too, notably the downstream plugin's.
 - **The release pipeline versions itself** from the commit types on `main`. `docs/releasing.md`
@@ -149,8 +156,7 @@ in `docs/design.md`.
 ## What to do next, in order
 
 1. **Finish 0.1.5** (milestone `0.1.5`).
-   - **#75's PR** (`fix/in-flight-call-broker-stops`): run `/code-review high` on it and
-     answer the findings. Once CI passes, comment `@codex review`, and read *every* comment
+   - **#77** (fixes #75): run `/code-review high` on its head and answer the findings. Once CI passes, comment `@codex review`, and read *every* comment
      Codex leaves; the comments API pages at 30. Then ask the maintainer to approve the merge.
      If `main` moved meanwhile, run the suite on the combination first.
    - **Release PR #72**: merge it once its changelog lists #68, #71, #73 and #75. It listed

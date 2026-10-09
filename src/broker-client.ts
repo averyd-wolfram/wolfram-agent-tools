@@ -213,13 +213,6 @@ export class BrokerBackend implements KernelBackend {
   #onKernelReady: KernelReadyHandler | undefined;
   /** No new work goes out on this connection; the next call chooses again. */
   #closed = false;
-  /**
-   * Everything outstanding has been failed. Kept apart from #closed, which a
-   * broker's `shuttingDown`, a request's timeout and stop() all set: when one
-   * flag meant both, the close that followed `shuttingDown` failed nothing, and
-   * a call in flight waited out its whole ceiling, or forever with none (#75).
-   */
-  #failed = false;
 
   private constructor(options: BrokerClientOptions, socket: Socket) {
     this.#options = options;
@@ -520,8 +513,12 @@ export class BrokerBackend implements KernelBackend {
   }
 
   #failAll(err: Error): void {
-    if (this.#failed) return;
-    this.#failed = true;
+    // No guard. Once #closed is set nothing can join either map, so a second
+    // call (the close after stop(), an error and then its close) finds nothing
+    // left to fail. A guard on #closed is what skipped the waiters: a broker's
+    // `shuttingDown`, a request's timeout and stop() all set it first, and a
+    // call in flight then waited out its whole ceiling, or forever with none
+    // (#75).
     // Mark it closed: `usable()` is what tells DeferredBackend to decide again,
     // and without it every later call in the session failed identically.
     this.#closed = true;
