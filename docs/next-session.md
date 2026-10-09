@@ -93,7 +93,7 @@ in `docs/design.md`.
   moved, also had the suite run on `main` combined with them first. Codex's findings were real
   each time: the protocol bump on #65, and on #67 the deadline's tie with the SDK and a NaN
   reaching the broker as `null`.
-- **0.1.5 is two fixes in, one under review** (2026-10-08, milestone `0.1.5`).
+- **0.1.5 is three fixes in, one under review** (2026-10-08, milestone `0.1.5`).
   - **#68 is merged** (`136b59f`, fixes #31). A kernel's client is a `RelayClient` whose
     `listTools` is a plain request, so no `outputSchema` is compiled and the relay judges no
     result. `listAllTools` drains every page, so doctor now shows them all. Claude Code 2.1.290
@@ -102,28 +102,28 @@ in `docs/design.md`.
   - **#71 is merged** (`3a6448f`, fixes #38). `src/duration.ts` says every duration:
     `budgetText` rounds down, `waitText` up, `elapsedText` down, and `idleText` covers the idle
     setting. Units fit the size, `400ms` to `24d`.
-  - **#73 is under review** (fixes #32). The cause was reproduced by widening the stat-to-unlink
-    gap: one broker unlinked a winner's fresh socket. A follow-on was measured too: libuv's
-    close unlinked a successor's socket. Now a broker binds under a staging name,
-    `.b<pid>-<8 random hex>`, never cleared first, then links it into
-    place and watches its address. It binds at the address directly when it can't link, as for
-    an over-long address on Linux. It also fixes the umask and the empty-grace timer for two
-    brokers in one process. The suite now fails if anything ends it early. `onBound`, a broker
-    option for the suite like `DeferredOptions.clock`, lets a check replace the address the
-    moment a broker binds. It shows the broker never takes that socket for its own.
-    A fourth `/code-review high` round (2026-10-08, on `3ccb28f`) found nine things. Four were
-    #73's own and are fixed, each with a check that failed first:
-    - The staging name is random, never cleared first. Two containers can run a broker as the
-      same pid in a shared directory.
-    - A server left open on the way out is unreferenced, so a library caller's process can exit.
-    - `stop()` says again when it leaves the address alone.
-    - The `onBound` check passes only when the other broker answered.
-
-    `addressIsFree` is the claim's shared probe-and-clear step. Three over-long-address
-    findings are `main`'s behaviour and went to #74: a graceful close leaves the truncated
-    socket, the truncation can land outside the checked directory (security), and the
-    100-byte fallback runs on macOS, which binds in full and there has #32's capture race.
-    One became #75.
+  - **#73 is merged** (`5b8d60b`, fixes #32), after four `/code-review high` rounds and two
+    Codex reviews, the last clean.
+    - **How a broker claims its address:** it binds under a staging name,
+      `.b<pid>-<8 random hex>`, never cleared first, links it into place, and watches the
+      address. It binds at the address directly where it can't link, as for an over-long
+      address.
+    - **Handing over:** a broker that finds its address gone or replaced tells its sessions
+      `shuttingDown`, answers what they had asked, and leaves.
+    - **For the suite:** `onBound`, a broker option like `DeferredOptions.clock`, lets a check
+      replace the address the moment a broker binds. The suite also fails if anything ends it
+      early.
+    - **Left to issues:** its over-long-address findings are `main`'s behaviour and went to
+      #74. The in-flight-call hang Codex found is #75.
+  - **#75 is under review** on `fix/in-flight-call-broker-stops`. A call in flight when its
+    broker stops waited out its whole ceiling, and forever with none. `shuttingDown` set
+    `#closed`, and `#failAll` skipped the waiters once it was set.
+    - **The fix:** `#failed` is split from `#closed`, and the client's `stop()` fails what is
+      pending with a reason that is true.
+    - **Two ways in, each a suite check that failed at 22.0 s first:** a broker stopped by
+      SIGTERM mid-call, and a session that chooses again while its broker is retiring.
+    - **#76** (`enhancement`): a call still on a retiring broker should be answered by it
+      rather than failed. It is filed, not in this fix.
   - **Release PR #72** is in the milestone.
   - **Filed from the reviews:**
     - **#69** (`needs design`): a non-object schema still fails the whole list, in zod.
@@ -134,12 +134,11 @@ in `docs/design.md`.
       going private. Node 22 truncates the path and shares. `main` binds the same way. Its
       comment from #73's fourth round adds the graceful-close, security and macOS findings
       above.
-    - **#75** (`bug`): a call in flight when its broker stops waits out its whole ceiling, and
-      forever with none. The cause is `shuttingDown` setting `#closed`, after which `#failAll`
-      skips the pending waiters. It is reproduced on `main`'s client through SIGTERM, and
-      #73's retire path is a second way in. Codex found the same thing on #73 (P2), citing
-      *Sharing is an optimisation, never a dependency*. The maintainer put it in 0.1.5, as a
-      PR of its own (2026-10-08). The fix is small and needs no design.
+    - **#75** (`bug`, milestone `0.1.5`): Codex found it on #73 (P2), citing *Sharing is an
+      optimisation, never a dependency*. The maintainer put it in 0.1.5 as a PR of its own
+      (2026-10-08). It is under review (above).
+    - **#76** (`enhancement`, `area: broker`): a session that chooses again while its broker
+      is leaving cancels the call still on it.
 - **The backlog is GitHub issues** (`gh issue list`), labelled by type, `needs design` and area
   (*Working here* below). Other agents file there too, notably the downstream plugin's.
 - **The release pipeline versions itself** from the commit types on `main`. `docs/releasing.md`
@@ -150,13 +149,12 @@ in `docs/design.md`.
 ## What to do next, in order
 
 1. **Finish 0.1.5** (milestone `0.1.5`).
-   - **#73**: its fourth review round is answered (above). Codex reviewed `864be5c` and found
-     two things. A P2 is #75, and a P3 was this handoff still naming the old staging name,
-     now fixed. Once CI and Codex pass on its head, ask the maintainer to approve the merge.
+   - **#75's PR** (`fix/in-flight-call-broker-stops`): run `/code-review high` on it and
+     answer the findings. Once CI passes, comment `@codex review`, and read *every* comment
+     Codex leaves; the comments API pages at 30. Then ask the maintainer to approve the merge.
      If `main` moved meanwhile, run the suite on the combination first.
-   - **#75** (milestone `0.1.5`): fix it in its own PR, with the suite section its issue
-     describes, failing first.
-   - **Release PR #72**: merge it once its changelog lists #68, #71, #73 and #75.
+   - **Release PR #72**: merge it once its changelog lists #68, #71, #73 and #75. It listed
+     the first three after #73 merged.
    - **Then verify the release as 0.1.4 was**: `v0.1.5` is Latest, `release` has moved and is
      tagged `wolfram--v0.1.5`, and the assets fetched through `releases/latest/download/…`
      match `SHA256SUMS.txt` and say 0.1.5.
