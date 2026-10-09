@@ -1914,6 +1914,95 @@ heading("Regression — a broker that dies does not brick the session");
 }
 
 // ---------------------------------------------------------------------------
+// A broker that stops says so first: it sends shuttingDown, then closes. The
+// session marked its connection closed on that word, so that its next call
+// would choose again, and closed was also what made the socket's close skip
+// failing whatever was outstanding. A call in flight then waited out its whole
+// ceiling for an answer that could never come: 22s of a 20s ceiling in the
+// reproduction, and forever with none (#75). A broker killed outright sends
+// nothing first, and its call failed at once.
+heading("A call in flight when its broker stops fails at once, not at its ceiling");
+{
+  wipeCache();
+  const runtime = privateDir(join(home, "run-stops-mid-call"));
+  const s = await connect({
+    WOLFRAM_MCP_SHARE: "1",
+    XDG_RUNTIME_DIR: runtime,
+    WOLFRAM_MCP_LICENSE_LIMIT: "4",
+    WOLFRAM_MCP_IDLE_MINUTES: "5",
+    WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "20",
+    // Long enough that the broker is stopped while the call is running.
+    FAKE_CALL_DELAY_MS: "4000",
+  });
+  const call = (code) =>
+    s.client
+      .callTool({ name: "WolframLanguageEvaluator", arguments: { code } }, undefined, { timeout: 60_000 })
+      .catch((err) => ({ isError: true, content: [{ type: "text", text: `rejected: ${err.message}` }] }));
+  check("a first call is answered through a broker", answeredByFake(await call("1+1")) && ownBrokers(runtime).length === 1);
+  const started = Date.now();
+  const inFlight = call("2+2");
+  await new Promise((r) => setTimeout(r, 1_000));
+  const stopped = signalOwnBrokers("SIGTERM", runtime);
+  const result = await inFlight;
+  const took = Date.now() - started;
+  const text = result.content?.[0]?.text ?? "";
+  check(
+    "the call in flight fails, naming the broker, within seconds of it stopping",
+    stopped === 1 && result.isError === true && /broker/.test(text) && took < 8_000,
+    `${stopped} broker(s) stopped at 1s; settled after ${(took / 1000).toFixed(1)}s: ${text.slice(0, 120)}`,
+  );
+  const next = await call("3+3");
+  check(
+    "and the session's next call is answered",
+    !next.isError && answeredByFake(next),
+    (next.content?.[0]?.text ?? "").slice(0, 80),
+  );
+
+  // The same wait, reached from the session's side. A broker whose address no
+  // longer holds its socket (#32) says shuttingDown, and answers what it was
+  // already asked before it goes. A session that makes its next request in the
+  // meantime chooses again, and stops the old connection on the way: that close
+  // failed nothing either, so the call still on it waited out its ceiling. It
+  // fails at once now; letting the leaving broker answer it instead is #76,
+  // and passes here too.
+  const told = () => s.stderr().split("the broker is shutting down").length - 1;
+  const toldBefore = told();
+  const aStarted = Date.now();
+  let aSettled = false;
+  const a = call("4+4").finally(() => (aSettled = true));
+  await new Promise((r) => setTimeout(r, 300));
+  const socket = readdirSync(runtime).find((f) => f.endsWith(".sock"));
+  if (socket) rmSync(join(runtime, socket));
+  const heard = await until(() => told() > toldBefore, 3_000);
+  // Only a call still out when the session chooses again is the case: one the
+  // broker had already answered passes the rest of this check on any code.
+  const pendingAtChoice = !aSettled;
+  const b = call("5+5");
+  const aResult = await a;
+  const aTook = Date.now() - aStarted;
+  const aText = aResult.content?.[0]?.text ?? "";
+  check(
+    "a call still on a broker that is leaving settles when the session chooses again",
+    heard &&
+      pendingAtChoice &&
+      aTook < 8_000 &&
+      (answeredByFake(aResult) || /session closed its connection/.test(aText)),
+    `${heard ? "told it was shutting down" : "never told"}, ` +
+      `${pendingAtChoice ? "the call still out" : "the call already settled"} when it chose again; ` +
+      `settled after ${(aTook / 1000).toFixed(1)}s: ${aText.slice(0, 120)}`,
+  );
+  const bResult = await b;
+  check(
+    "and the request that chose again is answered",
+    !bResult.isError && answeredByFake(bResult),
+    (bResult.content?.[0]?.text ?? "").slice(0, 80),
+  );
+  await s.client.close();
+  signalOwnBrokers("SIGKILL", runtime);
+  await new Promise((r) => setTimeout(r, 300));
+}
+
+// ---------------------------------------------------------------------------
 heading("Regression — several sessions recovering at once produce one broker");
 {
   wipeCache();
