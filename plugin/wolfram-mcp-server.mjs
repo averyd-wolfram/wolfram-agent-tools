@@ -6997,7 +6997,7 @@ var init_version = __esm({
   "dist/version.js"() {
     "use strict";
     here = dirname(fileURLToPath(import.meta.url));
-    PKG = true ? JSON.parse('{"name":"wolfram-mcp-server","version":"0.1.4","description":"MCP server that drives a locally installed Wolfram kernel, with lazy start and idle shutdown."}') : JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8"));
+    PKG = true ? JSON.parse('{"name":"wolfram-mcp-server","version":"0.1.5","description":"MCP server that drives a locally installed Wolfram kernel, with lazy start and idle shutdown."}') : JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8"));
   }
 });
 
@@ -7133,6 +7133,7 @@ var broker_protocol_exports = {};
 __export(broker_protocol_exports, {
   BROKER_PROTOCOL: () => BROKER_PROTOCOL,
   FrameReader: () => FrameReader,
+  MAX_SOCKET_PATH: () => MAX_SOCKET_PATH,
   SOCKET_MODE: () => SOCKET_MODE,
   brokerAddress: () => brokerAddress,
   brokerDirectory: () => brokerDirectory,
@@ -7414,6 +7415,52 @@ var init_config = __esm({
     MAX_TIMER_MS = 2 ** 31 - 1;
     SECONDS = { ms: 1e3, name: "seconds" };
     MINUTES = { ms: 6e4, name: "minutes" };
+  }
+});
+
+// dist/duration.js
+function durationText(ms, round) {
+  if (!Number.isFinite(ms))
+    return String(ms);
+  if (ms <= 0)
+    return "0ms";
+  if (ms < 1e3 && round(ms) < 1e3)
+    return `${round(ms)}ms`;
+  if (ms < 1e4 && round(ms / 100) < 100)
+    return `${round(ms / 100) / 10}s`;
+  const at = UNITS.findIndex((unit) => ms >= unit.ms);
+  const step = UNITS[at + 1]?.ms ?? 1e3;
+  const total = round(ms / step) * step;
+  const first = UNITS.find((unit) => total >= unit.ms) ?? UNITS[3];
+  const count = Math.floor(total / first.ms);
+  const rest = total - count * first.ms;
+  const second = UNITS[UNITS.indexOf(first) + 1];
+  if (!second || rest === 0)
+    return `${count}${first.name}`;
+  return `${count}${first.name} ${String(rest / second.ms).padStart(2, "0")}${second.name}`;
+}
+function budgetText(ms) {
+  return durationText(ms, Math.floor);
+}
+function waitText(ms) {
+  return durationText(ms, Math.ceil);
+}
+function elapsedText(ms) {
+  return durationText(ms, Math.floor);
+}
+function idleText(ms) {
+  return ms > 0 ? budgetText(ms) : "disabled";
+}
+var UNITS;
+var init_duration = __esm({
+  "dist/duration.js"() {
+    "use strict";
+    UNITS = [
+      { ms: 864e5, name: "d" },
+      { ms: 36e5, name: "h" },
+      { ms: 6e4, name: "m" },
+      { ms: 1e3, name: "s" }
+    ];
   }
 });
 
@@ -17269,13 +17316,6 @@ function createLogger(prefix, options = {}) {
     }
   };
 }
-function budgetText(ms) {
-  if (ms < 1e3)
-    return `${Math.floor(ms)}ms`;
-  if (ms < 1e4)
-    return `${Math.floor(ms / 100) / 10}s`;
-  return `${Math.floor(ms / 1e3)}s`;
-}
 function errorText(err) {
   if (err instanceof Error)
     return err.message;
@@ -17300,6 +17340,24 @@ var init_log = __esm({
 // dist/kernel.js
 function requestOptions(signal) {
   return { timeout: SDK_REQUEST_TIMEOUT_MS, ...signal ? { signal } : {} };
+}
+async function drainPages(page) {
+  const all = [];
+  let cursor;
+  for (let guard = 0; guard < 50; guard++) {
+    const result = await page(cursor);
+    all.push(...result.items);
+    cursor = result.nextCursor;
+    if (!cursor)
+      break;
+  }
+  return all;
+}
+function listAllTools(client, options) {
+  return drainPages(async (cursor) => {
+    const page = await client.listTools(cursor ? { cursor } : void 0, options);
+    return { items: page.tools ?? [], nextCursor: page.nextCursor };
+  });
 }
 function isRequestTimeout(err) {
   return err instanceof McpError && err.code === REQUEST_TIMEOUT;
@@ -17326,7 +17384,7 @@ function withKernelOutput(err, output) {
 Last output from the kernel:
 ${tail}${hint}`, { cause: err });
 }
-var PACLET_KERNEL_ARGS, LOAD_AGENTTOOLS, KERNEL_ARGS, DeadlineExceeded, HandshakeTimeout, SDK_REQUEST_TIMEOUT_MS, DEFAULT_DEADLINE_MS, REQUEST_TIMEOUT, RequestDropped, SERVER_NOT_FOUND, ServerNotResolved, HANDSHAKE_SDK_GRACE_MS, NOT_ACTIVATED, SHAPING_VARS, KernelSession;
+var PACLET_KERNEL_ARGS, LOAD_AGENTTOOLS, KERNEL_ARGS, DeadlineExceeded, HandshakeTimeout, SDK_REQUEST_TIMEOUT_MS, DEFAULT_DEADLINE_MS, RelayClient, REQUEST_TIMEOUT, RequestDropped, SERVER_NOT_FOUND, ServerNotResolved, HANDSHAKE_SDK_GRACE_MS, NOT_ACTIVATED, SHAPING_VARS, KernelSession;
 var init_kernel = __esm({
   "dist/kernel.js"() {
     "use strict";
@@ -17336,6 +17394,7 @@ var init_kernel = __esm({
     init_transport();
     init_flavour();
     init_inspect();
+    init_duration();
     init_log();
     PACLET_KERNEL_ARGS = [
       "-run",
@@ -17365,6 +17424,11 @@ var init_kernel = __esm({
     };
     SDK_REQUEST_TIMEOUT_MS = MAX_TIMER_MS;
     DEFAULT_DEADLINE_MS = 6e4;
+    RelayClient = class extends Client {
+      listTools(params, options) {
+        return this.request({ method: "tools/list", params }, ListToolsResultSchema, options);
+      }
+    };
     REQUEST_TIMEOUT = ErrorCode.RequestTimeout;
     RequestDropped = class extends Error {
       constructor(reason) {
@@ -17459,7 +17523,7 @@ var init_kernel = __esm({
           },
           onFatal: (error2) => reportFatal(error2)
         });
-        const client = new Client(clientInfo, { capabilities: {} });
+        const client = new RelayClient(clientInfo, { capabilities: {} });
         this.#handshaking = { transport, abort: (error2) => reportFatal(error2) };
         client.onerror = (err) => log(`upstream error: ${errorText(err)}`);
         client.onclose = () => {
@@ -17492,7 +17556,7 @@ var init_kernel = __esm({
           clearTimeout(timer);
           this.#handshaking = null;
         }
-        log(`kernel ready in ${((Date.now() - startedAt) / 1e3).toFixed(1)}s`);
+        log(`kernel ready in ${elapsedText(Date.now() - startedAt)}`);
         this.#client = client;
         this.#transport = transport;
         const refresh = (why) => {
@@ -17796,6 +17860,7 @@ var init_broker_client = __esm({
     init_types();
     init_broker_protocol();
     init_config();
+    init_duration();
     init_kernel();
     init_log();
     CONNECT_DEADLINE_MS = 5e3;
@@ -17841,7 +17906,10 @@ var init_broker_client = __esm({
        */
       #liveness = /* @__PURE__ */ new Map();
       #onKernelReady;
+      /** No new work goes out on this connection; the next call chooses again. */
       #closed = false;
+      /** Whether the broker still answers, while that is being asked (`#stillAnswering`). */
+      #asking = null;
       constructor(options, socket) {
         this.#options = options;
         this.#socket = socket;
@@ -18002,6 +18070,38 @@ var init_broker_client = __esm({
         });
       }
       /**
+       * Ask whether the broker still answers, once for however many requests ran
+       * out together, and give it up if it does not.
+       *
+       * A request running out is a question about the broker, not an answer. It
+       * used to be taken as the broker going: the connection was marked closed, the
+       * session's next request chose again and closed it, and the broker, reading
+       * that as its proxy vanishing, aborted every other call the session had there,
+       * on a broker that was only busy (#78). A busy broker answers ping from its
+       * event loop, ahead of its pool; one that has stopped answering does not.
+       * `settled()` holds the session's next request until this is known: sent to
+       * a frozen broker meanwhile, it was held to its own whole ceiling.
+       */
+      #stillAnswering(op) {
+        if (!this.#asking) {
+          this.#options.log(`${op} ran out; asking the broker whether it is still running`);
+          this.#asking = this.#answers().then((alive) => {
+            this.#asking = null;
+            if (!alive && !this.#closed) {
+              this.#options.log("the broker did not answer; will choose again");
+              this.#failAll(new Error(`the Wolfram broker stopped answering: ${op} ran out, and it did not answer when asked whether it was still running`));
+              this.#socket.destroy();
+            }
+            return alive;
+          });
+        }
+        return this.#asking;
+      }
+      /** See `KernelBackend.settled`: whether the broker still answers, once asked. */
+      async settled() {
+        await this.#asking;
+      }
+      /**
        * Tell the broker what this session's kernels must be started with.
        *
        * The values travel, not just their digest, because the broker is what starts
@@ -18065,8 +18165,6 @@ var init_broker_client = __esm({
           waiter.reject(brokerError(response));
       }
       #failAll(err) {
-        if (this.#closed)
-          return;
         this.#closed = true;
         for (const [, waiter] of this.#pending)
           waiter.reject(err);
@@ -18095,8 +18193,9 @@ var init_broker_client = __esm({
         return new Promise((resolve, reject) => {
           const timer = ceiling === 0 ? void 0 : setTimeout(() => {
             this.#pending.delete(id);
-            this.#closed = true;
-            reject(new Error(`the Wolfram broker did not answer ${op} within ${ceiling}ms`));
+            this.#progress.delete(id);
+            reject(new Error(`the Wolfram broker did not answer ${op} within ${budgetText(ceiling)}`));
+            void this.#stillAnswering(op);
           }, timerDelay(ceiling));
           timer?.unref?.();
           const settle = {
@@ -18193,7 +18292,7 @@ var init_broker_client = __esm({
         return this.#request("status", void 0, timeoutMs);
       }
       async stop() {
-        this.#closed = true;
+        this.#failAll(new Error("the session closed its connection to the Wolfram broker"));
         this.#socket.end();
         this.#socket.destroy();
       }
@@ -18731,13 +18830,7 @@ function sessionStatus(now = Date.now()) {
   if (!install) {
     return `Wolfram plugin: no Wolfram installation was found without starting a kernel. The Wolfram tools answer only wolfram_status until one is; ${doctorCommand()} looks further and says what is missing.`;
   }
-  const age = (at) => {
-    const minutes = Math.round((now - at) / 6e4);
-    if (minutes < 60)
-      return `${minutes} min ago`;
-    const hours = Math.round(minutes / 60);
-    return hours < 48 ? `${hours} h ago` : `${Math.round(hours / 24)} days ago`;
-  };
+  const age = (at) => `${elapsedText(now - at)} ago`;
   const lines = [
     `Wolfram plugin: kernel ${install.version ?? "of unknown version"} at ${install.bin}, server ${config2.serverName}.`
   ];
@@ -18763,9 +18856,9 @@ async function runDoctor() {
   out("Configuration");
   out(`  serverName            ${config2.serverName}   (valid: ${Object.keys(MCP_SERVERS).join(", ")})`);
   out(`  minimum version    ${config2.minVersion}`);
-  out(`  idle shutdown      ${config2.idleMs > 0 ? `${config2.idleMs / 6e4} min` : "disabled"}`);
-  out(`  start timeout      ${config2.startTimeoutMs / 1e3}s`);
-  out(`  call timeout       ${config2.callTimeoutMs / 1e3}s`);
+  out(`  idle shutdown      ${idleText(config2.idleMs)}`);
+  out(`  start timeout      ${budgetText(config2.startTimeoutMs)}`);
+  out(`  call timeout       ${budgetText(config2.callTimeoutMs)}`);
   out(`  tools/list cache   ${config2.cacheEnabled ? "enabled" : "disabled"}`);
   const set = CONFIG_VARS.filter((name) => process.env[name]);
   out(`  environment        ${set.length ? set.join(", ") : "(nothing set, using defaults)"}`);
@@ -18881,12 +18974,12 @@ async function runDoctor() {
     const startedAt = Date.now();
     const result = await session.run(async (client, request) => {
       const caps = client.getServerCapabilities() ?? {};
-      const tools = await client.listTools(void 0, request);
-      return { caps, tools: tools.tools ?? [], info: client.getServerVersion() };
+      const tools = await listAllTools(client, request);
+      return { caps, tools, info: client.getServerVersion() };
     });
-    const elapsed = ((Date.now() - startedAt) / 1e3).toFixed(1);
+    const elapsed = elapsedText(Date.now() - startedAt);
     out();
-    out(`  ok, ${elapsed}s`);
+    out(`  ok, ${elapsed}`);
     out(`  upstream      ${result.info?.name ?? "?"} ${result.info?.version ?? ""}`.trimEnd());
     out(`  capabilities  ${Object.keys(result.caps).join(", ") || "(none)"}`);
     out(`  tools         ${result.tools.map((tool) => tool.name).join(", ") || "(none)"}`);
@@ -18925,6 +19018,7 @@ var init_doctor = __esm({
     init_client2();
     init_cache();
     init_config();
+    init_duration();
     init_inspect();
     init_kernel();
     init_locate();
@@ -18995,17 +19089,12 @@ function candidateIdentity(bin) {
 function sameCandidate(a, b) {
   return a !== null && b !== null && a.bin === b.bin && a.mtimeMs === b.mtimeMs && a.size === b.size;
 }
-function formatWait(ms) {
-  const total = Math.ceil(ms / 1e3);
-  const minutes = Math.floor(total / 60);
-  const seconds = total % 60;
-  return minutes > 0 ? `${minutes}m ${String(seconds).padStart(2, "0")}s` : `${seconds}s`;
-}
 var PREPARATION_BACKOFF_MS, NOT_RESOLVED_BACKOFF_MS, MIN_START_MS, NOT_RESOLVED_ADVICE, PreparationTimeout, PreparationStopped, Deadline, Backoff;
 var init_prepare = __esm({
   "dist/prepare.js"() {
     "use strict";
     init_config();
+    init_duration();
     init_log();
     PREPARATION_BACKOFF_MS = 10 * 6e4;
     NOT_RESOLVED_BACKOFF_MS = 15e3;
@@ -19129,7 +19218,7 @@ var init_prepare = __esm({
         const left = this.remaining();
         const floor = Math.max(1, Math.min(minimumMs, this.totalMs / 2));
         if (left < floor) {
-          throw new PreparationTimeout(stage, this.totalMs, `${Math.floor(left)}ms were left, too little for this to begin`, void 0, { began: false });
+          throw new PreparationTimeout(stage, this.totalMs, `${budgetText(left)} were left, too little for this to begin`, void 0, { began: false });
         }
         return left;
       }
@@ -19211,18 +19300,6 @@ __export(backend_exports, {
   createBackend: () => createBackend,
   deferredBackend: () => deferredBackend
 });
-async function drainPages(page) {
-  const all = [];
-  let cursor;
-  for (let guard = 0; guard < 50; guard++) {
-    const result = await page(cursor);
-    all.push(...result.items);
-    cursor = result.nextCursor;
-    if (!cursor)
-      break;
-  }
-  return all;
-}
 function deferredBackend(config2, install, log, overrides = {}) {
   return new DeferredBackend((deadline) => createBackend(config2, install, log, deadline), log, {
     ...overrides,
@@ -19291,6 +19368,7 @@ var init_backend = __esm({
     init_inspect();
     init_prepare();
     init_kernel();
+    init_duration();
     init_log();
     init_version();
     LocalBackend = class {
@@ -19339,11 +19417,7 @@ var init_backend = __esm({
        * complete lists and neither ever returns a `nextCursor`.
        */
       async listTools() {
-        const tools = await this.#session.run((c, request) => drainPages(async (cursor) => {
-          const page = await c.listTools(cursor ? { cursor } : void 0, request);
-          return { items: page.tools ?? [], nextCursor: page.nextCursor };
-        }));
-        return { tools };
+        return { tools: await this.#session.run((c, request) => listAllTools(c, request)) };
       }
       async listPrompts() {
         const prompts = await this.#session.run((c, request) => drainPages(async (cursor) => {
@@ -19417,6 +19491,7 @@ var init_backend = __esm({
         return this.#backoff.current(this.#identity());
       }
       async #get() {
+        await this.#resolved?.settled?.();
         if (this.#resolved && this.#resolved.usable?.() === false) {
           this.#log?.("the chosen backend is gone; deciding again");
           const dead = this.#resolved;
@@ -19430,7 +19505,7 @@ var init_backend = __esm({
           throw new PreparationStopped();
         const waiting = this.backoff();
         if (waiting) {
-          throw new Error(`the last attempt to prepare a Wolfram kernel failed ${formatWait(this.#clock() - waiting.failedAt)} ago, so this one was not made. It is retried in ${formatWait(waiting.remainingMs)}` + (waiting.advice ? `; ${waiting.advice}.` : `, or as soon as the installation changes. For a full report, run ${doctorCommand()}.`) + // Last, and set apart: a reason can run to several lines of kernel
+          throw new Error(`the last attempt to prepare a Wolfram kernel failed ${elapsedText(this.#clock() - waiting.failedAt)} ago, so this one was not made. It is retried in ${waitText(waiting.remainingMs)}` + (waiting.advice ? `; ${waiting.advice}.` : `, or as soon as the installation changes. For a full report, run ${doctorCommand()}.`) + // Last, and set apart: a reason can run to several lines of kernel
           // output and end in a sentence of its own, so spliced into this one
           // it read "try again.. For a full report", burying the pointer.
           `
@@ -19454,7 +19529,7 @@ The failure was: ${waiting.reason}`);
             // the user at the wrong thing.
             unresolved ? NOT_RESOLVED_ADVICE : void 0
           );
-          this.#log?.(`preparation failed; not retrying for ${formatWait(this.#backoffWindow())}: ${errorText(err)}`);
+          this.#log?.(`preparation failed; not retrying for ${waitText(this.#backoffWindow())}: ${errorText(err)}`);
           throw err;
         });
         return this.#resolving;
@@ -19857,6 +19932,7 @@ var init_pool = __esm({
     init_kernel();
     init_inspect();
     init_log();
+    init_duration();
     init_prepare();
     LICENCE_SHAPING = /* @__PURE__ */ new Set(["WOLFRAM_BASE", "WOLFRAM_USERBASE"]);
     HARD_KERNEL_CAP = 8;
@@ -20197,7 +20273,7 @@ var init_pool = __esm({
           this.#unresolved.delete(flavour.digest);
           return null;
         }
-        return new ServerNotResolved(`a kernel for this server could not start it ${formatWait(age)} ago, so none was started for this request; it is tried again in ${formatWait(NOT_RESOLVED_BACKOFF_MS - age)}; ${NOT_RESOLVED_ADVICE}.
+        return new ServerNotResolved(`a kernel for this server could not start it ${elapsedText(age)} ago, so none was started for this request; it is tried again in ${waitText(NOT_RESOLVED_BACKOFF_MS - age)}; ${NOT_RESOLVED_ADVICE}.
 
 The failure was: ${known.reason}`);
       }
@@ -20216,20 +20292,10 @@ __export(broker_server_exports, {
   startBroker: () => startBroker
 });
 import { createServer } from "node:net";
-import { statSync as statSync6, unlinkSync as unlinkSync3 } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { linkSync, statSync as statSync6, unlinkSync as unlinkSync3 } from "node:fs";
 import { connect as connect2 } from "node:net";
-async function drain(page) {
-  const all = [];
-  let cursor;
-  for (let i = 0; i < MAX_PAGES2; i++) {
-    const result = await page(cursor);
-    all.push(...result.items);
-    cursor = result.nextCursor;
-    if (!cursor)
-      break;
-  }
-  return all;
-}
+import { dirname as dirname8, join as join9 } from "node:path";
 function readFlavour(params) {
   if (typeof params !== "object" || params === null)
     return null;
@@ -20306,7 +20372,10 @@ async function startBroker(options) {
   const connections = /* @__PURE__ */ new Map();
   let emptyTimer = null;
   let stopping = false;
-  let boundIdentity = null;
+  let outstanding = 0;
+  let retiring = false;
+  let addressWatch = null;
+  let claim = null;
   const preparing = (async () => {
     const licence = resolveLicence(options);
     const extraEnv = installationEnv(options.bin, options.allowInspect);
@@ -20338,11 +20407,8 @@ async function startBroker(options) {
       return;
     try {
       const capabilities = client.getServerCapabilities() ?? {};
-      const tools = await drain(async (cursor) => {
-        const page = await client.listTools(cursor ? { cursor } : void 0);
-        return { items: page.tools ?? [], nextCursor: page.nextCursor };
-      });
-      const prompts = capabilities.prompts ? await drain(async (cursor) => {
+      const tools = await listAllTools(client);
+      const prompts = capabilities.prompts ? await drainPages(async (cursor) => {
         const page = await client.listPrompts(cursor ? { cursor } : void 0);
         return { items: page.prompts ?? [], nextCursor: page.nextCursor };
       }) : null;
@@ -20388,14 +20454,11 @@ async function startBroker(options) {
         // that never issued page 1. Nothing outside this process ever sees one.
         case "listTools":
           return reply({
-            tools: await pool.run(flavour, (c, options2) => drain(async (cursor) => {
-              const page = await c.listTools(cursor ? { cursor } : void 0, options2);
-              return { items: page.tools ?? [], nextCursor: page.nextCursor };
-            }))
+            tools: await pool.run(flavour, (c, options2) => listAllTools(c, options2))
           });
         case "listPrompts":
           return reply({
-            prompts: await pool.run(flavour, (c, options2) => drain(async (cursor) => {
+            prompts: await pool.run(flavour, (c, options2) => drainPages(async (cursor) => {
               const page = await c.listPrompts(cursor ? { cursor } : void 0, options2);
               return { items: page.prompts ?? [], nextCursor: page.nextCursor };
             }))
@@ -20513,9 +20576,12 @@ async function startBroker(options) {
         if (socket.writable)
           socket.write(encodeFrame(frame2));
       };
+      outstanding++;
       void handle(request, state, inFlight, emit).then((response) => {
         if (socket.writable)
           socket.write(encodeFrame(response));
+      }).finally(() => {
+        outstanding--;
       });
     });
     socket.on("data", (chunk) => reader.push(chunk));
@@ -20535,62 +20601,145 @@ async function startBroker(options) {
     if (emptyTimer || stopping)
       return;
     emptyTimer = setTimeout(() => {
-      if (connections.size > 0)
+      if (connections.size > 0 || stopping)
         return;
       log("no proxies attached, shutting down");
       void stop().then(() => process.exit(0));
     }, EMPTY_GRACE_MS);
     emptyTimer.unref?.();
   }
+  function checkAddress() {
+    if (stopping)
+      return;
+    if (!retiring) {
+      const now = socketIdentity(address);
+      if (now === (claim?.identity ?? null))
+        return;
+      retiring = true;
+      log(`${now === null ? "the socket at this address is gone" : "another broker owns this address now"}; telling ${connections.size} proxies to choose again, and leaving once their requests are answered`);
+      broadcast({ event: "shuttingDown" });
+    }
+    if (outstanding > 0)
+      return;
+    void stop().then(() => process.exit(0));
+  }
   async function stop() {
     if (stopping)
       return;
     stopping = true;
+    if (addressWatch)
+      clearInterval(addressWatch);
+    if (emptyTimer)
+      clearTimeout(emptyTimer);
     const pool = await preparing.catch(() => null);
     broadcast({ event: "shuttingDown" });
     for (const socket of connections.keys())
       socket.destroy();
-    await new Promise((resolve) => {
-      if (server)
-        server.close(() => resolve());
-      else
-        resolve();
-    });
-    await pool?.stop();
-    if (process.platform !== "win32") {
+    const taken = claim;
+    const identity = taken?.identity ?? null;
+    const ours = identity === null || socketIdentity(address) === identity;
+    if (!ours)
+      log("the address no longer holds this broker's socket; leaving it alone");
+    if (ours && identity !== null && !taken?.atAddress) {
       try {
-        const here2 = statSync6(address);
-        if (boundIdentity !== null && `${here2.dev}:${here2.ino}` !== boundIdentity) {
-          log("a newer broker owns the socket; leaving it alone");
-        } else {
-          unlinkSync3(address);
-        }
+        unlinkSync3(address);
       } catch {
       }
     }
+    await new Promise((resolve) => {
+      if (!taken)
+        resolve();
+      else if (ours || !taken.atAddress)
+        taken.server.close(() => resolve());
+      else {
+        taken.server.unref();
+        resolve();
+      }
+    });
+    await pool?.stop();
+  }
+  async function listenAt(path, attempt) {
+    const candidate = createServer(onConnection);
+    const previousMask = process.umask(511 & ~SOCKET_MODE);
+    try {
+      candidate.listen(path);
+    } finally {
+      process.umask(previousMask);
+    }
+    const bound = await new Promise((resolve) => {
+      candidate.once("error", (err) => {
+        log(`bind attempt ${attempt} failed: ${err.code ?? "?"} ${err.message}`);
+        resolve(false);
+      });
+      candidate.once("listening", () => resolve(true));
+    });
+    if (bound)
+      return candidate;
+    candidate.close();
+    return null;
+  }
+  async function addressIsFree() {
+    const judged = socketIdentity(address);
+    if (await socketIsLive(address)) {
+      log("another broker is already listening; standing down");
+      return false;
+    }
+    removeStaleSocket(address, judged, log);
+    return true;
   }
   async function claimSocket() {
-    for (let attempt = 1; attempt <= BIND_ATTEMPTS; attempt++) {
-      const judged = socketIdentity(address);
-      if (await socketIsLive(address)) {
-        log("another broker is already listening; standing down");
-        return null;
+    if (process.platform === "win32" || Buffer.byteLength(address) > MAX_SOCKET_PATH) {
+      return claimDirect();
+    }
+    const staging = join9(dirname8(address), `.b${process.pid}-${randomBytes(4).toString("hex")}`);
+    const server = await listenAt(staging, 1);
+    if (!server)
+      return null;
+    options.onBound?.(staging);
+    const identity = socketIdentity(staging);
+    let unlinkable = false;
+    try {
+      for (let attempt = 1; attempt <= BIND_ATTEMPTS; attempt++) {
+        if (!await addressIsFree())
+          break;
+        try {
+          linkSync(staging, address);
+          return { server, identity, atAddress: false };
+        } catch (err) {
+          const code2 = err.code ?? "?";
+          log(`link attempt ${attempt} failed: ${code2} ${errorText(err)}`);
+          if (code2 !== "EEXIST") {
+            unlinkable = true;
+            break;
+          }
+        }
+        if (attempt < BIND_ATTEMPTS)
+          await jitter();
+        else
+          log(`gave up trying to take ${address} after ${BIND_ATTEMPTS} attempts`);
       }
-      removeStaleSocket(address, judged, log);
-      const candidate = createServer(onConnection);
-      const previousMask = process.umask(511 & ~SOCKET_MODE);
-      const bound = await new Promise((resolve) => {
-        candidate.once("error", (err) => {
-          log(`bind attempt ${attempt} failed: ${err.code ?? "?"} ${err.message}`);
-          resolve(false);
-        });
-        candidate.listen(address, () => resolve(true));
-      }).finally(() => {
-        process.umask(previousMask);
-      });
-      if (bound)
-        return candidate;
-      candidate.close();
+    } finally {
+      try {
+        unlinkSync3(staging);
+      } catch {
+      }
+    }
+    server.close();
+    return unlinkable ? claimDirect() : null;
+  }
+  async function claimDirect() {
+    for (let attempt = 1; attempt <= BIND_ATTEMPTS; attempt++) {
+      if (!await addressIsFree())
+        return null;
+      const server = await listenAt(address, attempt);
+      if (server) {
+        options.onBound?.(address);
+        return {
+          server,
+          identity: process.platform === "win32" ? null : socketIdentity(address),
+          atAddress: true
+        };
+      }
       if (attempt < BIND_ATTEMPTS)
         await jitter();
     }
@@ -20602,23 +20751,20 @@ async function startBroker(options) {
     log(`refusing to listen: ${fault}. Sessions will use private kernels until WOLFRAM_MCP_RUNTIME_DIR (or XDG_RUNTIME_DIR) names a directory only you can write to`);
     return null;
   }
-  const server = await claimSocket();
-  const listened = server !== null;
-  if (!listened)
+  claim = await claimSocket();
+  if (!claim)
     return null;
-  try {
-    const bound = statSync6(address);
-    boundIdentity = `${bound.dev}:${bound.ino}`;
-  } catch {
-    boundIdentity = null;
-  }
   log(`broker listening on ${address} (pid ${process.pid})`);
   scheduleExit();
+  if (claim.identity !== null) {
+    addressWatch = setInterval(checkAddress, ADDRESS_CHECK_MS);
+    addressWatch.unref?.();
+  }
   process.on("SIGINT", () => void stop().then(() => process.exit(0)));
   process.on("SIGTERM", () => void stop().then(() => process.exit(0)));
-  return { server, stop };
+  return { server: claim.server, stop };
 }
-var EMPTY_GRACE_MS, EVALUATIONS, MAX_PAGES2, declaredNames, BIND_ATTEMPTS, jitter;
+var EMPTY_GRACE_MS, ADDRESS_CHECK_MS, EVALUATIONS, declaredNames, BIND_ATTEMPTS, jitter;
 var init_broker_server = __esm({
   "dist/broker-server.js"() {
     "use strict";
@@ -20627,14 +20773,15 @@ var init_broker_server = __esm({
     init_inspect();
     init_broker_protocol();
     init_flavour();
+    init_kernel();
     init_log();
     EMPTY_GRACE_MS = 6e4;
+    ADDRESS_CHECK_MS = 500;
     EVALUATIONS = /* @__PURE__ */ new Set([
       "callTool",
       "getPrompt",
       "readResource"
     ]);
-    MAX_PAGES2 = 50;
     declaredNames = /* @__PURE__ */ new Set();
     BIND_ATTEMPTS = 4;
     jitter = () => new Promise((r) => setTimeout(r, 40 + Math.random() * 120));
@@ -21352,43 +21499,32 @@ init_types();
 init_cache();
 init_config();
 init_doctor();
-init_prepare();
+init_duration();
 init_inspect();
+init_kernel();
 init_locate();
 init_log();
 init_version();
-var MAX_PAGES = 50;
 var PROTOCOL_ERRORS = /* @__PURE__ */ new Set([
   ErrorCode.ParseError,
   ErrorCode.InvalidRequest,
   ErrorCode.MethodNotFound,
   ErrorCode.InvalidParams
 ]);
-async function drainTools(ops) {
-  const tools = [];
-  let cursor;
-  for (let page = 0; page < MAX_PAGES; page++) {
-    const result = await ops.listTools(cursor);
-    tools.push(...result.tools ?? []);
-    cursor = result.nextCursor;
-    if (!cursor)
-      break;
-  }
-  return tools;
+function drainTools(ops) {
+  return drainPages(async (cursor) => {
+    const page = await ops.listTools(cursor);
+    return { items: page.tools ?? [], nextCursor: page.nextCursor };
+  });
 }
-async function drainPrompts(ops) {
-  const prompts = [];
-  let cursor;
-  for (let page = 0; page < MAX_PAGES; page++) {
-    const result = await ops.listPrompts(cursor);
-    prompts.push(...result.prompts ?? []);
-    cursor = result.nextCursor;
-    if (!cursor)
-      break;
-  }
-  return prompts;
+function drainPrompts(ops) {
+  return drainPages(async (cursor) => {
+    const page = await ops.listPrompts(cursor);
+    return { items: page.prompts ?? [], nextCursor: page.nextCursor };
+  });
 }
 var KERNEL_TIME_CONSTRAINT_S = 60;
+var EVALUATOR_DEFAULT_TEXT = `${budgetText(KERNEL_TIME_CONSTRAINT_S * 1e3)} (TimeConstraint ${KERNEL_TIME_CONSTRAINT_S})`;
 var TIME_CONSTRAINT_HEADROOM_MS = 3e4;
 function evaluationCeilingMs(configuredMs, args) {
   const requested = Number(args?.["timeConstraint"]);
@@ -21456,7 +21592,7 @@ async function describeSharing(config2, install, backend) {
   clearTimeout(timer);
   if (outcome === expired) {
     void attaching.then((late) => late?.stop());
-    return `on \u2014 a broker is listening but did not answer within ${ceilingMs / 1e3}s`;
+    return `on \u2014 a broker is listening but did not answer within ${budgetText(ceilingMs)}`;
   }
   if (!outcome) {
     return declined === null ? "on \u2014 no broker running yet; the first tool call starts one" : `on \u2014 ${String(declined)}`;
@@ -21471,7 +21607,7 @@ function describeStatus(config2, install, cache, backoff = null, sharing = null)
   if (!install)
     return describeMissingKernel(config2);
   const facts = config2.inspect ? readFacts(install.bin) : null;
-  const age = cache ? `${Math.round((Date.now() - cache.cachedAt) / 6e4)} min ago` : null;
+  const age = cache ? `${elapsedText(Date.now() - cache.cachedAt)} ago` : null;
   const lines = [
     `${PKG.name} ${PKG.version}`,
     "",
@@ -21483,14 +21619,14 @@ function describeStatus(config2, install, cache, backoff = null, sharing = null)
   } else if (!facts) {
     lines.push("facts       unknown yet: every kernel reports them as it starts");
   } else {
-    lines.push(`facts       cached from a kernel ${Math.round((Date.now() - facts.probedAt) / 6e4)} min ago, refreshed by every kernel start`, `AgentTools  ${facts.agentTools ?? "absent \u2014 every tool call will fail to load it"}`, `account     ${facts.wolframID ?? "not signed in \u2014 cloud-backed tools will fail on their own"}`, `licence     ${facts.maxLicenseProcesses} seat(s)${facts.licenseType ? ` (${facts.licenseType})` : ""}`);
+    lines.push(`facts       cached from a kernel ${elapsedText(Date.now() - facts.probedAt)} ago, refreshed by every kernel start`, `AgentTools  ${facts.agentTools ?? "absent \u2014 every tool call will fail to load it"}`, `account     ${facts.wolframID ?? "not signed in \u2014 cloud-backed tools will fail on their own"}`, `licence     ${facts.maxLicenseProcesses} seat(s)${facts.licenseType ? ` (${facts.licenseType})` : ""}`);
   }
   if (backoff) {
-    lines.push(`preparing   the last attempt failed; retried in ${formatWait(backoff.remainingMs)}` + // The same pointer the failed call gave: for a server that would not
+    lines.push(`preparing   the last attempt failed; retried in ${waitText(backoff.remainingMs)}` + // The same pointer the failed call gave: for a server that would not
     // start, the server, not the installation.
     (backoff.advice ? `; ${backoff.advice}` : `, or as soon as the installation changes`), `            ${backoff.reason}`);
   }
-  lines.push(`sharing     ${config2.share ? sharing ?? "on \u2014 kernels are shared with other sessions" : "off \u2014 this session has its own kernel"}`, `tool list   ${describeToolList(config2, cache, age)}`, `logs        ${process.env["WOLFRAM_MCP_LOG"] ?? "stderr, captured by your MCP client"}`, `timeouts    start ${config2.startTimeoutMs / 1e3}s, call ${config2.callTimeoutMs / 1e3}s, idle ${config2.idleMs / 6e4} min`, `evaluation  the evaluator stops itself at ${KERNEL_TIME_CONSTRAINT_S}s unless MCP_TOOL_OPTIONS or a timeConstraint argument says otherwise`, `            past the call timeout this server stops waiting but leaves the kernel running, so a long call keeps its session`);
+  lines.push(`sharing     ${config2.share ? sharing ?? "on \u2014 kernels are shared with other sessions" : "off \u2014 this session has its own kernel"}`, `tool list   ${describeToolList(config2, cache, age)}`, `logs        ${process.env["WOLFRAM_MCP_LOG"] ?? "stderr, captured by your MCP client"}`, `timeouts    start ${budgetText(config2.startTimeoutMs)}, call ${budgetText(config2.callTimeoutMs)}, idle ${idleText(config2.idleMs)}`, `evaluation  the evaluator stops itself at ${EVALUATOR_DEFAULT_TEXT} unless MCP_TOOL_OPTIONS or a timeConstraint argument says otherwise`, `            past the call timeout this server stops waiting but leaves the kernel running, so a long call keeps its session`);
   return lines.join("\n");
 }
 function describeMissingKernel(config2) {
@@ -21551,9 +21687,9 @@ function createWolframServer(config2, log, makeBackend) {
   }
   log(`kernel: ${install.bin} (version=${install.version ?? "unknown"}, via ${install.source})`);
   if (config2.callTimeoutMs < KERNEL_TIME_CONSTRAINT_S * 1e3) {
-    log(`call timeout is ${config2.callTimeoutMs / 1e3}s, below the evaluator's default ${KERNEL_TIME_CONSTRAINT_S}s time constraint: this server will stop waiting first, so a slow evaluation is reported here rather than ending in the kernel's own "time constraint exceeded", which says more. The kernel is left running either way. Prompts and resource reads wait this same ceiling`);
+    log(`call timeout is ${budgetText(config2.callTimeoutMs)}, below the evaluator's default time constraint, ${EVALUATOR_DEFAULT_TEXT}: this server will stop waiting first, so a slow evaluation is reported here rather than ending in the kernel's own "time constraint exceeded", which says more. The kernel is left running either way. Prompts and resource reads wait this same ceiling`);
   }
-  log(`profile=${config2.serverName} idle=${config2.idleMs / 6e4}min cache=${usableCache ? "hit" : "miss"}`);
+  log(`profile=${config2.serverName} idle=${idleText(config2.idleMs)} cache=${usableCache ? "hit" : "miss"}`);
   const backend = makeBackend(install);
   const fromKernel = (schema, handler) => server.setRequestHandler(schema, (request, extra) => relayed(Promise.resolve(handler(request, extra))));
   let toolCache = usableCache?.tools ?? null;
