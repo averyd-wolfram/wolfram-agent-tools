@@ -211,7 +211,15 @@ export class BrokerBackend implements KernelBackend {
    */
   readonly #liveness = new Map<number, (alive: boolean) => void>();
   #onKernelReady: KernelReadyHandler | undefined;
+  /** No new work goes out on this connection; the next call chooses again. */
   #closed = false;
+  /**
+   * Everything outstanding has been failed. Kept apart from #closed, which a
+   * broker's `shuttingDown`, a request's timeout and stop() all set: when one
+   * flag meant both, the close that followed `shuttingDown` failed nothing, and
+   * a call in flight waited out its whole ceiling, or forever with none (#75).
+   */
+  #failed = false;
 
   private constructor(options: BrokerClientOptions, socket: Socket) {
     this.#options = options;
@@ -470,7 +478,9 @@ export class BrokerBackend implements KernelBackend {
     if (isEvent(frame)) {
       if (frame.event === "shuttingDown") {
         // Sent by a broker on its way out. Acting on it means the next call
-        // decides again rather than discovering the corpse by failing.
+        // decides again rather than discovering the corpse by failing. What is
+        // already outstanding is the broker's to answer before it goes, and
+        // the close's to fail if it does not.
         this.#options.log("the broker is shutting down; will choose again");
         this.#closed = true;
         return;
@@ -510,7 +520,8 @@ export class BrokerBackend implements KernelBackend {
   }
 
   #failAll(err: Error): void {
-    if (this.#closed) return;
+    if (this.#failed) return;
+    this.#failed = true;
     // Mark it closed: `usable()` is what tells DeferredBackend to decide again,
     // and without it every later call in the session failed identically.
     this.#closed = true;
@@ -710,7 +721,10 @@ export class BrokerBackend implements KernelBackend {
   }
 
   async stop(): Promise<void> {
-    this.#closed = true;
+    // Failed here, with the reason that is true. Left to the close, what was
+    // outstanding failed as though the broker had hung up, when it was this
+    // session choosing again or ending.
+    this.#failAll(new Error("the session closed its connection to the Wolfram broker"));
     // Only this connection closes. The broker keeps its kernels for the other
     // proxies, and exits on its own once none are left.
     this.#socket.end();
