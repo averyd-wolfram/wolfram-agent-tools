@@ -213,6 +213,8 @@ export class BrokerBackend implements KernelBackend {
   #onKernelReady: KernelReadyHandler | undefined;
   /** No new work goes out on this connection; the next call chooses again. */
   #closed = false;
+  /** Whether the broker still answers, while that is being asked (`#stillAnswering`). */
+  #asking: Promise<boolean> | null = null;
 
   private constructor(options: BrokerClientOptions, socket: Socket) {
     this.#options = options;
@@ -436,6 +438,37 @@ export class BrokerBackend implements KernelBackend {
   }
 
   /**
+   * Ask whether the broker still answers, once for however many requests ran
+   * out together, and give it up if it does not.
+   *
+   * A request running out is a question about the broker, not an answer. It
+   * used to be taken as the broker going: the connection was marked closed, the
+   * session's next request chose again and closed it, and the broker, reading
+   * that as its proxy vanishing, aborted every other call the session had there,
+   * on a broker that was only busy (#78). A busy broker answers ping from its
+   * event loop, ahead of its pool; one that has stopped answering does not.
+   */
+  #stillAnswering(op: BrokerOp): Promise<boolean> {
+    if (!this.#asking) {
+      this.#options.log(`${op} ran out; asking the broker whether it is still running`);
+      this.#asking = this.#answers().then((alive) => {
+        this.#asking = null;
+        if (!alive && !this.#closed) {
+          this.#options.log("the broker did not answer; will choose again");
+          this.#closed = true;
+        }
+        return alive;
+      });
+    }
+    return this.#asking;
+  }
+
+  /** See `KernelBackend.settled`: whether the broker still answers, once asked. */
+  async settled(): Promise<void> {
+    await this.#asking;
+  }
+
+  /**
    * Tell the broker what this session's kernels must be started with.
    *
    * The values travel, not just their digest, because the broker is what starts
@@ -572,33 +605,37 @@ export class BrokerBackend implements KernelBackend {
     return new Promise<T>((resolve, reject) => {
       // No timer at all when there is no ceiling, so this waits exactly as long
       // as a private kernel would.
-      const timer =
-        ceiling === 0
-          ? undefined
-          : setTimeout(() => {
-              this.#pending.delete(id);
-              reject(
-                new Error(`the Wolfram broker did not answer ${op} within ${budgetText(ceiling)}`),
-              );
-              // One request running out is not the broker going. Taken for it,
-              // the connection was marked closed, the session's next request
-              // chose again and closed it, and the broker, reading that as its
-              // proxy vanishing, aborted every other call the session had there
-              // on a broker that was only busy (#78). A busy broker answers ping
-              // from its event loop, ahead of its pool; one that has stopped
-              // answering does not, and only that one is given up, so the next
-              // call can choose again. A request made in the moment the ping
-              // takes still goes here, and a wedged broker holds it to its own
-              // ceiling, as it held this one.
-              void this.#answers().then((alive) => {
-                if (alive || this.#closed) return;
-                this.#options.log(
-                  `the broker did not answer after ${op} ran out; will choose again`,
-                );
-                this.#closed = true;
-              });
-            }, timerDelay(ceiling));
-      timer?.unref?.();
+      let timer: NodeJS.Timeout | undefined;
+      // The ceiling is a wedged broker's, not the request's. A live broker
+      // holds the request to its own deadline once a kernel takes it, as a
+      // private kernel does, and only then: one queued behind a long call waits
+      // its turn on either path. This timer counted the queue too, so a shared
+      // session failed a call a private one would answer, and the broker ran
+      // it anyway, after its caller had been told it failed (#78). So while the
+      // broker answers ping the request goes on waiting, and it fails here only
+      // when the broker does not.
+      const expire = (): void => {
+        void this.#stillAnswering(op).then((alive) => {
+          // Answered, cancelled or failed with the socket while asking.
+          if (!this.#pending.has(id)) return;
+          if (alive) return arm();
+          this.#pending.delete(id);
+          this.#progress.delete(id);
+          // Said whole: the caller waited the ceiling and then the question,
+          // and "within 4s" alone was two seconds short of the truth.
+          reject(
+            new Error(
+              `the Wolfram broker did not answer ${op} within ${budgetText(ceiling)}, ` +
+                "nor when asked whether it was still running",
+            ),
+          );
+        });
+      };
+      const arm = (): void => {
+        timer = setTimeout(expire, timerDelay(ceiling));
+        timer.unref?.();
+      };
+      if (ceiling !== 0) arm();
       const settle = {
         resolve: (v: unknown) => {
           clearTimeout(timer);

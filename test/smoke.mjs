@@ -2003,58 +2003,65 @@ heading("A call in flight when its broker stops fails at once, not at its ceilin
 }
 
 // ---------------------------------------------------------------------------
-// One request running out was taken for the broker going. Its timer marked the
-// whole connection closed, so the session's next request chose again and closed
-// it, and the broker, reading that as its proxy vanishing, aborted everything
-// else the session had running there (#78). Measured: a call that asked for 30s
-// and would have been answered at 8s failed at 5s, because a call with the
-// default ceiling queued behind it ran out first, and the session then
-// reattached to the very same broker. A broker that is merely busy answers
-// ping, which it serves ahead of its pool.
-heading("A request that runs out on a busy broker costs the session no other call");
+// A call queued behind a long one, on a broker with one kernel. The broker
+// client's timer counted the queue, which a private kernel's deadline does not,
+// so a shared session failed a call a private one would answer, and the broker
+// ran it anyway. And it took the broker for gone: the connection was marked
+// closed, the session's next request chose again and closed it, and the broker,
+// reading that as its proxy vanishing, aborted the long call too (#78).
+// Measured: a call that asked for 30s, and would have been answered at 8s,
+// failed at 5s, and the session then reattached to the very same broker. Both
+// paths run the same calls at the same time here, and must answer them alike.
+heading("A call queued behind a long one is answered as a private session answers it");
 {
   wipeCache();
-  const runtime = privateDir(join(home, "run-one-runs-out"));
-  const s = await connect({
-    WOLFRAM_MCP_SHARE: "1",
-    XDG_RUNTIME_DIR: runtime,
-    WOLFRAM_MCP_LICENSE_LIMIT: "4",
-    // One kernel, so the short request queues behind the long one.
-    WOLFRAM_MCP_MAX_KERNELS: "1",
-    WOLFRAM_MCP_IDLE_MINUTES: "5",
-    // The default ceiling. A call that asks for a time constraint gets more.
-    WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "1",
-    // Longer than the short request's ceiling and its grace, so the long call
-    // is still running when the next request is made.
-    FAKE_CALL_DELAY_MS: "5000",
-  });
-  const call = (code, extra = {}) =>
-    s.client
-      .callTool({ name: "WolframLanguageEvaluator", arguments: { code, ...extra } }, undefined, { timeout: 60_000 })
-      .catch((err) => ({ isError: true, content: [{ type: "text", text: `rejected: ${err.message}` }] }));
-  const text = (r) => (r.content?.[0]?.text ?? "").slice(0, 100);
-  // A cold cache sends the list to the broker, which starts the one kernel
-  // without spending a slow call on it.
-  const { tools } = await s.client.listTools();
-  check("the broker's one kernel is up", upstreamTools(tools).length > 0 && ownBrokers(runtime).length === 1);
-  const long = call("1+1", { timeConstraint: 30 });
-  await new Promise((r) => setTimeout(r, 300));
-  const short = await call("2+2");
-  const chose = () => s.stderr().includes("deciding again");
-  const next = call("3+3", { timeConstraint: 30 });
-  const longResult = await long;
+  const runtime = privateDir(join(home, "run-queued-behind"));
+  const text = (r) => (r.content?.[0]?.text ?? "").slice(0, 120);
+  const queuedBehind = async (env) => {
+    const s = await connect({
+      WOLFRAM_MCP_IDLE_MINUTES: "5",
+      // The default ceiling. A call that asks for a time constraint gets more.
+      WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "1",
+      // Longer than the queued call's ceiling and the broker client's grace,
+      // so its timer runs out while it waits.
+      FAKE_CALL_DELAY_MS: "5000",
+      ...env,
+    });
+    const call = (code, extra = {}) =>
+      s.client
+        .callTool({ name: "WolframLanguageEvaluator", arguments: { code, ...extra } }, undefined, { timeout: 60_000 })
+        .catch((err) => ({ isError: true, content: [{ type: "text", text: `rejected: ${err.message}` }] }));
+    // A cold cache sends the list to a kernel, which starts it without
+    // spending a slow call on it.
+    await s.client.listTools();
+    const long = call("1+1", { timeConstraint: 30 });
+    await new Promise((r) => setTimeout(r, 300));
+    const queued = await call("2+2");
+    const longResult = await long;
+    const chose = s.stderr().includes("deciding again");
+    await s.client.close();
+    return { queued: text(queued), long: longResult, chose };
+  };
+  const [shared, alone] = await Promise.all([
+    queuedBehind({
+      WOLFRAM_MCP_SHARE: "1",
+      XDG_RUNTIME_DIR: runtime,
+      WOLFRAM_MCP_LICENSE_LIMIT: "4",
+      // One kernel, so the queued call waits behind the long one.
+      WOLFRAM_MCP_MAX_KERNELS: "1",
+    }),
+    queuedBehind({ WOLFRAM_MCP_SHARE: "0" }),
+  ]);
   check(
-    "the request queued behind a long call runs out at its ceiling",
-    short.isError === true && /did not answer/.test(text(short)),
-    text(short),
+    "the queued call gets the answer a private session gets",
+    shared.queued !== "" && shared.queued === alone.queued,
+    `shared: ${shared.queued}; private: ${alone.queued}`,
   );
   check(
-    "and the long call is still answered, on the broker the session kept",
-    !longResult.isError && answeredByFake(longResult) && !chose(),
-    `${chose() ? "the session chose again; " : ""}${text(longResult)}`,
+    "and the long call is answered too, on the broker the session kept",
+    answeredByFake(shared.long) && !shared.chose,
+    `${shared.chose ? "the session chose again; " : ""}${text(shared.long)}`,
   );
-  await s.client.close();
-  await next;
   signalOwnBrokers("SIGKILL", runtime);
   await new Promise((r) => setTimeout(r, 300));
 }
@@ -3858,15 +3865,26 @@ heading("Regression — a wedged broker cannot outlive the call timeout");
   const startedAt = Date.now();
   let settled;
   let frozenText = "";
-  try {
-    const r = await s.client.callTool(
-      { name: "WolframLanguageEvaluator", arguments: { code: "3+3" } }, undefined, { timeout: 15_000 });
-    settled = r.isError ? "isError" : "ok";
-    frozenText = r.content?.[0]?.text ?? "";
-  } catch {
-    settled = "threw";
-  }
-  const elapsed = Date.now() - startedAt;
+  let elapsed = 0;
+  const first = s.client
+    .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "3+3" } }, undefined, { timeout: 15_000 })
+    .then(
+      (r) => {
+        settled = r.isError ? "isError" : "ok";
+        frozenText = r.content?.[0]?.text ?? "";
+      },
+      () => (settled = "threw"),
+    )
+    .finally(() => (elapsed = Date.now() - startedAt));
+  // A call running out asks the broker whether it still runs, and a frozen one
+  // cannot say. A call made while it is asked waits for the answer and goes
+  // elsewhere: sent to the frozen broker instead, it was held to its own whole
+  // ceiling, as the first was (#78).
+  const asking = await until(() => s.stderr().includes("asking the broker whether it is still running"), 10_000);
+  const meanwhile = await s.client
+    .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "4+4" } }, undefined, { timeout: 30_000 })
+    .catch((err) => ({ isError: true, content: [{ type: "text", text: `rejected: ${err.message}` }] }));
+  await first;
   check(
     "a call against a frozen broker fails near its own timeout",
     settled === "isError" && elapsed < 8000,
@@ -3879,18 +3897,12 @@ heading("Regression — a wedged broker cannot outlive the call timeout");
     /did not answer callTool within 4s\b/.test(frozenText),
     frozenText.replace(/\s+/g, " ").slice(0, 100),
   );
-  // A request running out no longer gives up the broker by itself: a busy one
-  // keeps the session (#78). A frozen one must still be given up, once it
-  // fails to answer ping as well, and the session's next call answered
-  // elsewhere.
-  const gaveUp = await until(() => s.stderr().includes("did not answer after callTool ran out"), 5_000);
-  const after = await s.client
-    .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "4+4" } }, undefined, { timeout: 30_000 })
-    .catch((err) => ({ isError: true, content: [{ type: "text", text: `rejected: ${err.message}` }] }));
+  const gaveUp = s.stderr().includes("the broker did not answer; will choose again");
   check(
-    "and once it fails to answer ping too, the session's next call is answered elsewhere",
-    gaveUp && !after.isError && answeredByFake(after),
-    `${gaveUp ? "gave it up" : "never gave it up"}; ${(after.content?.[0]?.text ?? "").slice(0, 80)}`,
+    "a call made while the broker is asked waits for the answer, then is answered elsewhere",
+    asking && gaveUp && !meanwhile.isError && answeredByFake(meanwhile),
+    `${asking ? "asked" : "never asked"}, ${gaveUp ? "gave it up" : "kept it"}; ` +
+      (meanwhile.content?.[0]?.text ?? "").slice(0, 80),
   );
   signalOwnBrokers("SIGKILL");
   await s.client.close();

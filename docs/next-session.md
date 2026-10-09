@@ -133,11 +133,23 @@ in `docs/design.md`.
     - **Reproduced:** a call that asked for 30 s, and would have been answered at 8 s, failed
       at 5 s because a default-ceiling call queued behind it ran out. The session then
       reattached to the same, healthy broker.
-    - **The fix:** a request's timeout pings the broker, and gives the connection up only if
-      that goes unanswered. A busy broker answers ping ahead of its pool.
-    - **Checks:** *A request that runs out on a busy broker costs the session no other call*
-      failed on `main` first. The frozen-broker section now also checks that a broker that
-      fails the ping is still given up.
+    - **The fix, as the maintainer chose after review (2026-10-08):** the broker path now
+      matches the private one. The broker client's timer counted a request's time in the
+      pool's queue, which a private kernel's deadline does not. So a shared session failed a
+      call that a private one would answer, and the broker still ran it afterwards. Now a
+      request's timer asks the broker (`ping`, answered ahead of the pool). If the broker
+      answers, the request keeps waiting, held to its kernel session's own deadline as on a
+      private kernel. If not, the request fails and the broker is given up.
+      `DeferredBackend.#get` waits for that verdict (`KernelBackend.settled`), so no request
+      goes blind to a frozen broker in the meantime.
+    - **Checks:**
+      - *A call queued behind a long one is answered as a private session answers it* runs
+        both paths at once. On `main` the shared session said `the Wolfram broker did not
+        answer callTool within 3s`, while the private one said `no answer from the Wolfram
+        kernel within 1s`.
+      - The frozen-broker section now checks that a call made while the broker is being
+        asked waits for the verdict and is answered elsewhere. On #79's first version, it
+        waited out its own ceiling.
   - **Release PR #72** is in the milestone.
   - **Filed from the reviews:**
     - **#69** (`needs design`): a non-object schema still fails the whole list, in zod.
