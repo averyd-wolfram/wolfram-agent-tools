@@ -133,23 +133,24 @@ in `docs/design.md`.
     - **Reproduced:** a call that asked for 30 s, and would have been answered at 8 s, failed
       at 5 s because a default-ceiling call queued behind it ran out. The session then
       reattached to the same, healthy broker.
-    - **The fix, as the maintainer chose after review (2026-10-08):** the broker path now
-      matches the private one. The broker client's timer counted a request's time in the
-      pool's queue, which a private kernel's deadline does not. So a shared session failed a
-      call that a private one would answer, and the broker still ran it afterwards. Now a
-      request's timer asks the broker (`ping`, answered ahead of the pool). If the broker
-      answers, the request keeps waiting, held to its kernel session's own deadline as on a
-      private kernel. If not, the request fails and the broker is given up.
-      `DeferredBackend.#get` waits for that verdict (`KernelBackend.settled`), so no request
-      goes blind to a frozen broker in the meantime.
+    - **The fix:** a request still fails at its ceiling. The session then pings the broker,
+      and gives it up only if the ping goes unanswered. `DeferredBackend.#get` waits for that
+      verdict (`KernelBackend.settled`), so no request goes blind to a frozen broker in the
+      meantime. A timed-out request's progress handler is cleared.
+    - **Review split it (the maintainer's call, 2026-10-08).** The second head waited, while
+      the broker answered, for a queued request to be answered as a private session's would
+      be. Its review found that this let a request queued behind *another session's* call
+      wait until that call ended, which could be hours. It was reverted to the fix above.
+      The question went to #80 (`needs design`): the two paths answer a queued request
+      differently, neither bounds its wait by its own ceiling, and a request that timed out
+      still runs later on the broker.
     - **Checks:**
-      - *A call queued behind a long one is answered as a private session answers it* runs
-        both paths at once. On `main` the shared session said `the Wolfram broker did not
-        answer callTool within 3s`, while the private one said `no answer from the Wolfram
-        kernel within 1s`.
-      - The frozen-broker section now checks that a call made while the broker is being
-        asked waits for the verdict and is answered elsewhere. On #79's first version, it
-        waited out its own ceiling.
+      - *A request that runs out on a busy broker costs the session no other call* failed
+        on `main` first. It now also requires the request made after the timeout to be
+        answered.
+      - The frozen-broker section checks that a call made while the broker is being asked
+        waits for the verdict and is answered elsewhere. On #79's first head, it waited out
+        its own ceiling.
   - **Release PR #72** is in the milestone.
   - **Filed from the reviews:**
     - **#69** (`needs design`): a non-object schema still fails the whole list, in zod.
@@ -168,6 +169,11 @@ in `docs/design.md`.
       took.
     - **#78** (`bug`, `area: broker`, milestone `0.1.5`, from #77's review): one request's
       timeout cancelled every other call on a healthy broker. Under review (above).
+    - **#80** (`bug`, `needs design`, `area: broker`, from #79's review): how long a queued
+      request may wait. The shared path fails it at its ceiling, and the broker still runs
+      it afterwards. The private path waits however long the queue takes. A shared request
+      can also queue behind another session's call. #79's second head tried to match the
+      private path, and the issue records why that was reverted.
 - **The backlog is GitHub issues** (`gh issue list`), labelled by type, `needs design` and area
   (*Working here* below). Other agents file there too, notably the downstream plugin's.
 - **The release pipeline versions itself** from the commit types on `main`. `docs/releasing.md`
@@ -229,7 +235,9 @@ in `docs/design.md`.
    so a deep runtime directory gets no broker) wants a choice between going private at once, a
    short path that resolves to the directory, and Linux's abstract namespace. Since #73's
    fourth round it also holds a security finding: a truncated socket can land in a
-   world-writable ancestor of the checked directory, so it should come early in item 4. #29 (how to hear of the next advisory against what
+   world-writable ancestor of the checked directory, so it should come early in item 4. #80
+   (how long a queued request may wait, on either path) belongs in the same design: it is
+   the pool's queue and the call ceiling, and #79's second head records one rejected answer. #29 (how to hear of the next advisory against what
    the bundle inlines) needs a design too; an audit gate tried in #27 was reverted. Smaller,
    from 0.1.2's reviews: #38 (durations read three ways) is fixed in #71, and #33 and #35
    shipped in 0.1.4. From #37's review: #40 (tighten #37's long-call check), whose third point is

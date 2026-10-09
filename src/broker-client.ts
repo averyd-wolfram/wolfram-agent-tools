@@ -447,6 +447,8 @@ export class BrokerBackend implements KernelBackend {
    * that as its proxy vanishing, aborted every other call the session had there,
    * on a broker that was only busy (#78). A busy broker answers ping from its
    * event loop, ahead of its pool; one that has stopped answering does not.
+   * `settled()` holds the session's next request until this is known: sent to
+   * a frozen broker meanwhile, it was held to its own whole ceiling.
    */
   #stillAnswering(op: BrokerOp): Promise<boolean> {
     if (!this.#asking) {
@@ -605,37 +607,23 @@ export class BrokerBackend implements KernelBackend {
     return new Promise<T>((resolve, reject) => {
       // No timer at all when there is no ceiling, so this waits exactly as long
       // as a private kernel would.
-      let timer: NodeJS.Timeout | undefined;
-      // The ceiling is a wedged broker's, not the request's. A live broker
-      // holds the request to its own deadline once a kernel takes it, as a
-      // private kernel does, and only then: one queued behind a long call waits
-      // its turn on either path. This timer counted the queue too, so a shared
-      // session failed a call a private one would answer, and the broker ran
-      // it anyway, after its caller had been told it failed (#78). So while the
-      // broker answers ping the request goes on waiting, and it fails here only
-      // when the broker does not.
-      const expire = (): void => {
-        void this.#stillAnswering(op).then((alive) => {
-          // Answered, cancelled or failed with the socket while asking.
-          if (!this.#pending.has(id)) return;
-          if (alive) return arm();
-          this.#pending.delete(id);
-          this.#progress.delete(id);
-          // Said whole: the caller waited the ceiling and then the question,
-          // and "within 4s" alone was two seconds short of the truth.
-          reject(
-            new Error(
-              `the Wolfram broker did not answer ${op} within ${budgetText(ceiling)}, ` +
-                "nor when asked whether it was still running",
-            ),
-          );
-        });
-      };
-      const arm = (): void => {
-        timer = setTimeout(expire, timerDelay(ceiling));
-        timer.unref?.();
-      };
-      if (ceiling !== 0) arm();
+      const timer =
+        ceiling === 0
+          ? undefined
+          : setTimeout(() => {
+              this.#pending.delete(id);
+              // Its handler too: the connection may now outlive the request,
+              // and a late progress event belongs to a caller already answered.
+              this.#progress.delete(id);
+              reject(
+                new Error(`the Wolfram broker did not answer ${op} within ${budgetText(ceiling)}`),
+              );
+              // The caller is answered; whether the broker is gone is another
+              // question (`#stillAnswering`). How long a queued request may
+              // wait, on either path, is #80.
+              void this.#stillAnswering(op);
+            }, timerDelay(ceiling));
+      timer?.unref?.();
       const settle = {
         resolve: (v: unknown) => {
           clearTimeout(timer);

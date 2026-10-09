@@ -2003,65 +2003,66 @@ heading("A call in flight when its broker stops fails at once, not at its ceilin
 }
 
 // ---------------------------------------------------------------------------
-// A call queued behind a long one, on a broker with one kernel. The broker
-// client's timer counted the queue, which a private kernel's deadline does not,
-// so a shared session failed a call a private one would answer, and the broker
-// ran it anyway. And it took the broker for gone: the connection was marked
-// closed, the session's next request chose again and closed it, and the broker,
-// reading that as its proxy vanishing, aborted the long call too (#78).
-// Measured: a call that asked for 30s, and would have been answered at 8s,
-// failed at 5s, and the session then reattached to the very same broker. Both
-// paths run the same calls at the same time here, and must answer them alike.
-heading("A call queued behind a long one is answered as a private session answers it");
+// One request running out was taken for the broker going. Its timer marked the
+// whole connection closed, so the session's next request chose again and closed
+// it, and the broker, reading that as its proxy vanishing, aborted everything
+// else the session had running there (#78). Measured: a call that asked for 30s
+// and would have been answered at 8s failed at 5s, because a call with the
+// default ceiling queued behind it ran out first, and the session then
+// reattached to the very same broker. A broker that is merely busy answers
+// ping, which it serves ahead of its pool. (That the queued call fails at all,
+// where a private session would wait for it, is #80.)
+heading("A request that runs out on a busy broker costs the session no other call");
 {
   wipeCache();
-  const runtime = privateDir(join(home, "run-queued-behind"));
-  const text = (r) => (r.content?.[0]?.text ?? "").slice(0, 120);
-  const queuedBehind = async (env) => {
-    const s = await connect({
-      WOLFRAM_MCP_IDLE_MINUTES: "5",
-      // The default ceiling. A call that asks for a time constraint gets more.
-      WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "1",
-      // Longer than the queued call's ceiling and the broker client's grace,
-      // so its timer runs out while it waits.
-      FAKE_CALL_DELAY_MS: "5000",
-      ...env,
-    });
-    const call = (code, extra = {}) =>
-      s.client
-        .callTool({ name: "WolframLanguageEvaluator", arguments: { code, ...extra } }, undefined, { timeout: 60_000 })
-        .catch((err) => ({ isError: true, content: [{ type: "text", text: `rejected: ${err.message}` }] }));
-    // A cold cache sends the list to a kernel, which starts it without
-    // spending a slow call on it.
-    await s.client.listTools();
-    const long = call("1+1", { timeConstraint: 30 });
-    await new Promise((r) => setTimeout(r, 300));
-    const queued = await call("2+2");
-    const longResult = await long;
-    const chose = s.stderr().includes("deciding again");
-    await s.client.close();
-    return { queued: text(queued), long: longResult, chose };
-  };
-  const [shared, alone] = await Promise.all([
-    queuedBehind({
-      WOLFRAM_MCP_SHARE: "1",
-      XDG_RUNTIME_DIR: runtime,
-      WOLFRAM_MCP_LICENSE_LIMIT: "4",
-      // One kernel, so the queued call waits behind the long one.
-      WOLFRAM_MCP_MAX_KERNELS: "1",
-    }),
-    queuedBehind({ WOLFRAM_MCP_SHARE: "0" }),
-  ]);
+  const runtime = privateDir(join(home, "run-one-runs-out"));
+  const s = await connect({
+    WOLFRAM_MCP_SHARE: "1",
+    XDG_RUNTIME_DIR: runtime,
+    WOLFRAM_MCP_LICENSE_LIMIT: "4",
+    // One kernel, so the short request queues behind the long one.
+    WOLFRAM_MCP_MAX_KERNELS: "1",
+    WOLFRAM_MCP_IDLE_MINUTES: "5",
+    // The default ceiling. A call that asks for a time constraint gets more.
+    WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "1",
+    // Longer than the short request's ceiling and its grace, so the long call
+    // is still running when the next request is made.
+    FAKE_CALL_DELAY_MS: "5000",
+  });
+  const call = (code, extra = {}) =>
+    s.client
+      .callTool({ name: "WolframLanguageEvaluator", arguments: { code, ...extra } }, undefined, { timeout: 60_000 })
+      .catch((err) => ({ isError: true, content: [{ type: "text", text: `rejected: ${err.message}` }] }));
+  const text = (r) => (r.content?.[0]?.text ?? "").slice(0, 100);
+  // A cold cache sends the list to the broker, which starts the one kernel
+  // without spending a slow call on it.
+  const { tools } = await s.client.listTools();
+  check("the broker's one kernel is up", upstreamTools(tools).length > 0 && ownBrokers(runtime).length === 1);
+  const long = call("1+1", { timeConstraint: 30 });
+  await new Promise((r) => setTimeout(r, 300));
+  const short = await call("2+2");
+  // Made while the long call is still running: the request that used to
+  // choose again and close the connection under it.
+  const next = call("3+3", { timeConstraint: 30 });
+  const longResult = await long;
+  const chose = () => s.stderr().includes("deciding again");
   check(
-    "the queued call gets the answer a private session gets",
-    shared.queued !== "" && shared.queued === alone.queued,
-    `shared: ${shared.queued}; private: ${alone.queued}`,
+    "the request queued behind a long call runs out at its ceiling",
+    short.isError === true && /did not answer/.test(text(short)),
+    text(short),
   );
   check(
-    "and the long call is answered too, on the broker the session kept",
-    answeredByFake(shared.long) && !shared.chose,
-    `${shared.chose ? "the session chose again; " : ""}${text(shared.long)}`,
+    "and the long call is still answered, on the broker the session kept",
+    !longResult.isError && answeredByFake(longResult) && !chose(),
+    `${chose() ? "the session chose again; " : ""}${text(longResult)}`,
   );
+  const nextResult = await next;
+  check(
+    "and so is the request made after it ran out",
+    !nextResult.isError && answeredByFake(nextResult) && !chose(),
+    `${chose() ? "the session chose again; " : ""}${text(nextResult)}`,
+  );
+  await s.client.close();
   signalOwnBrokers("SIGKILL", runtime);
   await new Promise((r) => setTimeout(r, 300));
 }
