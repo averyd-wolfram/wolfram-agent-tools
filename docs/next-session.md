@@ -186,6 +186,32 @@ in `docs/design.md`.
       it afterwards. The private path waits however long the queue takes. A shared request
       can also queue behind another session's call. #79's second head tried to match the
       private path, and the issue records why that was reverted.
+- **The release build holds its write token apart from the code it runs** (#89, `2f32180`,
+  merged 2026-10-10, fixes #84). It is `ci:`, so it makes no release: its run on `main`
+  passed `release-please`, `pending` and `advance`, and skipped both builds.
+  - **The split:** `release-build.yml`'s `build` job holds no token that can write. It runs
+    the release PR's title checks before `npm ci`, so no dependency has run when they do, then
+    builds, validates and uploads the files as `publish-<tag>`. `publish` is a fresh job, the
+    only one that can write, with no checkout and no repository code. It runs one action,
+    `download-artifact`, pinned to `v8.0.2`'s commit in #46's format, then `gh` and an
+    anonymous `git ls-remote`.
+  - **Smaller changes:** `--stamp` takes the version through `env:`. The released-tag guard
+    stops on a read that failed rather than taking it for "not released". A release-PR title
+    check that fails now stops the pre-release; it used to publish it and withhold only the
+    statuses.
+  - **How it got there:** the first head only stopped persisting the token in the checkout.
+    Codex's P1 on it was real: on one runner, `npm ci`'s install scripts or the `npx`
+    validators could rewrite `scripts/commit-types.mjs`, which Publish ran with `GH_TOKEN`, or
+    put a command on `$GITHUB_PATH`. The maintainer chose the split in the same PR. Codex's
+    second P1 was the unpinned `download-artifact` beside the token. Its third review was
+    clean, after five `/code-review high` rounds.
+  - **Evidence:** run locally with every credential source off — the anonymous reads
+    (`ls-remote` with and without a checkout, the fetch by SHA, `commit-types` with no
+    `node_modules`) and the guard's three outcomes. No suite check, by the maintainer's call
+    (*Working here*). End to end it is unrun (item 1).
+  - **Filed from its review:** #90 (`ci`, `bug`, unverified). *Re-run all jobs* on a failed
+    release run may fail on an artifact name the run already holds, in `ci.yml`'s `build` and
+    in `publish-<tag>` alike. Measure it before adding `overwrite: true` to both.
 - **The backlog is GitHub issues** (`gh issue list`), labelled by type, `needs design` and area
   (*Working here* below). Other agents file there too, notably the downstream plugin's.
 - **The release pipeline versions itself** from the commit types on `main`. `docs/releasing.md`
@@ -195,42 +221,56 @@ in `docs/design.md`.
 
 ## What to do next, in order
 
-1. **Finish PR #89** (fixes #84, opened 2026-10-10; this handoff is its last commit).
-   - **What it does:** `release-build.yml`'s build is split in two. `build` holds no token
-     that can write: it runs the release PR's title checks before `npm ci`, then builds,
-     validates and uploads the files as an artifact. `publish` is a fresh job with no checkout
-     that runs only `gh` and `git ls-remote`, and is the one job that can write. `--stamp`
-     takes the version through `env:`. The released-tag guard stops on a read that failed,
-     rather than taking it for "not released".
-   - **How it got there:** the first head only stopped persisting the token in the checkout.
-     Codex's P1 on it was real: on one runner, `npm ci`'s install scripts or the `npx`
-     validators could rewrite `scripts/commit-types.mjs`, which Publish ran with `GH_TOKEN`,
-     or put a command on `$GITHUB_PATH`. The maintainer chose the split in this PR
-     (2026-10-10).
-   - **Evidence:** the anonymous reads (`ls-remote` with and without a checkout, the fetch by
-     SHA, `commit-types`) and the guard's three outcomes were run locally with every
-     credential source off. The next release run is the first end-to-end use. It adds no
-     check, since `npm test` exercises no workflow: the maintainer agreed (2026-10-10) that a
-     workflow fix needs none, and #85's auditor is what would keep it fixed.
-   - **Codex's second P1, on the split:** `publish` ran `actions/download-artifact@v8`, a
-     movable tag, beside the write token. It is now pinned to `v8.0.2`'s commit in #46's
-     format; every other workflow's pins stay #46's.
-   - **Filed from its review:** #90 (`ci`, `bug`, unverified): *Re-run all jobs* on a failed
-     release run may fail on an artifact name the run already holds, in `ci.yml`'s `build`
-     and in the new `publish-<tag>` alike. Measure it before adding `overwrite: true`.
-   - **Left:** Codex on the split's head, then the maintainer's approval. #85 is a natural
-     next PR.
+1. **Watch the first release run through #89's split.** No release has used it yet: #89 is
+   `ci:`, so its own merge built nothing. The next `fix:` or `feat:` on `main` makes
+   release-please update its PR, and the same run builds a pre-release through the two jobs.
+   Check four things:
+   - `build` uploads `publish-v<x.y.z>-pre.<n>`;
+   - `publish` downloads it and creates the pre-release with all three assets;
+   - `ci-ok`, `commit-types` and `conventional-title` land on the release PR's commit;
+   - when that PR merges, the tag path (upload to the draft, then publish) runs the same way.
+
+   If a job fails, fix it forward. The documented retry is dispatching the workflow, not
+   *Re-run all jobs* (#90).
+2. **Finish PR #91** (fixes #85 and #46, opened 2026-10-10; this handoff is its last commit).
+   - **What it does:** a `workflows` job in `ci.yml`, never skipped, that `ci-ok` waits on.
+     It runs actionlint 1.7.12, as the author's image pinned by digest, and zizmor 1.30.1,
+     through `zizmorcore/zizmor-action` pinned to v0.6.4's commit, online audits included.
+     Every action is pinned in #46's format at the commit its major tag named, so nothing
+     that runs changed.
+   - **zizmor's first report** had 32 findings under the default persona, and none remain:
+     22 `unpinned-uses` (pinned), 6 `artipacked` (`persist-credentials: false` on every
+     read-only checkout), and 1 `cache-poisoning` (the release build's `name` job restores
+     no npm cache). The 3 `self-repository` are accepted in `.github/zizmor.yml`, by file:
+     zizmor wants GitHub's new `$/` syntax, which actionlint refuses (rhysd/actionlint#711),
+     and the `./` there are reusable calls, which resolve at the caller's commit anyway.
+   - **Hand-moved pins:** the actionlint image, since Dependabot can't read `docker://`, and
+     zizmor's version, held apart from its action, so new audits come in a PR of their own.
+     The zizmor step runs on every pull request, but in a release run only where the tree
+     has `.github/zizmor.yml`, so an older tag isn't held back by its unpinned actions.
+   - **Evidence:** in a clone with every credential source off, `release-version.mjs` read
+     the tags anonymously, as `name` now must (it named `v0.1.6-pre.1` on a stamped 0.1.6),
+     and `commit-types.mjs` passed a `ci:` range. CI's own `workflows` run pulled both
+     images by digest and passed.
+   - **Review:** three `/code-review high` rounds. Round 1 led to the release-run guard,
+     scoping `self-repository` by file, and two doc fixes. Round 2 found the guard let a PR
+     delete the config to skip the audit, now fixed. Round 3 was clean. Codex was clean on
+     `963c3d9`.
+   - **Left:** the review of this handoff commit, then the maintainer's approval. After the
+     merge, two repository settings are the maintainer's to turn on: CodeQL's default setup
+     (#85's first point) and *require actions pinned to a full-length commit SHA*
+     (`sha_pinning_required`, #46's comment).
 
    **#40's third point** (overlap the long-call minute with an earlier section) still waits
    for the next PR that touches the suite's timing. #77 and #79 each added a few seconds of
    slow sections, so that PR is a good place to look at all of them.
-2. **The one link of #7 left unobserved**: Claude Code running the auto-update pass itself, in
+3. **The one link of #7 left unobserved**: Claude Code running the auto-update pass itself, in
    an interactive session up to ten minutes after the first message, and saying `Plugin updated:
    wolfram`. 0.1.4 and now 0.1.5 (2026-10-08) are releases to watch for it: a project following
    `release` on an older version should update itself in an interactive session. The maintainer
    runs it, since it needs a signed-in client. Try the route at the 2.1.75 client floor too,
    unmeasured for it. `docs/releasing.md` has the headless check.
-3. **Dependabot's one open PR, #56** (TypeScript 7), which waits: typescript-eslint 8.71.1
+4. **Dependabot's one open PR, #56** (TypeScript 7), which waits: typescript-eslint 8.71.1
    accepts TypeScript `<6.1.0` (checked 2026-10-08), and #56's CI is red. It stays open as the
    reminder rather than closed with an ignore rule, which would hide TypeScript 7 until someone
    remembered to lift it; Dependabot updates it in place as 7.x moves. It carries the `blocked`
@@ -243,15 +283,16 @@ in `docs/design.md`.
    change is a `fix:`. The maintainer wants Dependabot's PRs assessed, not merged by default;
    one that merges cleanly but was tested on an older `main` gets `@dependabot rebase` first, so
    CI tests what will land. Also open: #58 (tag every version the branch skips, and check a
-   tag's commit), and #46 to #49 (pin actions to commits, provenance, immutable releases, CI on
-   the release PR). The rulesets for `release` and `wolfram--v*` are on (ids 24615785 and
-   24615786).
+   tag's commit), #47 to #49 (provenance, immutable releases, CI on the release PR; #46,
+   pinning actions, is in #91), and #90 (an artifact name on *Re-run all jobs*, unverified; above). The
+   rulesets for `release` and `wolfram--v*` are on (ids 24615785 and 24615786).
 
    A review of CI and the release pipeline filed #81 to #88 (2026-10-08, all `ci`):
-   - **#84, security, in PR #89** (item 1): `release-build.yml`'s `build` job held
-     `contents: write` and left `persist-credentials` at its default. So the token stayed on
-     disk while `npm ci` ran every dependency's install scripts.
-   - **#85:** check the workflows themselves (CodeQL, zizmor, actionlint).
+   - **#84, security, fixed by #89** (2026-10-10, above): `release-build.yml`'s `build` job
+     held `contents: write` and left `persist-credentials` at its default. So the token stayed
+     on disk while `npm ci` ran every dependency's install scripts.
+   - **#85, in PR #91** (item 2): check the workflows themselves (CodeQL, zizmor,
+     actionlint).
    - **#82** (`needs design`): require resolved conversations on `main`, which the review
      process now does by hand, and decide whether a PR must be up to date to merge.
    - **#81** (`needs design`): run CI on fewer pushes. #73 alone ran it 10 times.
@@ -260,7 +301,7 @@ in `docs/design.md`.
      that breaks it is noticed.
    - **#87:** group Dependabot's action updates into one PR.
    - **#88:** report each failing suite check as an annotation.
-4. **Design the kernel-start cluster before code** (`needs design`, `area: startup` and
+5. **Design the kernel-start cluster before code** (`needs design`, `area: startup` and
    `area: broker`): #22 (back off by what failed — a start refused for lack of time is not a
    broken installation), #20 (any failed start in the pool, and a private restart after idling),
    #19 (a burst for a server that will not start, at a shared broker), #16 (the session guessing
@@ -278,7 +319,7 @@ in `docs/design.md`.
    so a deep runtime directory gets no broker) wants a choice between going private at once, a
    short path that resolves to the directory, and Linux's abstract namespace. Since #73's
    fourth round it also holds a security finding: a truncated socket can land in a
-   world-writable ancestor of the checked directory, so it should come early in item 4. #80
+   world-writable ancestor of the checked directory, so it should come early in item 5. #80
    (how long a queued request may wait, on either path) belongs in the same design: it is
    the pool's queue and the call ceiling, and #79's second head records one rejected answer.
    #29 (how to hear of the next advisory against what the bundle inlines) needs a design too;
@@ -286,10 +327,10 @@ in `docs/design.md`.
    from 0.1.2's reviews: #38 (durations read three ways) is fixed in #71, and #33 and #35
    shipped in 0.1.4. From #37's review: #40 (tighten #37's long-call check), whose third point is
    all #63 leaves of it.
-5. **Restructure the agent instructions** (#36, `needs design`): a trimmed `AGENTS.md`, the
+6. **Restructure the agent instructions** (#36, `needs design`): a trimmed `AGENTS.md`, the
    handoff's durable rules moved out of it, and the project rules now in the maintainer's
    private Claude Code memory moved into the repository. Agree the design first.
-6. **MA's experiments**, each a ledger row (plan §5 MA, *Order of work*): Codex installing a
+7. **MA's experiments**, each a ledger row (plan §5 MA, *Order of work*): Codex installing a
    Claude Code marketplace entry and trusting our hook; Cursor importing an installed Claude Code
    plugin, and whether its `sessionStart` injects context; Copilot honouring `userConfig`; the
    Agent Plugins precedence in VS Code; Codex's filtered environment against our broker.
@@ -300,23 +341,23 @@ in `docs/design.md`.
    aborted on an uncaught stub-broker error. Its work list — a supported
    userbase route, diagnostics that name the failing directory, a socket-free test partition —
    overlaps #4, #12 and #22.
-7. **The restructure** (MA). M1's `archive` install, update and bad-digest rows need only public
+8. **The restructure** (MA). M1's `archive` install, update and bad-digest rows need only public
    releases (`v0.1.0` then `v0.1.1` is an update), as does a Claude run of the plugin installed
    from the archive.
-8. **MD, downstream packages** (plan §5 MD, D33), after the restructure: another project's
-   plugin built on the release bundle. Item 4's defect for today's users — a server not found
-   held off by the long back-off — is fixed in 0.1.2 (#5); its `test:custom` counterpart
+9. **MD, downstream packages** (plan §5 MD, D33), after the restructure: another project's
+   plugin built on the release bundle. The startup defect for today's users — a server not
+   found held off by the long back-off — is fixed in 0.1.2 (#5); its `test:custom` counterpart
    remains. #59 (filed 2026-10-08 from the downstream WolframVerifier, `needs design`) measured
    MD-2's split: two releases' bundles on one machine run two brokers, each sizing a pool from
    the whole licence, and with `autoUpdate` that happens after every release, both between the
    `wolfram` plugin and a downstream copy and across one plugin's update. It asks for MD-2's
    second candidate, a broker address keyed on `BROKER_PROTOCOL` rather than the version and
    the bundle's bytes, which needs its own argument that sharing never changes an answer.
-9. **The rest of M1**: the chat checklist and M1b's client version, `SessionStart` and file
+10. **The rest of M1**: the chat checklist and M1b's client version, `SessionStart` and file
    workflow (run by a maintainer); entitlement leases outliving clean kernel exits by about an hour
    (measured, cause not found, matters only to entitlement users); a resumed Claude Desktop
    session after a re-upload may lose the LSP (a new session works).
-10. **M2's design checkpoint**, which starts with the stable-2.2.0 union experiment and needs
+11. **M2's design checkpoint**, which starts with the stable-2.2.0 union experiment and needs
    AgentTools 2.2.7 disabled — agree it with the maintainers first.
 
 ## How releases work
@@ -381,6 +422,10 @@ in `docs/design.md`.
   `area: broker` — the shared broker and its pool; `area: paclet` — paclet-declared servers and
   the capability cache; `area: distribution` — install, packaging, release). File issues in the
   existing ones' shape: what happens, repro, expected, suggested fix.
+- **A workflow fix needs no suite check** (the maintainer, 2026-10-10, on #84). `npm test`
+  exercises no workflow, and a one-off auditor run only restates the diff. Instead, run the
+  risky part directly, as #89 ran its anonymous git reads with every credential source off,
+  and say in the PR what would catch a regression (#85's auditor).
 - **CI.** `ci.yml` runs on every PR; a PR that changed only prose outside the shipped trees
   skips the suite and build, but never `public-content`.
 - **This repository is public.** Every pushed commit is published, branches included. The

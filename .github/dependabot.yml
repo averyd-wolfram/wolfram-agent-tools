@@ -45,6 +45,11 @@ updates:
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
     labels: [dependencies]
 
+  # Every action is pinned to a commit with its version in a trailing comment
+  # (#46), and an update moves both; CI's zizmor fails a reference that isn't
+  # pinned. Two pins are moved by hand: the actionlint image, a docker://
+  # reference Dependabot doesn't read, and the zizmor version its action is
+  # given, so that new audits arrive in a PR of their own.
   - package-ecosystem: github-actions
     directory: /
     schedule:
