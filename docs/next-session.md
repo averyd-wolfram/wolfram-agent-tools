@@ -93,7 +93,14 @@ in `docs/design.md`.
   moved, also had the suite run on `main` combined with them first. Codex's findings were real
   each time: the protocol bump on #65, and on #67 the deadline's tie with the SDK and a NaN
   reaching the broker as `null`.
-- **0.1.5 is four fixes in, one under review** (2026-10-08, milestone `0.1.5`).
+- **0.1.5 is released** (2026-10-08, #72, `0547361`; milestone `0.1.5` holds five fixes, all
+  merged).
+  - **Verified as 0.1.4 was:** `v0.1.5` is Latest, and `release` moved to it (`49f2e19`) and
+    is tagged `wolfram--v0.1.5`. The bundle and the plugin archive, fetched through
+    `releases/latest/download/…`, match `SHA256SUMS.txt` and say 0.1.5.
+  - **How the batch went:** each fix had at least one `/code-review high` round and a clean
+    Codex review on its final head before the maintainer approved it. Codex's findings were
+    real twice: #75 on #73, and the stranded waiters on #79.
   - **#68 is merged** (`136b59f`, fixes #31). A kernel's client is a `RelayClient` whose
     `listTools` is a plain request, so no `outputSchema` is compiled and the relay judges no
     result. `listAllTools` drains every page, so doctor now shows them all. Claude Code 2.1.290
@@ -126,7 +133,7 @@ in `docs/design.md`.
       SIGTERM mid-call, and a session that chooses again while its broker is retiring.
     - **#76** (`enhancement`): a call still on a retiring broker should be answered by it
       rather than failed. It is filed, not in this fix.
-  - **#78 is under review** in #79. The maintainer put it in 0.1.5
+  - **#79 is merged** (`81c25e7`, fixes #78). The maintainer put it in 0.1.5
     (2026-10-08). One request running out marked the whole connection closed. The session's
     next request then chose again and closed it, and the broker aborted every other call
     the session had there.
@@ -157,7 +164,6 @@ in `docs/design.md`.
       - The frozen-broker section checks that a call made while the broker is being asked
         waits for the verdict and is answered elsewhere. On #79's first head, it waited out
         its own ceiling.
-  - **Release PR #72** is in the milestone.
   - **Filed from the reviews:**
     - **#69** (`needs design`): a non-object schema still fails the whole list, in zod.
     - **#70** (`needs design`): the lists read after a kernel start keep the SDK's 60 s
@@ -174,7 +180,7 @@ in `docs/design.md`.
       request the broker never read could be resent safely, if the broker acknowledged what it
       took.
     - **#78** (`bug`, `area: broker`, milestone `0.1.5`, from #77's review): one request's
-      timeout cancelled every other call on a healthy broker. Under review (above).
+      timeout cancelled every other call on a healthy broker. Fixed by #79 (above).
     - **#80** (`bug`, `needs design`, `area: broker`, from #79's review): how long a queued
       request may wait. The shared path fails it at its ceiling, and the broker still runs
       it afterwards. The private path waits however long the queue takes. A shared request
@@ -189,24 +195,41 @@ in `docs/design.md`.
 
 ## What to do next, in order
 
-1. **Finish 0.1.5** (milestone `0.1.5`).
-   - **#79** (fixes #78): run `/code-review high` on its head and answer the findings. Once CI passes, comment `@codex review`, and read *every* comment
-     Codex leaves; the comments API pages at 30. Then ask the maintainer to approve the merge.
-     If `main` moved meanwhile, run the suite on the combination first.
-   - **Release PR #72**: merge it once its changelog lists #68, #71, #73, #77 and #79.
-     Ask the maintainer first.
-   - **Then verify the release as 0.1.4 was**: `v0.1.5` is Latest, `release` has moved and is
-     tagged `wolfram--v0.1.5`, and the assets fetched through `releases/latest/download/…`
-     match `SHA256SUMS.txt` and say 0.1.5.
-   - **#40's third point** (overlap the long-call minute with an earlier section) didn't ride
-     with any of the three. It goes with the next PR that touches the suite's timing; it changes
-     nothing shipped.
+1. **Finish PR #89** (fixes #84, opened 2026-10-10; this handoff is its last commit).
+   - **What it does:** `release-build.yml`'s build is split in two. `build` holds no token
+     that can write: it runs the release PR's title checks before `npm ci`, then builds,
+     validates and uploads the files as an artifact. `publish` is a fresh job with no checkout
+     that runs only `gh` and `git ls-remote`, and is the one job that can write. `--stamp`
+     takes the version through `env:`. The released-tag guard stops on a read that failed,
+     rather than taking it for "not released".
+   - **How it got there:** the first head only stopped persisting the token in the checkout.
+     Codex's P1 on it was real: on one runner, `npm ci`'s install scripts or the `npx`
+     validators could rewrite `scripts/commit-types.mjs`, which Publish ran with `GH_TOKEN`,
+     or put a command on `$GITHUB_PATH`. The maintainer chose the split in this PR
+     (2026-10-10).
+   - **Evidence:** the anonymous reads (`ls-remote` with and without a checkout, the fetch by
+     SHA, `commit-types`) and the guard's three outcomes were run locally with every
+     credential source off. The next release run is the first end-to-end use. It adds no
+     check, since `npm test` exercises no workflow: the maintainer agreed (2026-10-10) that a
+     workflow fix needs none, and #85's auditor is what would keep it fixed.
+   - **Codex's second P1, on the split:** `publish` ran `actions/download-artifact@v8`, a
+     movable tag, beside the write token. It is now pinned to `v8.0.2`'s commit in #46's
+     format; every other workflow's pins stay #46's.
+   - **Filed from its review:** #90 (`ci`, `bug`, unverified): *Re-run all jobs* on a failed
+     release run may fail on an artifact name the run already holds, in `ci.yml`'s `build`
+     and in the new `publish-<tag>` alike. Measure it before adding `overwrite: true`.
+   - **Left:** Codex on the split's head, then the maintainer's approval. #85 is a natural
+     next PR.
+
+   **#40's third point** (overlap the long-call minute with an earlier section) still waits
+   for the next PR that touches the suite's timing. #77 and #79 each added a few seconds of
+   slow sections, so that PR is a good place to look at all of them.
 2. **The one link of #7 left unobserved**: Claude Code running the auto-update pass itself, in
    an interactive session up to ten minutes after the first message, and saying `Plugin updated:
-   wolfram`. 0.1.4 is that next release (2026-10-08): in a project following `release`, still on
-   0.1.3, an interactive session should now update itself; the maintainer runs it, since it needs
-   a signed-in client. Try the route at the 2.1.75 client floor too, unmeasured for it.
-   `docs/releasing.md` has the headless check.
+   wolfram`. 0.1.4 and now 0.1.5 (2026-10-08) are releases to watch for it: a project following
+   `release` on an older version should update itself in an interactive session. The maintainer
+   runs it, since it needs a signed-in client. Try the route at the 2.1.75 client floor too,
+   unmeasured for it. `docs/releasing.md` has the headless check.
 3. **Dependabot's one open PR, #56** (TypeScript 7), which waits: typescript-eslint 8.71.1
    accepts TypeScript `<6.1.0` (checked 2026-10-08), and #56's CI is red. It stays open as the
    reminder rather than closed with an ignore rule, which would hide TypeScript 7 until someone
@@ -223,6 +246,20 @@ in `docs/design.md`.
    tag's commit), and #46 to #49 (pin actions to commits, provenance, immutable releases, CI on
    the release PR). The rulesets for `release` and `wolfram--v*` are on (ids 24615785 and
    24615786).
+
+   A review of CI and the release pipeline filed #81 to #88 (2026-10-08, all `ci`):
+   - **#84, security, in PR #89** (item 1): `release-build.yml`'s `build` job held
+     `contents: write` and left `persist-credentials` at its default. So the token stayed on
+     disk while `npm ci` ran every dependency's install scripts.
+   - **#85:** check the workflows themselves (CodeQL, zizmor, actionlint).
+   - **#82** (`needs design`): require resolved conversations on `main`, which the review
+     process now does by hand, and decide whether a PR must be up to date to merge.
+   - **#81** (`needs design`): run CI on fewer pushes. #73 alone ran it 10 times.
+   - **#83** (`needs design`): the container scenarios that need no licence, in CI.
+   - **#86** (`needs design`): the real-kernel contract on a schedule, so an AgentTools update
+     that breaks it is noticed.
+   - **#87:** group Dependabot's action updates into one PR.
+   - **#88:** report each failing suite check as an annotation.
 4. **Design the kernel-start cluster before code** (`needs design`, `area: startup` and
    `area: broker`): #22 (back off by what failed — a start refused for lack of time is not a
    broken installation), #20 (any failed start in the pool, and a private restart after idling),
@@ -231,7 +268,7 @@ in `docs/design.md`.
    record what #21 and #18 tried, why each attempt was reverted, and the constraints a design
    must keep. Write it up in `docs/plugin-plan.md` first — the one plan; the pool shapes every
    session's latency and licence use. A minimum start timeout (#15's other half) is part of it.
-   #32 turned out to be the broker's bind, not the pool, and is fixed in #73 (item 1).
+   #32 turned out to be the broker's bind, not the pool, and is fixed in #73 (0.1.5).
    #3 (warm kernels serve a paclet's old server after an upgrade) wants the same treatment, with
    #4 and #6 (`area: paclet`), and so does #69 (a tool whose schema isn't `type: "object"`
    fails the whole list in the SDK's parse: leave it out with a logged reason, or relay it).
@@ -243,8 +280,9 @@ in `docs/design.md`.
    fourth round it also holds a security finding: a truncated socket can land in a
    world-writable ancestor of the checked directory, so it should come early in item 4. #80
    (how long a queued request may wait, on either path) belongs in the same design: it is
-   the pool's queue and the call ceiling, and #79's second head records one rejected answer. #29 (how to hear of the next advisory against what
-   the bundle inlines) needs a design too; an audit gate tried in #27 was reverted. Smaller,
+   the pool's queue and the call ceiling, and #79's second head records one rejected answer.
+   #29 (how to hear of the next advisory against what the bundle inlines) needs a design too;
+   an audit gate tried in #27 was reverted. Smaller,
    from 0.1.2's reviews: #38 (durations read three ways) is fixed in #71, and #33 and #35
    shipped in 0.1.4. From #37's review: #40 (tighten #37's long-call check), whose third point is
    all #63 leaves of it.
@@ -321,8 +359,14 @@ in `docs/design.md`.
   first, then resolve the thread (GraphQL `resolveReviewThread`). A finding the PR does not fix
   is answered with the issue that tracks it; file one if none does. Once checks pass and the
   PR is otherwise ready, comment `@codex review` (a focus may follow, as in `@codex review for
-  security regressions`); Codex posts only P0 and P1 findings, which are answered and resolved
-  the same way. Then ask the maintainer to approve the merge.
+  security regressions`). Codex's findings are answered and resolved the same way. It marks
+  them P0 to P3 (P2 and P3 arrived on #73), so treat every badge as a finding. And read all
+  of them: the comments API pages at 30, so list with `--paginate`. A P3 on #73 was on page 2,
+  and was missed until the maintainer pointed to it. Then ask the maintainer to approve the
+  merge.
+- **Post every finding on a line of the diff**, the nearest related one if its file isn't in
+  the diff, never as a conversation comment. One on #79 could not be resolved like a thread,
+  went stale when the design changed, and was hidden as outdated.
 - **When reviews stop converging, split.** Each review round finds new edges, and a design
   added inside a fix — the pool's burst handling in #18, a refused start's back-off in #21 —
   can keep producing them for round after round. When the fix itself is settled and the rounds

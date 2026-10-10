@@ -144,11 +144,17 @@ and then posts a `ci-ok` status on it, so branch protection sees the result.
 
 ### `release-build.yml` — building and publishing a release
 
-The one job that builds and publishes anything, called by `release-please.yml` with the ref to
-build. It names the build with `scripts/release-version.mjs` first, so a ref that names no
-release fails at once, and pins the commit; runs `ci.yml` in full on that commit; then stamps
-the version into the checkout, runs `node scripts/release-artifacts.mjs`, validates the
-stamped archive with Claude Code at 2.1.289 and at the 2.1.75 floor, and publishes:
+The one workflow that builds and publishes anything, called by `release-please.yml` with the
+ref to build. It names the build with `scripts/release-version.mjs` first, so a ref that names
+no release fails at once, and pins the commit; runs `ci.yml` in full on that commit; then
+stamps the version into the checkout, runs `node scripts/release-artifacts.mjs`, and validates
+the stamped archive with Claude Code at 2.1.289 and at the 2.1.75 floor. That job, `build`,
+holds no token that can write. `npm ci` runs every dependency's install scripts, and the
+validator is fetched from outside the lockfile. On one runner, any of them could rewrite a
+script or put a command on `$GITHUB_PATH` for a later step, so a write token anywhere in that
+job would be theirs too (#84). The files go on as an artifact to `publish`, a fresh job with
+no checkout that runs no repository code: one action, `download-artifact` pinned to a commit,
+then `gh` and `git ls-remote`. It is the one job that can write, and it publishes:
 
 - **release-please's branch** becomes a GitHub pre-release, `v<x.y.z>-pre.<n>`, where `x.y.z`
   is the version release-please computed and `n` is one past the highest `-pre.` tag that

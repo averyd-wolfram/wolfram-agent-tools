@@ -227,7 +227,9 @@ built-ins, which is the bug it exists for.
   PR (CI is `pull_request`-triggered, so a branch is tested once it has a PR);
   `release-please.yml` runs on `main` and keeps a release PR whose version it computes from the commit types — `fix:` a
   patch, `feat:` a minor, `docs:` and the rest nothing — with `CHANGELOG.md`; `release-build.yml`,
-  which `release-please.yml` calls in the same run, is the one job that builds and publishes:
+  which `release-please.yml` calls in the same run, is the one workflow that builds and
+  publishes — a `build` job with no write token hands the files to a `publish` job that runs
+  no repository code, and is the only one that can write:
   each update of that PR runs CI in full on its commit (it calls `ci.yml`) and publishes the
   pre-release `v<x.y.z>-pre.<n>`, and merging the PR makes a draft and tag that the build
   finishes as the release — a normal GitHub release from 0.x on — found by
