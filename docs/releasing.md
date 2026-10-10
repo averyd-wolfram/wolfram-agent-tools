@@ -101,13 +101,16 @@ on its commit instead (`workflow_call`, with the commit as `ref`).
   unchanged PR. That pin is the validator's, not the plugin's supported client floor. It needs
   no login.
 
-All three run locally:
+The suite, the build and the validator run locally, and so do both of `workflows`' tools
+(*Trying it locally*, below):
 
 ```bash
 npm test
 npm run release:artifacts
 mkdir -p /tmp/wolfram-plugin && unzip -o release/wolfram-plugin-*.zip -d /tmp/wolfram-plugin
 npx -y @anthropic-ai/claude-code@2.1.289 plugin validate /tmp/wolfram-plugin
+actionlint
+GH_TOKEN=$(gh auth token) uvx zizmor@1.30.1 .
 ```
 
 ### `release-please.yml` — the whole release, one run per push to `main`
