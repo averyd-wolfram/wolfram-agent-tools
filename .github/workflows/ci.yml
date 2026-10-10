@@ -237,11 +237,12 @@ jobs:
       # PR of its own, which triages what it reports. The online audits —
       # impostor commits, actions with a known advisory — use this job's
       # read-only token.
-      # Only where the tree has its config: a release run calls this on a
-      # tag, which may predate it, and that tag's unpinned actions would
-      # otherwise hold its release back.
+      # Always on a pull request, so deleting the config can't switch the
+      # audit off. A release run calls this on a tag, which may predate the
+      # audit, and its unpinned actions would hold that release back, so
+      # there it runs only where the tree has the config.
       - name: zizmor
-        if: ${{ hashFiles('.github/zizmor.yml') != '' }}
+        if: ${{ github.event_name == 'pull_request' || hashFiles('.github/zizmor.yml') != '' }}
         uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
         with:
           version: 1.30.1

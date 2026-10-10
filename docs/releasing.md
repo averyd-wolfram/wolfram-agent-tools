@@ -110,7 +110,7 @@ npm run release:artifacts
 mkdir -p /tmp/wolfram-plugin && unzip -o release/wolfram-plugin-*.zip -d /tmp/wolfram-plugin
 npx -y @anthropic-ai/claude-code@2.1.289 plugin validate /tmp/wolfram-plugin
 actionlint
-GH_TOKEN=$(gh auth token) uvx zizmor@1.30.1 .
+GH_TOKEN=$(gh auth token) uvx zizmor@<version> .   # the version ci.yml's workflows job gives
 ```
 
 ### `release-please.yml` — the whole release, one run per push to `main`
