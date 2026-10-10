@@ -95,8 +95,9 @@ jobs:
       # No credentials in the checkout while outside code runs with a token
       # that can push (#84): npm ci runs every dependency's install scripts,
       # and the validate step fetches Claude Code from outside the lockfile.
-      # The token is handed to Publish alone, as GH_TOKEN; the git reads there
-      # need none, the repository being public, as the advance job's show.
+      # The token is handed to Publish alone, as GH_TOKEN. Its git reads need
+      # none, the repository being public: advance's ls-remote runs anonymously
+      # on every release, and the fetch by SHA was run with no credentials.
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.name.outputs.sha }}
@@ -154,9 +155,16 @@ jobs:
           if [ "$CREATE" = true ]; then
             # Asked again here, not only when the build was named: the version
             # may have been released while CI ran, and a pre-release after its
-            # release ranks below it.
-            if git ls-remote --exit-code --tags origin "refs/tags/${TAG%-pre.*}" >/dev/null; then
+            # release ranks below it. Exit 2 alone means no such tag: any
+            # other failure is a read that didn't happen, which must stop the
+            # build rather than pass for "not released".
+            status=0
+            git ls-remote --exit-code --tags origin "refs/tags/${TAG%-pre.*}" >/dev/null || status=$?
+            if [ "$status" = 0 ]; then
               echo "${TAG%-pre.*} was released while this build ran; publishing nothing"
+              exit 1
+            elif [ "$status" != 2 ]; then
+              echo "could not read origin's tags (git ls-remote exited $status); publishing nothing"
               exit 1
             fi
             gh release create "$TAG" "${assets[@]}" --target "$SHA" \
