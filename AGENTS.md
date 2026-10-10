@@ -224,7 +224,9 @@ built-ins, which is the bug it exists for.
 - `.github/workflows/`: `ci.yml` runs `npm test` (hermetic, no seat) matrixed over the Node floor
   and newest — Node only, since the artifacts are platform-independent and the maintainer's own
   machine covers macOS — plus a single `build` job that assembles the release artifacts on every
-  PR (CI is `pull_request`-triggered, so a branch is tested once it has a PR);
+  PR (CI is `pull_request`-triggered, so a branch is tested once it has a PR), and a `workflows`
+  job auditing the workflows themselves with pinned actionlint and zizmor, whose accepted
+  findings are `.github/zizmor.yml`. Every action is pinned to a commit;
   `release-please.yml` runs on `main` and keeps a release PR whose version it computes from the commit types — `fix:` a
   patch, `feat:` a minor, `docs:` and the rest nothing — with `CHANGELOG.md`; `release-build.yml`,
   which `release-please.yml` calls in the same run, is the one workflow that builds and

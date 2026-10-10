@@ -64,12 +64,19 @@ jobs:
       create: ${{ steps.v.outputs.create }}
       sha: ${{ steps.v.outputs.sha }}
     steps:
-      - uses: actions/checkout@v7
+      # No token left in the checkout: release-version.mjs reads the tags
+      # with an anonymous ls-remote, as publish does, the repository being
+      # public.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.BUILD_REF }}
-      - uses: actions/setup-node@v7
+          persist-credentials: false
+      # No cache, as in build: nothing here installs, and what this job names
+      # is what gets published.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
+          package-manager-cache: false
       # The commit is pinned here, so every later job builds exactly this one
       # even if the branch moves while CI runs.
       - id: v
@@ -96,7 +103,7 @@ jobs:
     needs: [name, ci]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.name.outputs.sha }}
           persist-credentials: false
@@ -107,7 +114,7 @@ jobs:
       # explicitly, since setup-node turns caching on by itself once
       # package.json names a packageManager. One uncached install per build,
       # pre-releases included.
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
           package-manager-cache: false
@@ -153,7 +160,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/publish"
           find release -maxdepth 1 -type f -exec cp {} "$RUNNER_TEMP/publish/" \;
       # By tag: one release run can call this workflow for several.
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: publish-${{ needs.name.outputs.tag }}
           path: ${{ runner.temp }}/publish/
@@ -170,9 +177,8 @@ jobs:
       statuses: write
     steps:
       # The one action this job runs, and it can reach the write token whether
-      # or not it is handed it, so it is pinned to a commit: whoever moves the
-      # v8 tag doesn't decide what runs here. The other workflows' pins are
-      # #46; Dependabot updates the SHA and the comment together.
+      # or not it is handed it: pinned to a commit, like every action here
+      # (#46), so whoever moves the v8 tag doesn't decide what runs.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: publish-${{ needs.name.outputs.tag }}
