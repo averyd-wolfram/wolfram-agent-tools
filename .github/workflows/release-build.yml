@@ -160,7 +160,8 @@ jobs:
           if-no-files-found: error
 
   # The one job that can write, on a fresh runner: no checkout, no npm, no
-  # repository code — only the files build made, gh, and git ls-remote.
+  # repository code — a pinned download of the files build made, then gh and
+  # git ls-remote.
   publish:
     needs: [name, build]
     runs-on: ubuntu-latest
@@ -168,7 +169,11 @@ jobs:
       contents: write
       statuses: write
     steps:
-      - uses: actions/download-artifact@v8
+      # The one action this job runs, and it can reach the write token whether
+      # or not it is handed it, so it is pinned to a commit: whoever moves the
+      # v8 tag doesn't decide what runs here. The other workflows' pins are
+      # #46; Dependabot updates the SHA and the comment together.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: publish-${{ needs.name.outputs.tag }}
           path: release

@@ -153,8 +153,8 @@ holds no token that can write. `npm ci` runs every dependency's install scripts,
 validator is fetched from outside the lockfile. On one runner, any of them could rewrite a
 script or put a command on `$GITHUB_PATH` for a later step, so a write token anywhere in that
 job would be theirs too (#84). The files go on as an artifact to `publish`, a fresh job with
-no checkout that runs no repository code, only `gh` and `git ls-remote`. It is the one job
-that can write, and it publishes:
+no checkout that runs no repository code: one action, `download-artifact` pinned to a commit,
+then `gh` and `git ls-remote`. It is the one job that can write, and it publishes:
 
 - **release-please's branch** becomes a GitHub pre-release, `v<x.y.z>-pre.<n>`, where `x.y.z`
   is the version release-please computed and `n` is one past the highest `-pre.` tag that
