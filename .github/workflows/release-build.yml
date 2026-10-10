@@ -16,7 +16,8 @@ name: Release build
 #
 # The build is named before anything else runs, so a ref that names no release
 # fails at once. Then CI runs in full on the exact commit, the Node floor and
-# validate-plugin included.
+# validate-plugin included. Then a job with no write token builds the files,
+# and only a fresh one, which runs no repository code, publishes them (#84).
 #
 # Run by hand (workflow_dispatch on a tag, or a tag pushed by a person), it
 # builds that tag. A release that is already published is never rebuilt: its
@@ -44,8 +45,8 @@ concurrency:
   group: release-build-${{ inputs.ref || github.ref_name }}
   cancel-in-progress: false
 
-# Read-only by default: only the step that publishes needs to write, and the
-# naming job runs repository code with whatever token the workflow grants.
+# Read-only by default: only the publish job needs to write, and every other
+# job runs repository code with whatever token the workflow grants.
 permissions:
   contents: read
 
@@ -85,33 +86,46 @@ jobs:
     with:
       ref: ${{ needs.name.outputs.sha }}
 
+  # Builds and checks what will be published, with no token that can write
+  # (#84): npm ci runs every dependency's install scripts, and the validate
+  # step fetches Claude Code from outside the lockfile. On one runner, any of
+  # them could rewrite a script or put a command on $GITHUB_PATH for a later
+  # step, so a write token in any later step of this job would be theirs too.
+  # What leaves is the files, as an artifact, to the publish job below.
   build:
     needs: [name, ci]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      statuses: write
     steps:
-      # No credentials in the checkout while outside code runs with a token
-      # that can push (#84): npm ci runs every dependency's install scripts,
-      # and the validate step fetches Claude Code from outside the lockfile.
-      # The token is handed to Publish alone, as GH_TOKEN. Its git reads need
-      # none, the repository being public: advance's ls-remote runs anonymously
-      # on every release, and the fetch by SHA was run with no credentials.
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.name.outputs.sha }}
           persist-credentials: false
-      # No cache restored into the job that publishes: the entries it would
-      # restore were written by other jobs — this run's CI, or an earlier
-      # release run's — so caching would let them reach what ships; setup-node
-      # advises against caching in release jobs. Said explicitly, since
-      # setup-node turns caching on by itself once package.json names a
-      # packageManager. One uncached install per build, pre-releases included.
+      # No cache restored into the job that builds what is published: the
+      # entries it would restore were written by other jobs — this run's CI,
+      # or an earlier release run's — so caching would let them reach what
+      # ships; setup-node advises against caching in release jobs. Said
+      # explicitly, since setup-node turns caching on by itself once
+      # package.json names a packageManager. One uncached install per build,
+      # pre-releases included.
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
           package-manager-cache: false
+      # The release PR was opened by GITHUB_TOKEN, so none of its pull_request
+      # checks ran. This build runs all of ci.yml on its exact commit, and the
+      # two title checks here, on the release commit, whose subject is the PR's
+      # title; publish posts each result where branch protection looks for it.
+      # Before npm ci, so no dependency has run when these scripts do, and the
+      # fetch is anonymous, the repository being public.
+      - name: The release PR's title checks, on its commit
+        if: needs.name.outputs.create == 'true'
+        env:
+          SHA: ${{ needs.name.outputs.sha }}
+        run: |
+          git fetch -q --depth=2 origin "$SHA"
+          subject=$(git log -1 --format=%s "$SHA")
+          PR_TITLE="$subject" node scripts/commit-types.mjs "$SHA^" "$SHA"
+          node -e 'import("./scripts/commit-types.mjs").then((m) => process.exit(m.commitType(process.argv[1]) ? 0 : 1))' "$subject"
       - run: npm ci
       # Into this checkout only: the branch says what release is being
       # prepared, and the stamp says which build of it this is. Through env:,
@@ -135,9 +149,34 @@ jobs:
           npx -y @anthropic-ai/claude-code@2.1.75 plugin validate "$RUNNER_TEMP/plugin"
       # Files only: release/ also holds plugin/, the assembled tree the zip was
       # made from, and gh refuses a directory.
+      - run: |
+          mkdir -p "$RUNNER_TEMP/publish"
+          find release -maxdepth 1 -type f -exec cp {} "$RUNNER_TEMP/publish/" \;
+      # By tag: one release run can call this workflow for several.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: publish-${{ needs.name.outputs.tag }}
+          path: ${{ runner.temp }}/publish/
+          if-no-files-found: error
+
+  # The one job that can write, on a fresh runner: no checkout, no npm, no
+  # repository code — only the files build made, gh, and git ls-remote.
+  publish:
+    needs: [name, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      statuses: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: publish-${{ needs.name.outputs.tag }}
+          path: release
       - name: Publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # There is no checkout for gh to read the repository from.
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.name.outputs.tag }}
           SHA: ${{ needs.name.outputs.sha }}
           PRERELEASE: ${{ needs.name.outputs.prerelease }}
@@ -157,27 +196,20 @@ jobs:
             # may have been released while CI ran, and a pre-release after its
             # release ranks below it. Exit 2 alone means no such tag: any
             # other failure is a read that didn't happen, which must stop the
-            # build rather than pass for "not released".
+            # build rather than pass for "not released". Anonymous, as
+            # advance's ls-remote is on every release run.
             status=0
-            git ls-remote --exit-code --tags origin "refs/tags/${TAG%-pre.*}" >/dev/null || status=$?
+            git ls-remote --exit-code --tags "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "refs/tags/${TAG%-pre.*}" >/dev/null || status=$?
             if [ "$status" = 0 ]; then
               echo "${TAG%-pre.*} was released while this build ran; publishing nothing"
               exit 1
             elif [ "$status" != 2 ]; then
-              echo "could not read origin's tags (git ls-remote exited $status); publishing nothing"
+              echo "could not read the repository's tags (git ls-remote exited $status); publishing nothing"
               exit 1
             fi
             gh release create "$TAG" "${assets[@]}" --target "$SHA" \
               --title "$TAG" --generate-notes "${pre[@]}"
-            # The release PR was opened by GITHUB_TOKEN, so none of its
-            # pull_request checks ran. This build ran all of ci.yml on its exact
-            # commit, and runs the two title checks here on the release commit,
-            # whose subject is the PR's title; each result is posted where
-            # branch protection looks for it.
-            git fetch -q --depth=2 origin "$SHA"
-            subject=$(git log -1 --format=%s "$SHA")
-            PR_TITLE="$subject" node scripts/commit-types.mjs "$SHA^" "$SHA"
-            node -e 'import("./scripts/commit-types.mjs").then((m) => process.exit(m.commitType(process.argv[1]) ? 0 : 1))' "$subject"
+            # The title checks passed in build, which this job needs.
             for check in ci-ok commit-types conventional-title; do
               gh api "repos/$GITHUB_REPOSITORY/statuses/$SHA" -f state=success -f context="$check" \
                 -f description="checked in the release build" \
@@ -188,7 +220,7 @@ jobs:
           # Only a plain "not found" means there is no release. Any other
           # failure — an API error, a token problem — must stop the build, not
           # create a second, published release beside release-please's draft.
-          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>view.err); then
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>"$RUNNER_TEMP/view.err"); then
             if [ "$draft" != true ]; then
               echo "$TAG is already published; a published release's assets never change"
               exit 1
@@ -196,10 +228,10 @@ jobs:
             # release-please's draft: files first, then it becomes visible.
             gh release upload "$TAG" "${assets[@]}" --clobber
             gh release edit "$TAG" --draft=false "--prerelease=$PRERELEASE" "${latest[@]}"
-          elif grep -qi "release not found" view.err; then
+          elif grep -qi "release not found" "$RUNNER_TEMP/view.err"; then
             gh release create "$TAG" "${assets[@]}" --verify-tag \
               --title "$TAG" --generate-notes "${pre[@]}" "${latest[@]}"
           else
-            cat view.err
+            cat "$RUNNER_TEMP/view.err"
             exit 1
           fi
