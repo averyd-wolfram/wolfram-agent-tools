@@ -189,6 +189,16 @@ then `gh` and `git ls-remote`. It is the one job that can write, and it publishe
   `0.1.0` would rank below the release, and an installed plugin would still take the changed
   string as an update. release-please's next PR names the next version instead.
 
+No job in a release run restores or saves the Actions cache (`cache-mode: none` on
+`release-please.yml` and `release-build.yml`, #96). The run is in `main`'s cache scope, which
+every later run restores from, pull requests' CI included, so an entry left by a dependency's
+install script would reach them. The cache service enforces the mode through each job's
+token, so it binds a `run:` step as well as a caching action. It also carries into the
+workflows a release run calls: measured on #97, a called workflow's save was refused with
+"cache write denied: token has no writable scopes", while the same save under no mode
+succeeded. actionlint 1.7.12 predates the key, so `.github/actionlint.yaml` ignores that one
+message.
+
 Release runs never overlap, and GitHub keeps only the newest pending one, so pushes that land
 while one runs collapse into one run that sees all of them. The version is stamped into the CI
 checkout only and never committed.
