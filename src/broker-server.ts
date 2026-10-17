@@ -24,7 +24,7 @@ import {
   type BrokerOp,
   type BrokerRequest,
   type BrokerResponse,
-  MAX_SOCKET_PATH,
+  fitsSocketPath,
   socketFault,
   SOCKET_MODE,
 } from "./broker-protocol.js";
@@ -652,12 +652,10 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
    */
   async function listenAt(path: string, attempt: number): Promise<Server | null> {
     const candidate = createServer(onConnection);
-    // Create it 0600 rather than narrow it afterwards. A chmod has to name the
-    // file, and an over-long address is truncated by bind, so the path we
-    // would chmod is not always the path that exists — measured, a 152-byte
-    // address bound successfully while the directory we asked for stayed
-    // empty. A umask needs no path, and it also closes the window in which the
-    // socket exists at the umask's default 755, connectable by anyone.
+    // Create it 0600 rather than narrow it afterwards: between a bind and a
+    // chmod the socket exists at the umask's default 755, connectable by
+    // anyone. A umask also needs no path, which mattered while an over-long
+    // address was bound truncated, and a chmod named a file that did not exist.
     //
     // Process-global, so it is held for exactly the bind, which listen() makes
     // before it returns: the socket's file exists, 0600, by then (measured on
@@ -728,25 +726,23 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
    * staging name, unlinked as soon as the link is made.
    */
   async function claimSocket(): Promise<Claim | null> {
-    // A named pipe has no file to link, and nothing can replace one. An address
-    // too long for a socket path is bound truncated, and connected to truncated
-    // the same way, which is how sharing survives it (`brokerAddress`); but on
-    // Linux the staging name beside it is truncated too, so there is no file by
-    // its full name to link, and no broker would ever take the address.
-    if (process.platform === "win32" || Buffer.byteLength(address) > MAX_SOCKET_PATH) {
-      return claimDirect();
-    }
+    // A named pipe has no file to link, and nothing can replace one.
+    if (process.platform === "win32") return claimDirect();
 
-    // Short, so it fits wherever the address does: sun_path is 104 bytes on
-    // macOS, and this is shorter than the terse `wm-<digest>.sock`. Random, and
-    // never cleared first. Named for the process and a count of its claims, it
-    // was cleared on the reasoning that any file of that name was left by a
-    // process that died with this pid. That holds inside one PID namespace only:
-    // two containers sharing this directory can each run a broker as the same
-    // pid, and clearing the name removed the other's socket between its bind
-    // and its link. A name already taken fails the bind, and the claim stands
-    // down rather than take it.
+    // Short, so it fits wherever an address `brokerAddress` makes does: sun_path
+    // is 104 bytes on macOS, and this is no longer than the terse
+    // `wm-<digest>.sock`. Random, and never cleared first. Named for the
+    // process and a count of its claims, it was cleared on the reasoning that
+    // any file of that name was left by a process that died with this pid.
+    // That holds inside one PID namespace only: two containers sharing this
+    // directory can each run a broker as the same pid, and clearing the name
+    // removed the other's socket between its bind and its link. A name already
+    // taken fails the bind, and the claim stands down rather than take it.
     const staging = join(dirname(address), `.b${process.pid}-${randomBytes(4).toString("hex")}`);
+    // A library caller's address may have a shorter name than this, and fit
+    // where the staging name beside it does not. Bound, that name would be
+    // truncated or refused, leaving nothing to link; bind at the address.
+    if (!fitsSocketPath(staging)) return claimDirect();
     const server = await listenAt(staging, 1);
     if (!server) return null;
     options.onBound?.(staging);
@@ -784,14 +780,11 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
   }
 
   /**
-   * Bind at the address itself, where nothing can be linked: a named pipe, an
-   * address too long for a socket path, a filesystem without hard links. The
-   * identity is read from the address after binding, which another broker may
-   * have replaced by then, and for a truncated address there is none to read.
-   * Closing such a server unlinks the address, whatever is there — except a
-   * truncated one: libuv unlinks the full path it was given, which never
-   * existed, and the truncated socket stays where no check here can see it, so
-   * no later broker can bind (#74).
+   * Bind at the address itself, where nothing can be linked: a named pipe, a
+   * staging name too long for a socket path, a filesystem without hard links.
+   * The identity is read from the address after binding, which another broker
+   * may have replaced by then. Closing such a server unlinks the address,
+   * whatever is there.
    */
   async function claimDirect(): Promise<Claim | null> {
     for (let attempt = 1; attempt <= BIND_ATTEMPTS; attempt++) {
@@ -817,7 +810,8 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
   if (fault) {
     log(
       `refusing to listen: ${fault}. Sessions will use private kernels until ` +
-        `WOLFRAM_MCP_RUNTIME_DIR (or XDG_RUNTIME_DIR) names a directory only you can write to`,
+        `WOLFRAM_MCP_RUNTIME_DIR (or XDG_RUNTIME_DIR) names a directory only you can write to, ` +
+        `at a path short enough for a socket`,
     );
     return null;
   }

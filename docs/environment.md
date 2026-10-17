@@ -65,7 +65,7 @@ code, so whoever changes a constant changes its row.
 | Constant | Value | Where | What it decides |
 |---|---|---|---|
 | `BROKER_PROTOCOL` | `6` | `broker-protocol.ts` | Part of the socket path, so proxies and brokers that cannot understand each other never meet. |
-| `MAX_SOCKET_PATH` | `100` | `broker-protocol.ts` | Longest socket path used, inside macOS's 104-byte `sockaddr_un`, which truncates rather than refusing. |
+| `SUN_PATH_BYTES` | `process.platform === "linux" ? 108 : 104` | `broker-protocol.ts` | `sockaddr_un.sun_path`, its NUL included. An address this long or longer is refused, and the session uses a private kernel: Node truncates one, possibly into a directory above the one checked, or cannot listen at it. The socket's descriptive name is used where it fits, the terse `wm-<digest>.sock` where only that does. |
 | `MAX_UNTERMINATED_BYTES` | `4 * 1024 * 1024` | `transport.ts`, `broker-protocol.ts` | Output held from a kernel, or a frame from a socket peer, before it is dropped unread. Two separate boundaries, deliberately: one trusts a kernel, the other an unauthenticated socket. |
 | `RECENT_LINE_LIMIT` | `15` | `transport.ts` | Lines of non-protocol kernel output kept, to quote back in an error. |
 | `KILL_ESCALATION_MS` | `5_000` | `transport.ts` | Grace between `SIGTERM` and `SIGKILL` for a kernel that will not exit. |
@@ -235,7 +235,7 @@ they look.
 | Variable | Default | Meaning |
 |---|---|---|
 | `WOLFRAM_MCP_SHARE` | `1` | `0` to keep a private kernel instead of sharing one through a broker. |
-| `WOLFRAM_MCP_RUNTIME_DIR` | see below | The directory for the broker's socket, created private if it does not exist. It must belong to you and be writable by no one else, or sessions decline to share and use private kernels. Unset: `XDG_RUNTIME_DIR`; else the system temporary directory if it passes that test (macOS's per-user one does); else `run/` under the cache directory, created private — which is what a headless Linux host or a container without `XDG_RUNTIME_DIR` gets. |
+| `WOLFRAM_MCP_RUNTIME_DIR` | see below | The directory for the broker's socket, created private if it does not exist. It must belong to you and be writable by no one else, and short enough that the socket's path, its name included, fits `sun_path` (`SUN_PATH_BYTES`), or sessions decline to share and use private kernels. Unset: `XDG_RUNTIME_DIR`, held to the same test; else the system temporary directory if it passes that test, length included (macOS's per-user one does); else `run/` under the cache directory, created private — which is what a headless Linux host or a container without `XDG_RUNTIME_DIR` gets. |
 | `WOLFRAM_MCP_MAX_KERNELS` | from licence | Hard cap on pooled kernels. Overrides the arithmetic below, within the absolute cap of 8. |
 | `WOLFRAM_MCP_RESERVE_SEATS` | `1` | Seats to leave free, so agents cannot lock you out of Mathematica. |
 | `WOLFRAM_MCP_LICENSE_LIMIT` | as kernels report | What the licence permits: a positive integer, or `unlimited`. Setting it overrides what kernels report. |
@@ -269,7 +269,7 @@ the machines we understand least is the wrong way round.
 | `WOLFRAM_MCP_CACHE` | `1` | `0` to always ask a kernel for the tool list instead of answering from disk. |
 | `XDG_CACHE_HOME` | `~/.cache` | Where the caches live (macOS and Linux). |
 | `LOCALAPPDATA` | `%LOCALAPPDATA%` | Same, on Windows. |
-| `XDG_RUNTIME_DIR` | temp dir | Where the broker's socket lives (not used on Windows, which uses a named pipe). |
+| `XDG_RUNTIME_DIR` | temp dir | Where the broker's socket lives (not used on Windows, which uses a named pipe). Held to `WOLFRAM_MCP_RUNTIME_DIR`'s requirements, length included. |
 | `XDG_CONFIG_HOME` | `~/.config` | Searched for `WolframScript.conf`, after the platform's own location. |
 | `APPDATA` | — | Searched for `WolframScript.conf` on Windows. |
 | `ProgramFiles`, `ProgramFiles(x86)` | — | Scanned for installations on Windows. |

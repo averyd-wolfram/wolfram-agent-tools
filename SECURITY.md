@@ -27,9 +27,7 @@ boundary is therefore the operating system's, and it is made of two things.
 ### The socket is created 0600
 
 Only its owner can connect. This is done with a `umask` around `bind` rather than a `chmod`
-afterwards, for two reasons: between bind and chmod the socket would be connectable by anyone,
-and an over-long address is truncated by `bind`, so the path a chmod would name is not always
-the path that exists.
+afterwards, because between bind and chmod the socket would be connectable by anyone.
 
 This is what stands in for the peer-uid check that would otherwise belong here. Node exposes no
 peer credentials on a unix socket — no `getpeereid`, no `SO_PEERCRED` — so that check cannot be
@@ -53,12 +51,24 @@ declined with the reason logged; each session then uses its own kernel, at the c
 seat. Group- and world-*readable* are fine: reading a directory does not let anyone connect to a
 0600 socket.
 
-A refusal can arrive on a machine where you never set `XDG_RUNTIME_DIR`: on macOS with
-`TMPDIR` unset — a plain `ssh` session is the common case — and on Linux without systemd's pam
-session, a container being the common case, `tmpdir()` falls back to `/tmp`, which fails this
-check by design (measured: refused as belonging to root, before its mode is even considered).
-The log line names what is wrong and the remedy: point `XDG_RUNTIME_DIR` at a directory that
-exists, is yours, and is not writable by anyone else, and sharing resumes.
+The socket's whole path must also fit `sun_path`: under 104 bytes on macOS, 108 on Linux. A
+longer one is refused before anything binds or connects, with the reason logged. Node 22.13,
+the oldest Node this supports, truncates such a path on macOS, as Node 22 does on Linux, and the
+truncated one can end in a directory above the one just checked, a shared `/tmp` for instance,
+where anyone could be listening first. Node 26 on Linux cannot listen at one at all. Newer Nodes
+bind longer paths in full on macOS, which is not something to rely on, since which Node runs
+is not this server's choice. Only a runtime directory that leaves too little room for the
+socket's name gets there, and a temporary directory that deep is passed over for the cache's
+`run/`.
+
+Where you never set `XDG_RUNTIME_DIR`, on macOS with `TMPDIR` unset (a plain `ssh` session is
+the common case) and on Linux without systemd's pam session (a container being the common case),
+`tmpdir()` falls back to `/tmp`, which fails this check by design (measured: refused as
+belonging to root, before its mode is even considered). The socket then goes in `run/` under
+the cache directory, created private, and so it does when the temporary directory is too deep
+for a socket's path. A directory you named, through `XDG_RUNTIME_DIR` or
+`WOLFRAM_MCP_RUNTIME_DIR`, is never swapped for another: if it fails, the log line names what
+is wrong and the remedy, and sharing resumes once it is fixed.
 
 ## What is deliberately not protected
 
@@ -76,13 +86,6 @@ connect or bind that trusts it. A world-writable, non-sticky parent, or a symlin
 attacker can repoint, defeats all of it. Reaching any of these means `XDG_RUNTIME_DIR` pointing
 through territory somebody else controls: the check exists to catch the common misconfiguration,
 not to make a hostile path safe.
-
-**An address past the OS limit.** `bind` silently truncates an over-long socket path, so the
-socket lands at the truncated name while the directory check examined the untruncated one — in
-that case the directory guarantee is void, though the socket itself is still 0600. It takes a
-runtime directory whose own path nearly fills the limit to get there, and refusing on length was
-tried and reverted ([`docs/plan.md`](docs/plan.md) §5.2): `connect` truncates identically, so
-sharing still works, and the refusal traded a working degraded case for none.
 
 **Anything on Windows.** The named-pipe namespace has no uid in it, and the collision that
 follows is recorded in `docs/plan.md` §9. Treat the sharing boundary there as unimplemented.

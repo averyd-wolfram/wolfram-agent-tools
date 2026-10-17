@@ -33,11 +33,27 @@ const [, floorMajor, floorMinor = "0"] = /(\d+)(?:\.(\d+))?/.exec(
 );
 const nodeFloor = `${floorMajor}.${floorMinor}`;
 
-// Deliberately NOT realpath'd: on macOS tmpdir() sits behind /var -> /private/var,
-// and the longer real spelling pushes this suite's socket paths past sun_path,
-// where bind truncates. Discovery resolves symlinks, so checks comparing a path
-// discovery returned wrap their expectation in realpathSync instead.
-const home = mkdtempSync(join(tmpdir(), "wolfram-mcp-"));
+// Short, because a broker's address is its runtime directory and a socket's
+// name, and one that does not fit sun_path — 104 bytes on macOS — is refused, so
+// a section whose directory is too deep would share nothing. macOS's per-user
+// tmpdir() is 49 bytes before this run adds any; /tmp is 4, and mkdtemp makes
+// this run's directory private inside it. tmpdir() where /tmp cannot be
+// written, as in a sandbox that allows only its TMPDIR, so the suite still
+// runs there; under a deep one its sharing sections are refused, and each says
+// why. Deliberately NOT realpath'd, which would lengthen it again: on macOS
+// /tmp is a symlink to /private/tmp. Discovery resolves symlinks, so checks
+// comparing a path discovery returned wrap their expectation in realpathSync
+// instead.
+const home = (() => {
+  if (process.platform !== "win32") {
+    try {
+      return mkdtempSync("/tmp/wolfram-mcp-");
+    } catch {
+      // Not writable here; the temporary directory this process was given is.
+    }
+  }
+  return mkdtempSync(join(tmpdir(), "wolfram-mcp-"));
+})();
 process.env.XDG_CACHE_HOME = join(home, "cache");
 process.env.LOCALAPPDATA = join(home, "cache");
 
@@ -256,6 +272,12 @@ const privateDir = (path) => {
   chmodSync(path, 0o700);
   return path;
 };
+
+/** The names of the sockets directly in `dir`. */
+const socketsIn = (dir) =>
+  readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isSocket())
+    .map((entry) => entry.name);
 
 const wipeCache = () => {
   rmSync(join(home, "cache"), { recursive: true, force: true });
@@ -2293,47 +2315,183 @@ heading("A broker no longer at its address hands its sessions over and leaves");
 }
 
 // ---------------------------------------------------------------------------
-// An address too long for a socket path is bound truncated and connected to
-// truncated the same way, which is how sessions there still share a broker
-// (brokerAddress). Taking the address by linking a socket bound beside it broke
-// that on Linux: the name beside it is truncated too, nothing exists by its full
-// name to link, and no broker ever took the address — every session privately.
-// macOS binds the full path, so only Linux, as CI runs it, shows it.
-heading("Sessions share a broker even at an address too long for a socket path");
+// An address too long for a socket path was accepted, on the reasoning that
+// bind and connect truncate it alike and so still meet. But the truncated path
+// can lie in an ancestor of the directory socketFault examined: Node 22.13 on
+// macOS, the floor, bound a 152-byte address's socket one directory up, named
+// after the directory it was meant to be in, and Linux's Node 22 truncates the
+// same way. Whoever can write there can be listening first. Node 26 refuses
+// such an address, so no broker ever listened at one (#100). The limit is
+// sun_path's, its NUL included, and not whatever the Node running this allows.
+heading("An address too long for a socket path is refused, and one that fits is bound where it says");
+{
+  const limit = process.platform === "linux" ? 108 : 104;
+  // The longest address accepted, under a name shorter than the staging name a
+  // broker binds beside its address first, so that only the address fits.
+  const name = "b.sock";
+  // Counted in bytes, as sun_path is, and never below one: a home too deep to
+  // build it under fails the check below rather than ending the run.
+  const fitsDir = privateDir(
+    join(home, "f".repeat(Math.max(1, limit - 3 - Buffer.byteLength(home) - name.length))),
+  );
+  const fits = join(fitsDir, name);
+  const over = join(fitsDir, `${name}x`);
+  check(
+    `an address of ${limit - 1} bytes is accepted, and one of ${limit} refused, naming its length`,
+    Buffer.byteLength(fits) === limit - 1 &&
+      lib.socketFault(fits) === null &&
+      /is \d+ bytes, too long for a socket path/.test(lib.socketFault(over) ?? ""),
+    `${Buffer.byteLength(fits)}: ${lib.socketFault(fits) ?? "accepted"}; ` +
+      `${Buffer.byteLength(over)}: ${lib.socketFault(over) ?? "accepted"}`,
+  );
+  // Both at once, so fixing the one said first is not followed by news of the
+  // other, a licence seat a session later.
+  const exposedDeep = join(home, "x".repeat(Math.max(1, 110 - Buffer.byteLength(home))));
+  mkdirSync(exposedDeep, { recursive: true });
+  chmodSync(exposedDeep, 0o777);
+  const both = lib.socketFault(join(exposedDeep, name)) ?? "accepted";
+  check(
+    "an address too long, in a directory others can write to, is refused for both",
+    /too long for a socket path.*; and .*writable by group and others/.test(both),
+    both.slice(-160),
+  );
+
+  const startAt = (address, logs) =>
+    lib.startBroker({
+      address,
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 10_000,
+      reserveSeats: 0,
+      allowInspect: false,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: (message) => logs.push(message),
+    });
+  const fitLogs = [];
+  const fitBroker = await startAt(fits, fitLogs);
+  const reached =
+    fitBroker !== null &&
+    (await new Promise((resolve) => {
+      const probe = connectSocket(fits);
+      probe.once("connect", () => {
+        probe.destroy();
+        resolve(true);
+      });
+      probe.once("error", () => resolve(false));
+    }));
+  const atFull = existsSync(fits) && statSync(fits).isSocket();
+  check(
+    "a broker takes that address, at its full path, though its staging name would not fit beside it",
+    reached && atFull,
+    `${fitBroker ? "listening" : "no broker"}, ${atFull ? "socket at the full path" : "nothing at the full path"}; ` +
+      fitLogs.filter((l) => /bind|link|listening|refusing/.test(l)).join(" | ").slice(0, 200),
+  );
+  await fitBroker?.stop();
+
+  // Deep enough that a truncation falls inside the directory's own name, where
+  // the socket would land in `home` instead.
+  const deepDir = privateDir(join(home, "t".repeat(Math.max(1, 120 - home.length))));
+  const before = socketsIn(home);
+  const deepLogs = [];
+  const deepBroker = await startAt(join(deepDir, name), deepLogs);
+  const added = socketsIn(home).filter((n) => !before.includes(n));
+  check(
+    "a broker asked to listen at an address too long refuses, and binds nothing anywhere",
+    deepBroker === null &&
+      deepLogs.some((l) => /refusing to listen: .* too long for a socket path/.test(l)) &&
+      added.length === 0 &&
+      socketsIn(deepDir).length === 0,
+    `${deepBroker ? "listening" : "no broker"}; new sockets beside its directory: ${added.join(", ") || "none"}; ` +
+      deepLogs.join(" | ").slice(0, 200),
+  );
+  await deepBroker?.stop();
+}
+
+// ---------------------------------------------------------------------------
+// The same refusal from a session's side. One whose runtime directory is too
+// deep for a socket path shared at the truncated address, or, on a Node that
+// refuses one, waited out the connect deadline for a broker that could never
+// listen before going private (#100). It goes private at once, and says why.
+heading("A session whose runtime directory is too deep for a socket path goes private at once");
 {
   wipeCache();
   // Past Linux's 108-byte sun_path for a name in it, not only for the address.
   const runtime = privateDir(join(home, "l".repeat(Math.max(1, 110 - home.length))));
-  const brokerLog = join(home, "long-broker.log");
+  const before = socketsIn(home);
   const shared = {
     WOLFRAM_MCP_SHARE: "1",
     XDG_RUNTIME_DIR: runtime,
     WOLFRAM_MCP_LICENSE_LIMIT: "4",
     WOLFRAM_MCP_IDLE_MINUTES: "5",
-    WOLFRAM_MCP_LOG: brokerLog,
   };
-  // Whether this Node can listen and connect at a path that long at all,
-  // measured rather than assumed: Linux's Node 22 truncates both ends alike
-  // and shares, but CI's Node 26 brought no broker up at such an address,
-  // where main binds exactly as this does.
-  // Beside the runtime directory, not in it, with a name that differs within
-  // the first 107 bytes: Linux truncates there, inside the directory's own
-  // name, so a probe in it left its socket on the very file the broker binds,
-  // where nothing could clear it, and the broker's bind failed EADDRINUSE.
-  const probeDir = privateDir(join(home, "p".repeat(Math.max(1, 110 - home.length))));
-  const probe = join(probeDir, `wm-${"0".repeat(12)}.sock`);
-  const usable = await new Promise((resolve) => {
-    const server = createServer((c) => c.end("ok"));
-    server.once("error", (err) => resolve(`listen: ${err.code ?? err.message}`));
-    server.listen(probe, () => {
-      const client = connectSocket(probe);
-      client.once("data", () => {
-        client.destroy();
-        server.close(() => resolve(true));
-      });
-      client.once("error", (err) => server.close(() => resolve(`connect: ${err.code ?? err.message}`)));
-    });
-  });
+  const sessions = [await connect(shared), await connect(shared)];
+  // When each says it will not share, timed apart from the kernel it starts
+  // and the call it answers, which are the private path's and not this.
+  const refusedAt = sessions.map(() => null);
+  sessions.forEach((s, i) =>
+    s.transport.stderr?.on("data", (chunk) => {
+      if (refusedAt[i] === null && String(chunk).includes("not sharing kernels")) refusedAt[i] = Date.now();
+    }),
+  );
+  const begun = Date.now();
+  const answered = await Promise.all(
+    sessions.map((s, i) =>
+      s.client
+        .callTool({ name: "WolframLanguageEvaluator", arguments: { code: `${i}+${i}` } }, undefined, { timeout: 30_000 })
+        .then((r) => !r.isError && answeredByFake(r), () => false),
+    ),
+  );
+  const refusal = refusedAt.map((at) => (at === null ? null : at - begun));
+  const logs = sessions.map((s) => s.stderr());
+  const said = (pattern) => logs.map((l) => l.split("\n").find((line) => pattern.test(line)) ?? "(nothing)");
+  // Well inside the 5s connect deadline (CONNECT_DEADLINE_MS), which a session
+  // that tried for a broker that could not listen waited out first.
+  check(
+    "both are answered, each by a kernel of its own, having declined to share at once",
+    answered.every(Boolean) &&
+      !logs.some((l) => l.includes("attached to the broker")) &&
+      refusal.every((ms) => ms !== null && ms < 2_000),
+    `answered ${answered}; declined after ${refusal.map((ms) => (ms === null ? "never" : `${ms}ms`)).join(", ")}; ` +
+      said(/broker|sharing/).join(" | ").slice(0, 200),
+  );
+  check(
+    "each says why, and what would let it share",
+    logs.every((l) => /not sharing kernels: .* too long for a socket path.*at a path short enough for a socket/.test(l)),
+    said(/not sharing/).join(" | ").slice(0, 240),
+  );
+  const added = socketsIn(home).filter((n) => !before.includes(n));
+  check(
+    "and no broker was started, or bound anywhere",
+    ownBrokers(runtime).length === 0 &&
+      !logs.some((l) => /starting one/.test(l)) &&
+      added.length === 0 &&
+      socketsIn(runtime).length === 0,
+    `brokers ${ownBrokers(runtime).length}; new sockets beside its directory: ${added.join(", ") || "none"}; ` +
+      `in it: ${socketsIn(runtime).join(", ") || "none"}`,
+  );
+  for (const s of sessions) await s.client.close();
+  signalOwnBrokers("SIGKILL", runtime);
+  await new Promise((r) => setTimeout(r, 300));
+}
+
+// ---------------------------------------------------------------------------
+// Nobody named the temporary directory as the broker's, so one too deep for a
+// socket path is passed over, as one others can write to is, for the cache's
+// run/. Taken anyway, it ended in the refusal above, and every session under a
+// deep but private TMPDIR — a sandbox's, say — spent a seat that the cache's
+// directory would have saved.
+heading("A temporary directory too deep for a socket path is passed over for the cache's");
+{
+  wipeCache();
+  const deepTmp = privateDir(join(home, "d".repeat(Math.max(1, 110 - home.length))));
+  const run = join(home, "cache", "wolfram-mcp-server", "run");
+  const shared = {
+    WOLFRAM_MCP_SHARE: "1",
+    TMPDIR: deepTmp,
+    WOLFRAM_MCP_LICENSE_LIMIT: "4",
+    WOLFRAM_MCP_IDLE_MINUTES: "5",
+  };
   const sessions = [await connect(shared), await connect(shared)];
   const answered = await Promise.all(
     sessions.map((s, i) =>
@@ -2342,29 +2500,20 @@ heading("Sessions share a broker even at an address too long for a socket path")
         .then((r) => !r.isError && answeredByFake(r), () => false),
     ),
   );
-  const attached = sessions.map((s) => s.stderr().includes("attached to the broker"));
-  const detail =
-    `answered ${answered}, brokers ${ownBrokers(runtime).length}, attached ${attached}; ` +
-    (existsSync(brokerLog)
-      ? readFileSync(brokerLog, "utf8").split("\n").filter((l) => /bind|link|listening|attempt|gave up/.test(l)).join(" | ")
-      : sessions[0].stderr().split("\n").filter((l) => /broker|private/.test(l)).slice(-2).join(" | "))
-      .slice(0, 240);
-  const bytes = Buffer.byteLength(probe);
-  if (usable === true) {
-    check(
-      "both are answered, by one broker they are both attached to",
-      answered.every(Boolean) && ownBrokers(runtime).length === 1 && attached.every(Boolean),
-      detail,
-    );
-  } else {
-    check(
-      `this Node cannot use a ${bytes}-byte socket path (${usable}), so both are answered privately`,
-      answered.every(Boolean) && !attached.some(Boolean),
-      detail,
-    );
-  }
+  const logs = sessions.map((s) => s.stderr());
+  check(
+    "both are answered, by one broker in the cache's run/ they are both attached to",
+    answered.every(Boolean) &&
+      ownBrokers(run).length === 1 &&
+      logs.every((l) => l.includes("attached to the broker")),
+    `answered ${answered}, brokers in run/ ${ownBrokers(run).length}; ` +
+      logs
+        .map((l) => l.split("\n").find((line) => /attached|not sharing/.test(line)) ?? "(nothing)")
+        .join(" | ")
+        .slice(0, 240),
+  );
   for (const s of sessions) await s.client.close();
-  signalOwnBrokers("SIGKILL", runtime);
+  signalOwnBrokers("SIGKILL", run);
   await new Promise((r) => setTimeout(r, 300));
 }
 
@@ -2550,14 +2699,22 @@ heading("A broker's staging name never takes another process's socket");
 // unlinked by its own close whatever is at the address by then, so a broker
 // that has lost its address stops without closing it. That server still held
 // the event loop, and a library caller that stopped its broker and carried on
-// never exited. macOS binds an address too long for a socket path in full,
-// which is that case; a Linux that truncates it has no identity there to lose,
-// and closes. A child process, because what is measured is its exit.
+// never exited. A filesystem that refuses a hard link to a socket is that case,
+// so the child refuses every link: the filesystems this runs on allow them. It
+// was reached through an address too long for a socket path, which macOS bound
+// in full, until such addresses were refused (#100). A child process, because
+// what is measured is its exit.
 heading("A broker that stops after losing its address leaves its process free to exit");
 {
-  const dir = privateDir(join(home, "q".repeat(Math.max(1, 110 - home.length))));
+  const dir = privateDir(join(home, "run-lost-address"));
   const address = join(dir, `wm-${"1".repeat(12)}.sock`);
   const script = `
+    const { syncBuiltinESMExports } = await import("node:module");
+    const fs = process.getBuiltinModule("node:fs");
+    fs.linkSync = () => {
+      throw Object.assign(new Error("EPERM: operation not permitted, link"), { code: "EPERM" });
+    };
+    syncBuiltinESMExports();
     const lib = await import(${JSON.stringify(pathToFileURL(join(root, "dist", "lib.js")).href)});
     const { createServer } = await import("node:net");
     const { rmSync, statSync } = await import("node:fs");
@@ -2598,10 +2755,10 @@ heading("A broker that stops after losing its address leaves its process free to
   });
   if (!exited) child.kill("SIGKILL");
   check(
-    "it exits by itself once its broker has stopped",
-    exited,
+    "it exits by itself once its broker, bound at its address where no link was allowed, has stopped",
+    exited && said === "its socket at the full address" && /link attempt 1 failed: EPERM/.test(logged),
     `${said || "(nothing said)"}; ` +
-      logged.split("\n").filter((l) => /listening|bind|address|socket|Error/.test(l)).join(" | ").slice(0, 200),
+      logged.split("\n").filter((l) => /listening|bind|link|address|socket|Error/.test(l)).join(" | ").slice(0, 200),
   );
 }
 

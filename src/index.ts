@@ -86,7 +86,8 @@ Environment
                                      sharing one with other sessions
                                      (default: 1)
   WOLFRAM_MCP_RUNTIME_DIR            directory for the shared broker's socket; it
-                                     must be yours and writable by no one else
+                                     must be yours, writable by no one else, and
+                                     short enough for a socket's path
                                      (default: XDG_RUNTIME_DIR, else a private
                                      directory under the cache)
   WOLFRAM_MCP_MAX_KERNELS            cap on pooled kernels. Default is derived
