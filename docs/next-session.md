@@ -208,10 +208,31 @@ in `docs/design.md`.
   - **Evidence:** run locally with every credential source off — the anonymous reads
     (`ls-remote` with and without a checkout, the fetch by SHA, `commit-types` with no
     `node_modules`) and the guard's three outcomes. No suite check, by the maintainer's call
-    (*Working here*). End to end it is unrun (item 1).
-  - **Filed from its review:** #90 (`ci`, `bug`, unverified). *Re-run all jobs* on a failed
-    release run may fail on an artifact name the run already holds, in `ci.yml`'s `build` and
-    in `publish-<tag>` alike. Measure it before adding `overwrite: true` to both.
+    (*Working here*). Its pre-release path ran end to end for `v0.1.6-pre.1` (2026-10-17);
+    the tag path runs when 0.1.6's release PR merges (item 1).
+  - **Filed from its review:** #90 (`ci`, `bug`). It was measured on #97 and needs no change:
+    *Re-run all jobs* replaces an artifact of the same name rather than failing.
+- **The workflows audit themselves** (#91, `8000ea2`, merged 2026-10-17, fixes #85 and #46).
+  It is `ci:`, so it made no release; its run on `main` passed.
+  - **The `workflows` job:** `ci.yml` runs pinned actionlint 1.7.12 (the author's image, by
+    digest) and zizmor 1.30.1 (its action pinned to a commit, the version set apart),
+    including zizmor's online audits. It is never skipped, and `ci-ok` waits on it. In a
+    release run, zizmor runs only where the tree has `.github/zizmor.yml`, so an older tag
+    isn't held back by its unpinned actions.
+  - **Pins:** every action is pinned to a commit, and Dependabot moves the SHA and its comment
+    together. Two pins are moved by hand: the actionlint image (`docker://`, which Dependabot
+    can't read) and zizmor's version.
+  - **Accepted findings:** `.github/zizmor.yml` ignores `self-repository` in the two files whose
+    `./` are reusable workflow calls. actionlint refuses GitHub's `$/` syntax
+    (rhysd/actionlint#711).
+  - **Settings, turned on after the merge at the maintainer's request (2026-10-17):** *require
+    actions pinned to a full-length commit SHA*, and CodeQL's default setup for `actions` and
+    `javascript-typescript`. CodeQL's first run passed under the pinning policy. Its 7 alerts
+    are filed as #95 (#6 and #7, quadratic regexes) and #96 (#1 to #5, cache poisoning), both
+    to fix (item 1).
+- **The backlog was reviewed against `main`** (2026-10-17). None of the open issues is fixed
+  outright. #16 is mostly superseded by #79, and #40 is three quarters done by #63. Item 9
+  lists the relabels, retitles and splits the review proposed.
 - **The backlog is GitHub issues** (`gh issue list`), labelled by type, `needs design` and area
   (*Working here* below). Other agents file there too, notably the downstream plugin's.
 - **The release pipeline versions itself** from the commit types on `main`. `docs/releasing.md`
@@ -221,116 +242,121 @@ in `docs/design.md`.
 
 ## What to do next, in order
 
-1. **Watch the first release run through #89's split.** No release has used it yet: #89 is
-   `ci:`, so its own merge built nothing. The next `fix:` or `feat:` on `main` makes
-   release-please update its PR, and the same run builds a pre-release through the two jobs.
-   Check four things:
-   - `build` uploads `publish-v<x.y.z>-pre.<n>`;
-   - `publish` downloads it and creates the pre-release with all three assets;
-   - `ci-ok`, `commit-types` and `conventional-title` land on the release PR's commit;
-   - when that PR merges, the tag path (upload to the draft, then publish) runs the same way.
+1. **Finish 0.1.6** (milestone `0.1.6`). Merge, with the maintainer's approval, in this order:
+   - **#99** (fixes #95): linear version and bundle parsing in `src/locate.ts`, and the two new
+     repository settings in `docs/releasing.md`. Two review rounds and a clean Codex review on
+     `5bc2cc8`. Round one tightened the bundle check, which now fails on a mutant that cuts at
+     the last segment.
+   - **#97** (fixes #96 and #87, closes #90 by measurement), which this handoff rides in:
+     `cache-mode: none` on both release workflows, `.github/actionlint.yaml` ignoring the one
+     message actionlint gives for the key, and Dependabot's action updates in one group.
+     Measured on GitHub with two throwaway probes, both since removed:
+     - a caller's `none` reaches a called workflow (its save was refused: "cache write denied:
+       token has no writable scopes");
+     - a called workflow may declare its own `cache-mode`;
+     - `setup-node`'s npm cache under `none` is skipped at both ends, and the job passes;
+     - *Re-run all jobs* replaces an artifact of the same name rather than failing, so #90
+       needs no change.
 
-   If a job fails, fix it forward. The documented retry is dispatching the workflow, not
-   *Re-run all jobs* (#90).
-2. **Finish PR #91** (fixes #85 and #46, opened 2026-10-10; this handoff is its last commit).
-   - **What it does:** a `workflows` job in `ci.yml`, never skipped, that `ci-ok` waits on.
-     It runs actionlint 1.7.12, as the author's image pinned by digest, and zizmor 1.30.1,
-     through `zizmorcore/zizmor-action` pinned to v0.6.4's commit, online audits included.
-     Every action is pinned in #46's format at the commit its major tag named, so nothing
-     that runs changed.
-   - **zizmor's first report** had 32 findings under the default persona, and none remain:
-     22 `unpinned-uses` (pinned), 6 `artipacked` (`persist-credentials: false` on every
-     read-only checkout), and 1 `cache-poisoning` (the release build's `name` job restores
-     no npm cache). The 3 `self-repository` are accepted in `.github/zizmor.yml`, by file:
-     zizmor wants GitHub's new `$/` syntax, which actionlint refuses (rhysd/actionlint#711),
-     and the `./` there are reusable calls, which resolve at the caller's commit anyway.
-   - **Hand-moved pins:** the actionlint image, since Dependabot can't read `docker://`, and
-     zizmor's version, held apart from its action, so new audits come in a PR of their own.
-     The zizmor step runs on every pull request, but in a release run only where the tree
-     has `.github/zizmor.yml`, so an older tag isn't held back by its unpinned actions.
-   - **Evidence:** in a clone with every credential source off, `release-version.mjs` read
-     the tags anonymously, as `name` now must (it named `v0.1.6-pre.1` on a stamped 0.1.6),
-     and `commit-types.mjs` passed a `ci:` range. CI's own `workflows` run pulled both
-     images by digest and passed.
-   - **Review:** three `/code-review high` rounds. Round 1 led to the release-run guard,
-     scoping `self-repository` by file, and two doc fixes. Round 2 found the guard let a PR
-     delete the config to skip the audit, now fixed. Round 3 was clean. Codex was clean on
-     `963c3d9`.
-   - **Left:** the review of this handoff commit, then the maintainer's approval. After the
-     merge, two repository settings are the maintainer's to turn on: CodeQL's default setup
-     (#85's first point) and *require actions pinned to a full-length commit SHA*
-     (`sha_pinning_required`, #46's comment).
-
-   **#40's third point** (overlap the long-call minute with an earlier section) still waits
-   for the next PR that touches the suite's timing. #77 and #79 each added a few seconds of
-   slow sections, so that PR is a good place to look at all of them.
-3. **The one link of #7 left unobserved**: Claude Code running the auto-update pass itself, in
-   an interactive session up to ten minutes after the first message, and saying `Plugin updated:
-   wolfram`. 0.1.4 and now 0.1.5 (2026-10-08) are releases to watch for it: a project following
-   `release` on an older version should update itself in an interactive session. The maintainer
-   runs it, since it needs a signed-in client. Try the route at the 2.1.75 client floor too,
-   unmeasured for it. `docs/releasing.md` has the headless check.
-4. **Dependabot's one open PR, #56** (TypeScript 7), which waits: typescript-eslint 8.71.1
-   accepts TypeScript `<6.1.0` (checked 2026-10-08), and #56's CI is red. It stays open as the
-   reminder rather than closed with an ignore rule, which would hide TypeScript 7 until someone
-   remembered to lift it; Dependabot updates it in place as 7.x moves. It carries the `blocked`
-   label (new, "waiting on a change outside this repository"; 2026-10-08), and a comment saying
-   what unblocks it and what it will need. The signal to revisit is Dependabot's own
-   typescript-eslint PR: read its `typescript` peer range. #56
-   will also need `"types": ["node"]` in `tsconfig.json`, since TypeScript 7 no longer includes
-   `@types/*` by default; with it, 7.0.2
-   compiles `src/` on either typings (measured, noted on #56). `tsconfig.json` ships, so that
-   change is a `fix:`. The maintainer wants Dependabot's PRs assessed, not merged by default;
-   one that merges cleanly but was tested on an older `main` gets `@dependabot rebase` first, so
-   CI tests what will land. Also open: #58 (tag every version the branch skips, and check a
-   tag's commit), #47 to #49 (provenance, immutable releases, CI on the release PR; #46,
-   pinning actions, is in #91), and #90 (an artifact name on *Re-run all jobs*, unverified; above). The
-   rulesets for `release` and `wolfram--v*` are on (ids 24615785 and 24615786).
-
-   A review of CI and the release pipeline filed #81 to #88 (2026-10-08, all `ci`):
-   - **#84, security, fixed by #89** (2026-10-10, above): `release-build.yml`'s `build` job
-     held `contents: write` and left `persist-credentials` at its default. So the token stayed
-     on disk while `npm ci` ran every dependency's install scripts.
-   - **#85, in PR #91** (item 2): check the workflows themselves (CodeQL, zizmor,
-     actionlint).
-   - **#82** (`needs design`): require resolved conversations on `main`, which the review
-     process now does by hand, and decide whether a PR must be up to date to merge.
-   - **#81** (`needs design`): run CI on fewer pushes. #73 alone ran it 10 times.
-   - **#83** (`needs design`): the container scenarios that need no licence, in CI.
-   - **#86** (`needs design`): the real-kernel contract on a schedule, so an AgentTools update
-     that breaks it is noticed.
-   - **#87:** group Dependabot's action updates into one PR.
-   - **#88:** report each failing suite check as an annotation.
-5. **Design the kernel-start cluster before code** (`needs design`, `area: startup` and
-   `area: broker`): #22 (back off by what failed — a start refused for lack of time is not a
-   broken installation), #20 (any failed start in the pool, and a private restart after idling),
-   #19 (a burst for a server that will not start, at a shared broker), #16 (the session guessing
-   how long a broker spends starting a kernel) and #12 (one timer for a start). #22 and #19
-   record what #21 and #18 tried, why each attempt was reverted, and the constraints a design
-   must keep. Write it up in `docs/plugin-plan.md` first — the one plan; the pool shapes every
-   session's latency and licence use. A minimum start timeout (#15's other half) is part of it.
-   #32 turned out to be the broker's bind, not the pool, and is fixed in #73 (0.1.5).
-   #3 (warm kernels serve a paclet's old server after an upgrade) wants the same treatment, with
-   #4 and #6 (`area: paclet`), and so does #69 (a tool whose schema isn't `type: "object"`
-   fails the whole list in the SDK's parse: leave it out with a logged reason, or relay it).
-   #70 (the lists read after a kernel start, `DirectOps` and `announceKernel`, keep the SDK's
-   60 s timeout, which forgets the request) belongs with #12 and #16: a refresh isn't a caller,
-   so who waits on it has to be decided first. #74 (Node 26 refuses an over-long socket path,
-   so a deep runtime directory gets no broker) wants a choice between going private at once, a
-   short path that resolves to the directory, and Linux's abstract namespace. Since #73's
-   fourth round it also holds a security finding: a truncated socket can land in a
-   world-writable ancestor of the checked directory, so it should come early in item 5. #80
-   (how long a queued request may wait, on either path) belongs in the same design: it is
-   the pool's queue and the call ceiling, and #79's second head records one rejected answer.
-   #29 (how to hear of the next advisory against what the bundle inlines) needs a design too;
-   an audit gate tried in #27 was reverted. Smaller,
-   from 0.1.2's reviews: #38 (durations read three ways) is fixed in #71, and #33 and #35
-   shipped in 0.1.4. From #37's review: #40 (tighten #37's long-call check), whose third point is
-   all #63 leaves of it.
-6. **Restructure the agent instructions** (#36, `needs design`): a trimmed `AGENTS.md`, the
+     Clean in Codex's review of `572d86e`. Both PRs touch `docs/releasing.md` in different
+     sections; after the first merges, test the second merged onto `main` before merging it.
+   - **Then release PR #98** (`chore(main): release 0.1.6`). Its merge runs the one check of
+     #89's split still unseen: the tag path, which uploads the assets to the draft and then
+     publishes it. It is also the first release run under `cache-mode: none`: its CI's
+     `setup-node` should log "Cache restore skipped". Then check:
+     - `advance` moves `release` and Latest to `v0.1.6`, tagged `wolfram--v0.1.6`;
+     - the assets, fetched through `releases/latest/download/…`, match `SHA256SUMS.txt`;
+     - CodeQL's next scan of `main` closes alerts #1 to #7. If #1 to #5 stay open, dismiss
+       them, with the setting as the reason.
+   - **Done so far** (2026-10-17): #94 (dev tools) and #93 (SDK 1.32.1) are merged, #93 after
+     `main` combined with it passed the suite locally. `v0.1.6-pre.1` was built by the release
+     run for #93's merge: `build` uploaded `publish-v0.1.6-pre.1`, `publish` created the
+     pre-release with all three assets (checksums verified, the bundle says `0.1.6-pre.1`), and
+     `ci-ok`, `commit-types` and `conventional-title` landed on #98's commit.
+   - **#56** (TypeScript 7) stays `blocked`: typescript-eslint 8.71.2, the newest, still
+     accepts TypeScript `<6.1.0` (checked 2026-10-17). It stays open as the reminder, not
+     closed with an ignore rule, which would hide TypeScript 7 until someone lifted it.
+     Dependabot updates it in place as 7.x moves. When it unblocks, it also needs
+     `"types": ["node"]` in `tsconfig.json`, since TypeScript 7 no longer includes `@types/*`
+     by default. With that, 7.0.2 compiles `src/` (measured, noted on #56). `tsconfig.json`
+     ships, so that change is a `fix:`. The signal to revisit is Dependabot's own
+     typescript-eslint PR: read its `typescript` peer range. The maintainer wants Dependabot's
+     PRs assessed, not merged by default. A PR tested on an older `main` gets
+     `@dependabot rebase` first, or the combination is tested locally before merging.
+2. **Small fixes that stand apart from the kernel-start design** (backlog review, 2026-10-17).
+   - **#74's minimal half, a security fix:** refuse in `socketFault` any address longer than
+     the platform's socket path. Sessions then go private at once, with the reason, rather than
+     binding or connecting through a truncated path, which can land in a world-writable
+     ancestor such as `/tmp`. Sharing at long paths (`chdir`, Linux's abstract namespace) stays
+     a design question.
+   - **#76's drain:** a session choosing again lets a retiring broker answer the call still on
+     it, instead of `stop()` aborting it. Tighten the smoke check that accepts either outcome
+     first. The acknowledge-and-resend form in its comment touches #80 and the protocol.
+   - **#19's small part:** refuse only what would start a kernel (check for an idle kernel of
+     the flavour first), and report the refusal window in the broker's `status`. The burst
+     before the first failure is design work.
+3. **Shorter test runs, and smaller CI items.**
+   - **#40, its third point, a `test:` PR:** overlap the long-call section's 65 s with another
+     section. It needs its own cache and runtime directories, since the section wipes and warms
+     the cache. Look at #77's and #79's slow sections in the same PR.
+   - **#58** (a release-path defect, not yet hit): `advance` plans only the newest release,
+     trusts a tag by name, and tags the re-fetched branch rather than the commit it read.
+     `test/release-branch.mjs` is its test's home.
+   - **#88:** emit `::error` for each failing check across the five `check()` helpers, with
+     `%`/CR/LF escaping.
+   - **#69:** measure whether Claude Code lists a tool with `outputSchema: {type: "array"}`,
+     then drop the tool or relay it in `RelayClient.listTools`. A boolean property schema
+     (`true`) fails the same parse.
+4. **Design the kernel-start cluster before code**, in `docs/plugin-plan.md`, the one plan.
+   The pool shapes every session's latency and licence use.
+   - **Settle #80's contract first:** what a ceiling counts from, on each path, and that
+     expired queued work is dropped. #79's second head records one rejected answer.
+   - **#16** is mostly superseded by #79: a ceiling now pings and keeps a broker that answers.
+     Fold its leftovers into #80: a ceiling of 0 means none, and the broker uses the spawning
+     session's start timeout.
+   - **#12, one deadline owning every start**, including the pool's starts and a private idle
+     restart, which both still run on the raw start timeout. It settles #70: a refresh after a
+     start runs inside the triggering call's turn, so either it becomes its own queued task or
+     it counts as part of the start.
+   - **#22, #20 and #19's burst as one policy table** by failure kind, reusing `Backoff` in the
+     pool. #22 includes a minimum start timeout (#15's other half). #20 includes the private
+     idle restart outside the back-off. #19's constraints are pinned in the suite.
+   - #74's long-path sharing and #76's resend form touch the same protocol, so note them there.
+5. **Design the paclet cluster**: #3 (warm kernels serve an upgraded paclet's old server), #6's
+   MD-4 (the cache key holds no paclet version), and #4 (loading a development paclet). They
+   need one no-kernel reader for where a server resolves from: a paclet version alone misses a
+   dev checkout and a rewritten user server. #20's eviction rule wants the same signal.
+6. **Decisions and settings for the maintainer** (no PR needed for the first two):
+   - **#82's first half:** require resolved conversations on `main`, a setting the review
+     process already follows by hand. Its `strict` half waits on #81.
+   - **A `refs/tags/v*` ruleset** (from #48): today only `release` and `wolfram--v*` are
+     protected (rulesets 24615785 and 24615786).
+   - **Waiting on design:** #81 (fewer CI runs), #49 (ordinary CI on the release PR, which
+     couples with #81), #48 (immutable releases), #47 (provenance: it now belongs in `publish`
+     or a job of its own, since `build` holds no token that can write), #83 (container
+     scenarios in CI, whose images are pinned by tag, not digest) and #86 (the contract on a
+     schedule).
+7. **Backlog tidying the review proposed** (2026-10-17), none applied yet; agree it with the
+   maintainer.
+   - **Retype:** #58 and #76 from `enhancement` to `bug`.
+   - **Retitle:** #40 to its remaining point, with `ci` for `area: broker`. #19 to the burst.
+   - **Close #16 into #80**, carrying its leftovers.
+   - **Labels:** add `area: startup` to #20, and `area: broker` to #60. Mark #74's security
+     finding, since there is no `security` label.
+   - **Split:** #6, as `clear-cache --server` (a `feat:`) apart from MD-4. #60 into its harness
+     pieces (the stub broker's missing `error` handler, a socket preflight, `test:wl` failing on
+     empty output), the LSP shutdown, the hang, and the userbase route.
+8. **The one link of #7 left unobserved**: Claude Code running the auto-update pass itself,
+    in an interactive session up to ten minutes after the first message, and saying `Plugin
+    updated: wolfram`. A project following `release` on an older version should update
+    itself when 0.1.6 ships. The maintainer runs it, since it needs a signed-in client. Try
+    the route at the 2.1.75 client floor too, unmeasured for it. `docs/releasing.md` has the
+    headless check.
+9. **Restructure the agent instructions** (#36, `needs design`): a trimmed `AGENTS.md`, the
    handoff's durable rules moved out of it, and the project rules now in the maintainer's
-   private Claude Code memory moved into the repository. Agree the design first.
-7. **MA's experiments**, each a ledger row (plan §5 MA, *Order of work*): Codex installing a
+   private Claude Code memory moved into the repository. Agree the design first, and how it
+   lands, since it is docs only. The handoff has grown from 12.9 KB at 0.1.2 to about 36 KB.
+10. **MA's experiments**, each a ledger row (plan §5 MA, *Order of work*): Codex installing a
    Claude Code marketplace entry and trusting our hook; Cursor importing an installed Claude Code
    plugin, and whether its `sessionStart` injects context; Copilot honouring `userConfig`; the
    Agent Plugins precedence in VS Code; Codex's filtered environment against our broker.
@@ -341,10 +367,10 @@ in `docs/design.md`.
    aborted on an uncaught stub-broker error. Its work list — a supported
    userbase route, diagnostics that name the failing directory, a socket-free test partition —
    overlaps #4, #12 and #22.
-8. **The restructure** (MA). M1's `archive` install, update and bad-digest rows need only public
+11. **The restructure** (MA). M1's `archive` install, update and bad-digest rows need only public
    releases (`v0.1.0` then `v0.1.1` is an update), as does a Claude run of the plugin installed
    from the archive.
-9. **MD, downstream packages** (plan §5 MD, D33), after the restructure: another project's
+12. **MD, downstream packages** (plan §5 MD, D33), after the restructure: another project's
    plugin built on the release bundle. The startup defect for today's users — a server not
    found held off by the long back-off — is fixed in 0.1.2 (#5); its `test:custom` counterpart
    remains. #59 (filed 2026-10-08 from the downstream WolframVerifier, `needs design`) measured
@@ -353,11 +379,11 @@ in `docs/design.md`.
    `wolfram` plugin and a downstream copy and across one plugin's update. It asks for MD-2's
    second candidate, a broker address keyed on `BROKER_PROTOCOL` rather than the version and
    the bundle's bytes, which needs its own argument that sharing never changes an answer.
-10. **The rest of M1**: the chat checklist and M1b's client version, `SessionStart` and file
+13. **The rest of M1**: the chat checklist and M1b's client version, `SessionStart` and file
    workflow (run by a maintainer); entitlement leases outliving clean kernel exits by about an hour
    (measured, cause not found, matters only to entitlement users); a resumed Claude Desktop
    session after a re-upload may lose the LSP (a new session works).
-11. **M2's design checkpoint**, which starts with the stable-2.2.0 union experiment and needs
+14. **M2's design checkpoint**, which starts with the stable-2.2.0 union experiment and needs
    AgentTools 2.2.7 disabled — agree it with the maintainers first.
 
 ## How releases work
