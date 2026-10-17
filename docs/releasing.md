@@ -302,6 +302,17 @@ just quietly fails to do its job, which is worse.
 - **Private vulnerability reporting.** Settings → Code security → "Private vulnerability
   reporting". `SECURITY.md` sends reporters there; with it off, its *Report a vulnerability*
   button does not exist and the only way left to report is a public issue.
+- **Require actions pinned to a commit.** Settings → Actions → General → "Require actions to
+  be pinned to a full-length commit SHA" (`sha_pinning_required` in
+  `gh api repos/<owner>/<repo>/actions/permissions`). Every `uses:` here is pinned (#46), and
+  CI's `workflows` job fails a PR that adds one that isn't. With this on, GitHub refuses to
+  run an unpinned action anywhere, including in a workflow that job never sees.
+- **Code scanning.** Settings → Code security → Code scanning → CodeQL, default setup, for
+  `actions` and `javascript-typescript` (or `gh api -X PATCH
+  repos/<owner>/<repo>/code-scanning/default-setup -f state=configured`). It scans every push
+  to `main`, every pull request and once a week, with no workflow file. Its `actions` queries cover what
+  zizmor does from another angle, so an alert from either is triaged into an issue. #95 and
+  #96 were its first.
 - **Require the checks on `main`.** In the branch protection rules, require `conventional-title`,
   `commit-types` and `ci-ok` to pass before merge (`ci-ok` covers `public-content` and `workflows`) — `ci-ok` alone, not `test`, `build` or `validate-plugin`.
   Those are skipped on a prose-only PR, and a skipped matrix job reports one `test` check
