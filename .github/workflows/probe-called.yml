@@ -1,0 +1,22 @@
+# Throwaway (#96): tries to save a cache entry, to see whether a caller's
+# cache-mode reaches a called workflow. Removed before merge.
+name: Probe called
+on:
+  workflow_call:
+    inputs:
+      key:
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  save:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "ACTIONS_CACHE_MODE=${ACTIONS_CACHE_MODE:-unset}"
+          echo "$GITHUB_RUN_ID $GITHUB_RUN_ATTEMPT" > probe-cache.txt
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: probe-cache.txt
+          key: ${{ inputs.key }}-${{ github.run_id }}-${{ github.run_attempt }}
