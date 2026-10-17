@@ -2101,6 +2101,28 @@ heading("A session that stops closes a connection still draining, at once");
     events.includes("first stopped") && events.includes("second stopped"),
     events.join(", "),
   );
+
+  // A stop that fails, on either, must not fail the session's: its bounded wait
+  // for a preparation still holding a seat comes after.
+  let gone = false;
+  const failing = (extra = {}) => ({
+    ...fake("failing", extra),
+    usable: () => !gone,
+    async stop() {
+      throw new Error("could not close");
+    },
+  });
+  const unstoppable = [failing({ retire: () => new Promise(() => {}) }), failing()];
+  const stubborn = new lib.DeferredBackend(async () => unstoppable.shift(), () => {}, { startTimeoutMs: 1_000 });
+  await stubborn.listTools();
+  gone = true;
+  await stubborn.listTools();
+  const stopped = await stubborn.stop().then(() => "stopped", (err) => `rejected: ${err.message}`);
+  check(
+    "and a session's stop finishes though neither connection will close",
+    stopped === "stopped",
+    stopped,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -2149,14 +2171,14 @@ heading("A connection left to drain closes once answered, and still gives up a b
     const address = join(privateDir(join(home, dir)), "broker.sock");
     return { server, address, seen, listening: new Promise((resolve) => server.listen(address, resolve)) };
   };
-  const attach = (address) =>
+  const attach = (address, log = () => {}) =>
     lib.BrokerBackend.attachIfRunning({
       address,
       flavour: lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" }),
       spawnCommand: join(home, "definitely-not-a-binary"),
       spawnArgs: [],
       spawnEnv: {},
-      log: () => {},
+      log,
     });
   const outcome = (call) => call.then((r) => r.content?.[0]?.text ?? "(empty)", (err) => `failed: ${err.message}`);
   const evaluate = (backend, code, timeoutMs) =>
@@ -2195,7 +2217,8 @@ heading("A connection left to drain closes once answered, and still gives up a b
 
   const frozen = stubBroker("run-drain-frozen", { freeze: true });
   await frozen.listening;
-  const f = await attach(frozen.address);
+  const frozenLog = [];
+  const f = await attach(frozen.address, (message) => frozenLog.push(message));
   try {
     const started = Date.now();
     // Both out before the broker's word arrives; the short one runs out first.
@@ -2211,6 +2234,13 @@ heading("A connection left to drain closes once answered, and still gives up a b
       "a call on a leaving broker that stops answering fails once the broker is found out, not at its own ceiling",
       /stopped answering/.test(longResult) && took < 12_000,
       `short: ${(await short).slice(0, 60)}; long, after ${(took / 1000).toFixed(1)}s: ${longResult.slice(0, 100)}`,
+    );
+    // Its session chose again long since, so "will choose again" here matched
+    // no choice, read afterwards.
+    check(
+      "and says it was the broker being left that did not answer",
+      frozenLog.some((m) => m === "the leaving broker did not answer; failing what was still on it"),
+      frozenLog.filter((m) => /did not answer/.test(m)).join(" | ") || "(nothing)",
     );
   } finally {
     await f?.stop();

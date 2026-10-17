@@ -219,6 +219,8 @@ export class BrokerBackend implements KernelBackend {
   #onKernelReady: KernelReadyHandler | undefined;
   /** No new work goes out on this connection; the next call chooses again. */
   #closed = false;
+  /** The session has chosen again, and left this connection to drain (`retire`). */
+  #retired = false;
   /** Whether the broker still answers, while that is being asked (`#stillAnswering`). */
   #asking: Promise<boolean> | null = null;
 
@@ -468,7 +470,14 @@ export class BrokerBackend implements KernelBackend {
         // On the socket rather than `#closed`, for the same reason: a draining
         // connection is closed to new work, and its calls are still out.
         if (!alive && this.#socket.writable) {
-          this.#options.log("the broker did not answer; will choose again");
+          // Said apart for a connection already given up on, whose session
+          // chose again long since: read afterwards, a second "will choose
+          // again" matched no choice.
+          this.#options.log(
+            this.#retired
+              ? "the leaving broker did not answer; failing what was still on it"
+              : "the broker did not answer; will choose again",
+          );
           // Every call still on it is lost with it, so each is failed now,
           // with the reason. Only marked closed, the connection waited for the
           // next request to close it, and with none a call with a long ceiling
@@ -572,9 +581,11 @@ export class BrokerBackend implements KernelBackend {
   }
 
   #failAll(err: Error): void {
-    // No guard. Once #closed is set nothing can join either map, so a second
-    // call (the close after stop(), an error and then its close) finds nothing
-    // left to fail. A guard on #closed is what skipped the waiters: a broker's
+    // No guard. Once #closed is set nothing can join #pending, and a ping joins
+    // #liveness only while the socket is writable, which no path through here
+    // leaves it: the close and the error end it, and giving the broker up and
+    // stop() end it right after. So a second call (the close after stop(), an
+    // error and then its close) finds nothing left to fail. A guard on #closed is what skipped the waiters: a broker's
     // `shuttingDown`, a request's timeout and stop() all set it first, and a
     // call in flight then waited out its whole ceiling, or forever with none
     // (#75).
@@ -797,6 +808,7 @@ export class BrokerBackend implements KernelBackend {
    */
   async retire(): Promise<void> {
     this.#closed = true;
+    this.#retired = true;
     // A kernel the leaving broker starts meanwhile, for some call queued there,
     // is not the session's to list any more, and a later page of its tools
     // could not be asked for on a connection closed to new work.

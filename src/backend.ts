@@ -527,13 +527,13 @@ export class DeferredBackend implements KernelBackend {
     // The factory's stages — the broker attach and wait — race this
     // signal, so a stop reaches them before they have produced a backend.
     this.#abort?.abort();
-    await Promise.all([
-      this.#preparing?.stop(),
-      this.#resolved?.stop(),
-      // Caught, as `#retire` catches them: one that fails to stop must not cut
-      // short the bounded wait below for a preparation still holding a seat.
-      ...[...this.#retiring].map((backend) => backend.stop().catch(() => {})),
-    ]);
+    // Each caught, as `#retire` catches its own: one that fails to stop must
+    // not stop the others, or cut short the bounded wait below for a
+    // preparation still holding a seat.
+    const backends = [this.#preparing, this.#resolved, ...this.#retiring].filter(
+      (backend): backend is KernelBackend => backend !== null,
+    );
+    await Promise.all(backends.map((backend) => backend.stop().catch(() => {})));
     // Returns once the preparation has wound down, so a caller that awaits
     // stop() knows nothing it started is still holding a seat — but bounded,
     // because a backend that ignored its stop must not hang the shutdown of
