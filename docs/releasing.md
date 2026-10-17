@@ -309,8 +309,8 @@ just quietly fails to do its job, which is worse.
   run an unpinned action anywhere, including in a workflow that job never sees.
 - **Code scanning.** Settings → Code security → Code scanning → CodeQL, default setup, for
   `actions` and `javascript-typescript` (or `gh api -X PATCH
-  repos/<owner>/<repo>/code-scanning/default-setup -f state=configured`). It runs on its own
-  schedule and on pull requests, and needs no workflow file. Its `actions` queries cover what
+  repos/<owner>/<repo>/code-scanning/default-setup -f state=configured`). It scans every push
+  to `main`, every pull request and once a week, with no workflow file. Its `actions` queries cover what
   zizmor does from another angle, so an alert from either is triaged into an issue. #95 and
   #96 were its first.
 - **Require the checks on `main`.** In the branch protection rules, require `conventional-title`,

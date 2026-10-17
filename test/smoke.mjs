@@ -678,11 +678,15 @@ heading("Unit — reading a version or a bundle out of a path is linear in its l
     "and a path outside a bundle is its own",
     locate.bundleOf("/usr/local/bin/wolfram") === "/usr/local/bin/wolfram",
   );
+  check(
+    "a bundle inside a bundle belongs to the outer one",
+    locate.bundleOf("/Apps/A.app/Contents/MacOS/B.app/Contents/MacOS/x") === "/Apps/A.app",
+  );
   const segments = timed(() => locate.bundleOf(`${"/Contents/MacOS/".repeat(16384)}\n`));
   check(
     "a 256 KiB path of repeated bundle segments is read in linear time",
-    segments.ms < 200,
-    `${segments.ms}ms`,
+    segments.value === "" && segments.ms < 200,
+    `${segments.ms}ms; it took 2.7 s before #95`,
   );
 }
 
