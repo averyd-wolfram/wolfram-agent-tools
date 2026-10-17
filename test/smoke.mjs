@@ -2113,7 +2113,10 @@ heading("A session that stops closes a connection still draining, at once");
     },
   });
   const unstoppable = [failing({ retire: () => new Promise(() => {}) }), failing()];
-  const stubborn = new lib.DeferredBackend(async () => unstoppable.shift(), () => {}, { startTimeoutMs: 1_000 });
+  const stubbornLog = [];
+  const stubborn = new lib.DeferredBackend(async () => unstoppable.shift(), (m) => stubbornLog.push(m), {
+    startTimeoutMs: 1_000,
+  });
   await stubborn.listTools();
   gone = true;
   await stubborn.listTools();
@@ -2123,6 +2126,10 @@ heading("A session that stops closes a connection still draining, at once");
     stopped === "stopped",
     stopped,
   );
+  // Nothing waits on those failures, so the log is the one trace of a kernel,
+  // and its seat, that may still be held.
+  const traced = stubbornLog.filter((m) => /did not stop cleanly: could not close/.test(m)).length;
+  check("and logs each one that would not", traced === 2, `${traced} logged: ${stubbornLog.join(" | ").slice(0, 160)}`);
 }
 
 // ---------------------------------------------------------------------------

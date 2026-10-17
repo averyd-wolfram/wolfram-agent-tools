@@ -585,10 +585,10 @@ export class BrokerBackend implements KernelBackend {
     // #liveness only while the socket is writable, which no path through here
     // leaves it: the close and the error end it, and giving the broker up and
     // stop() end it right after. So a second call (the close after stop(), an
-    // error and then its close) finds nothing left to fail. A guard on #closed is what skipped the waiters: a broker's
-    // `shuttingDown`, a request's timeout and stop() all set it first, and a
-    // call in flight then waited out its whole ceiling, or forever with none
-    // (#75).
+    // error and then its close) finds nothing left to fail. A guard on #closed
+    // is what skipped the waiters: a broker's `shuttingDown`, a request's
+    // timeout and stop() all set it first, and a call in flight then waited out
+    // its whole ceiling, or forever with none (#75).
     // Mark it closed: `usable()` is what tells DeferredBackend to decide again,
     // and without it every later call in the session failed identically.
     this.#closed = true;

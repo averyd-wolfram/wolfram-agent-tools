@@ -453,14 +453,22 @@ export class DeferredBackend implements KernelBackend {
    */
   #retire(backend: KernelBackend): void {
     if (!backend.retire) {
-      void backend.stop().catch(() => {});
+      void backend.stop().catch((err: unknown) => this.#stopFailed(err));
       return;
     }
     this.#retiring.add(backend);
     void backend
       .retire()
-      .catch(() => {})
+      .catch((err: unknown) => this.#stopFailed(err))
       .finally(() => this.#retiring.delete(backend));
+  }
+
+  /**
+   * Said, though nothing waits on it: a backend that would not stop may still
+   * hold a kernel and its seat, and this line is the one trace of that.
+   */
+  #stopFailed(err: unknown): void {
+    this.#log?.(`a backend did not stop cleanly: ${errorText(err)}`);
   }
 
   /**
@@ -533,7 +541,9 @@ export class DeferredBackend implements KernelBackend {
     const backends = [this.#preparing, this.#resolved, ...this.#retiring].filter(
       (backend): backend is KernelBackend => backend !== null,
     );
-    await Promise.all(backends.map((backend) => backend.stop().catch(() => {})));
+    await Promise.all(
+      backends.map((backend) => backend.stop().catch((err: unknown) => this.#stopFailed(err))),
+    );
     // Returns once the preparation has wound down, so a caller that awaits
     // stop() knows nothing it started is still holding a seat — but bounded,
     // because a backend that ignored its stop must not hang the shutdown of
