@@ -49,6 +49,11 @@ export const BROKER_PROTOCOL = 6;
  */
 export const SUN_PATH_BYTES = process.platform === "linux" ? 108 : 104;
 
+/** Whether `path` fits `sun_path` with its NUL: the one place that sum is done. */
+export function fitsSocketPath(path: string): boolean {
+  return Buffer.byteLength(path) < SUN_PATH_BYTES;
+}
+
 export type BrokerOp =
   | "capabilities"
   | "listTools"
@@ -277,7 +282,7 @@ export function brokerAddress(kernelPath: string): string {
   // The digest already covers the uid, so the terse form is no less specific.
   const base = brokerDirectory();
   const descriptive = join(base, `wolfram-mcp-${uid}-${digest}.sock`);
-  if (Buffer.byteLength(descriptive) < SUN_PATH_BYTES) return descriptive;
+  if (fitsSocketPath(descriptive)) return descriptive;
   // Still too long if the directory itself is deep, and then `socketFault`
   // refuses it: no Node uses such an address both safely and everywhere.
   return join(base, terseName(digest));
@@ -376,10 +381,10 @@ export function socketFault(address: string): string | null {
   // Every way it fails, so one fix is not followed by news of the next, at a
   // licence seat a session until it is.
   const faults: string[] = [];
-  const bytes = Buffer.byteLength(address);
-  if (bytes >= SUN_PATH_BYTES) {
+  if (!fitsSocketPath(address)) {
     faults.push(
-      `${address} is ${bytes} bytes, too long for a socket path here (at most ${SUN_PATH_BYTES - 1})`,
+      `${address} is ${Buffer.byteLength(address)} bytes, too long for a socket path here ` +
+        `(at most ${SUN_PATH_BYTES - 1})`,
     );
   }
   const directory = directoryFault(dirname(address));

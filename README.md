@@ -404,8 +404,8 @@ is the operating system's. The socket is created mode 0600, so only you can conn
 the directory holding it has to be yours and unwritable by anyone else — point `XDG_RUNTIME_DIR`
 somewhere world-writable and sharing is declined rather than exposed, because a path anyone can
 write to is a path anyone can bind first. It also has to leave room for the socket's name, since
-a socket's whole path must fit in 104 bytes on macOS and 108 on Linux, and a longer one is
-refused. [`SECURITY.md`](SECURITY.md) is the threat model, including what is deliberately not
+a socket's whole path must be shorter than 104 bytes on macOS and 108 on Linux, and a longer
+one is refused. [`SECURITY.md`](SECURITY.md) is the threat model, including what is deliberately not
 defended.
 
 If that is more than you want: run your client as a user with less access, keep secrets out of

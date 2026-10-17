@@ -24,9 +24,9 @@ import {
   type BrokerOp,
   type BrokerRequest,
   type BrokerResponse,
+  fitsSocketPath,
   socketFault,
   SOCKET_MODE,
-  SUN_PATH_BYTES,
 } from "./broker-protocol.js";
 import { settingValue, type KernelFlavour } from "./flavour.js";
 import { drainPages, listAllTools } from "./kernel.js";
@@ -742,7 +742,7 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
     // A library caller's address may have a shorter name than this, and fit
     // where the staging name beside it does not. Bound, that name would be
     // truncated or refused, leaving nothing to link; bind at the address.
-    if (Buffer.byteLength(staging) >= SUN_PATH_BYTES) return claimDirect();
+    if (!fitsSocketPath(staging)) return claimDirect();
     const server = await listenAt(staging, 1);
     if (!server) return null;
     options.onBound?.(staging);
