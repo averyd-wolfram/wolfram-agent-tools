@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.6](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.5...v0.1.6) (2026-10-17)
+
+
+### Bug Fixes
+
+* **deps:** Bump @modelcontextprotocol/sdk from 1.31.0 to 1.32.1 ([#93](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/93)) ([908243d](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/908243d80ab2e0263d50bd03f2ade721df283ebb))
+* read a version or a bundle out of a path in linear time, not quadratic ([#99](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/99)) ([2d06191](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/2d06191149497a4d3d16c38702e6ac3b71f4bf3f))
+
 ## [0.1.5](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.4...v0.1.5) (2026-10-09)
 
 
