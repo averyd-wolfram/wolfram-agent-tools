@@ -42,6 +42,16 @@ concurrency:
 permissions:
   contents: read
 
+# No job in a release run may restore or save the Actions cache (#96). The
+# run is in main's cache scope, which every later run restores from, pull
+# requests' CI included; a dependency's install script under npm ci, here or
+# in the CI and build this calls, could otherwise leave an entry there.
+# Enforced by the cache service through the job's token, so it binds a run:
+# step as well as a caching action, and it carries into the workflows this
+# calls, which get no more cache access than this grants. Nothing here reads
+# the cache anyway: the release build installs uncached.
+cache-mode: none
+
 jobs:
   release-please:
     # A dispatch on any other branch would have release-please open a release

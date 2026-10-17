@@ -50,6 +50,12 @@ concurrency:
 permissions:
   contents: read
 
+# No cache, read or written (#96): a release build is in main's cache scope,
+# and npm ci runs every dependency's install scripts. Called from the release
+# run, the caller's own `none` already holds; this covers a dispatch and a
+# tag pushed by hand. release-please.yml says why.
+cache-mode: none
+
 env:
   BUILD_REF: ${{ inputs.ref || github.ref_name }}
   BUILD_REF_TYPE: ${{ inputs.ref_type || github.ref_type }}

@@ -59,4 +59,11 @@ updates:
     commit-message:
       prefix: ci
       include: scope
+    # Every action's update in one weekly PR, majors included (#87): an
+    # action's major is usually a runtime move that lands across all of them
+    # at once, as Node 24 did in #45, and each PR is a CI run, a review round
+    # and a merge.
+    groups:
+      actions:
+        patterns: ["*"]
     labels: [dependencies, ci]

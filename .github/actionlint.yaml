@@ -1,0 +1,7 @@
+# actionlint 1.7.12, which CI's workflows job pins, predates GitHub's
+# `cache-mode` key and refuses it as an unknown key (#96). This ignores that
+# one message and nothing else, so a misspelt key still fails.
+paths:
+  .github/workflows/**/*.yml:
+    ignore:
+      - 'unexpected key "cache-mode" for "(workflow|job)" section'
