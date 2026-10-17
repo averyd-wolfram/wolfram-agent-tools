@@ -2344,6 +2344,17 @@ heading("An address too long for a socket path is refused, and one that fits is 
     `${Buffer.byteLength(fits)}: ${lib.socketFault(fits) ?? "accepted"}; ` +
       `${Buffer.byteLength(over)}: ${lib.socketFault(over) ?? "accepted"}`,
   );
+  // Both at once, so fixing the one said first is not followed by news of the
+  // other, a licence seat a session later.
+  const exposedDeep = join(home, "x".repeat(Math.max(1, 110 - Buffer.byteLength(home))));
+  mkdirSync(exposedDeep, { recursive: true });
+  chmodSync(exposedDeep, 0o777);
+  const both = lib.socketFault(join(exposedDeep, name)) ?? "accepted";
+  check(
+    "an address too long, in a directory others can write to, is refused for both",
+    /too long for a socket path.*; and .*writable by group and others/.test(both),
+    both.slice(-160),
+  );
 
   const startAt = (address, logs) =>
     lib.startBroker({
@@ -2415,6 +2426,14 @@ heading("A session whose runtime directory is too deep for a socket path goes pr
     WOLFRAM_MCP_IDLE_MINUTES: "5",
   };
   const sessions = [await connect(shared), await connect(shared)];
+  // When each says it will not share, timed apart from the kernel it starts
+  // and the call it answers, which are the private path's and not this.
+  const refusedAt = sessions.map(() => null);
+  sessions.forEach((s, i) =>
+    s.transport.stderr?.on("data", (chunk) => {
+      if (refusedAt[i] === null && String(chunk).includes("not sharing kernels")) refusedAt[i] = Date.now();
+    }),
+  );
   const begun = Date.now();
   const answered = await Promise.all(
     sessions.map((s, i) =>
@@ -2423,15 +2442,18 @@ heading("A session whose runtime directory is too deep for a socket path goes pr
         .then((r) => !r.isError && answeredByFake(r), () => false),
     ),
   );
-  const elapsed = Date.now() - begun;
+  const refusal = refusedAt.map((at) => (at === null ? null : at - begun));
   const logs = sessions.map((s) => s.stderr());
   const said = (pattern) => logs.map((l) => l.split("\n").find((line) => pattern.test(line)) ?? "(nothing)");
-  // Inside the connect deadline (CONNECT_DEADLINE_MS, 5s), which a session that
-  // tried for a broker that could not listen waited out first.
+  // Well inside the 5s connect deadline (CONNECT_DEADLINE_MS), which a session
+  // that tried for a broker that could not listen waited out first.
   check(
-    "both are answered, each by a kernel of its own, inside the connect deadline",
-    answered.every(Boolean) && !logs.some((l) => l.includes("attached to the broker")) && elapsed < 5_000,
-    `answered ${answered} in ${elapsed}ms; ${said(/broker|sharing/).join(" | ").slice(0, 200)}`,
+    "both are answered, each by a kernel of its own, having declined to share at once",
+    answered.every(Boolean) &&
+      !logs.some((l) => l.includes("attached to the broker")) &&
+      refusal.every((ms) => ms !== null && ms < 2_000),
+    `answered ${answered}; declined after ${refusal.map((ms) => (ms === null ? "never" : `${ms}ms`)).join(", ")}; ` +
+      said(/broker|sharing/).join(" | ").slice(0, 200),
   );
   check(
     "each says why, and what would let it share",

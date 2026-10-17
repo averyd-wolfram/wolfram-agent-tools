@@ -41,17 +41,11 @@ import { PKG } from "./version.js";
 export const BROKER_PROTOCOL = 6;
 
 /**
- * Longest address `brokerAddress` gives the descriptive socket name; past it,
- * the terse `wm-<digest>.sock`. Inside macOS's 104-byte `sun_path` with a
- * little slack. Whether an address fits at all is `SUN_PATH_BYTES`'s question.
- */
-export const MAX_SOCKET_PATH = 100;
-
-/**
  * `sockaddr_un.sun_path`, its terminating NUL included: 108 bytes on Linux, 104
  * on macOS and the BSDs. An address must be shorter, or `socketFault` refuses
- * it. Some Nodes accept more on macOS, which is no reason to rely on it: the
- * floor's does not (see `socketFault`).
+ * it, and `brokerAddress` gives the descriptive name only where it fits. Some
+ * Nodes accept more on macOS, which is no reason to rely on it: the floor's
+ * does not (see `socketFault`).
  */
 export const SUN_PATH_BYTES = process.platform === "linux" ? 108 : 104;
 
@@ -283,7 +277,7 @@ export function brokerAddress(kernelPath: string): string {
   // The digest already covers the uid, so the terse form is no less specific.
   const base = brokerDirectory();
   const descriptive = join(base, `wolfram-mcp-${uid}-${digest}.sock`);
-  if (Buffer.byteLength(descriptive) <= MAX_SOCKET_PATH) return descriptive;
+  if (Buffer.byteLength(descriptive) < SUN_PATH_BYTES) return descriptive;
   // Still too long if the directory itself is deep, and then `socketFault`
   // refuses it: no Node uses such an address both safely and everywhere.
   return join(base, terseName(digest));
@@ -379,11 +373,18 @@ export function socketFault(address: string): string | null {
   // Named pipes are not in the filesystem, so none of this applies. The uid-0
   // collision that *is* Windows's version of this problem is parked: plan.md §9.
   if (process.platform === "win32") return null;
+  // Every way it fails, so one fix is not followed by news of the next, at a
+  // licence seat a session until it is.
+  const faults: string[] = [];
   const bytes = Buffer.byteLength(address);
   if (bytes >= SUN_PATH_BYTES) {
-    return `${address} is ${bytes} bytes, too long for a socket path here (at most ${SUN_PATH_BYTES - 1})`;
+    faults.push(
+      `${address} is ${bytes} bytes, too long for a socket path here (at most ${SUN_PATH_BYTES - 1})`,
+    );
   }
-  return directoryFault(dirname(address));
+  const directory = directoryFault(dirname(address));
+  if (directory) faults.push(directory);
+  return faults.length > 0 ? faults.join("; and ") : null;
 }
 
 /** Why a directory cannot safely hold a socket, or `null` if it can. See `socketFault`. */

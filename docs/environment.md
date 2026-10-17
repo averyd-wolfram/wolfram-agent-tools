@@ -65,8 +65,7 @@ code, so whoever changes a constant changes its row.
 | Constant | Value | Where | What it decides |
 |---|---|---|---|
 | `BROKER_PROTOCOL` | `6` | `broker-protocol.ts` | Part of the socket path, so proxies and brokers that cannot understand each other never meet. |
-| `MAX_SOCKET_PATH` | `100` | `broker-protocol.ts` | Longest address given the descriptive socket name; past it, the terse `wm-<digest>.sock`. |
-| `SUN_PATH_BYTES` | `process.platform === "linux" ? 108 : 104` | `broker-protocol.ts` | `sockaddr_un.sun_path`, its NUL included. An address this long or longer is refused, and the session uses a private kernel: Node truncates one, possibly into a directory above the one checked, or cannot listen at it. |
+| `SUN_PATH_BYTES` | `process.platform === "linux" ? 108 : 104` | `broker-protocol.ts` | `sockaddr_un.sun_path`, its NUL included. An address this long or longer is refused, and the session uses a private kernel: Node truncates one, possibly into a directory above the one checked, or cannot listen at it. The socket's descriptive name is used where it fits, the terse `wm-<digest>.sock` where only that does. |
 | `MAX_UNTERMINATED_BYTES` | `4 * 1024 * 1024` | `transport.ts`, `broker-protocol.ts` | Output held from a kernel, or a frame from a socket peer, before it is dropped unread. Two separate boundaries, deliberately: one trusts a kernel, the other an unauthenticated socket. |
 | `RECENT_LINE_LIMIT` | `15` | `transport.ts` | Lines of non-protocol kernel output kept, to quote back in an error. |
 | `KILL_ESCALATION_MS` | `5_000` | `transport.ts` | Grace between `SIGTERM` and `SIGKILL` for a kernel that will not exit. |
