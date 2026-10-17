@@ -206,6 +206,13 @@ export class BrokerBackend implements KernelBackend {
   >();
   readonly #progress = new Map<number, (progress: Progress) => void>();
   /**
+   * Every request's answer as its caller sees it, until it settles. Not
+   * `#pending`, which a request that ran out or was cancelled leaves while the
+   * broker may still be running it: `retire` waits for callers, not for work
+   * nobody is waiting on.
+   */
+  readonly #outstanding = new Set<Promise<unknown>>();
+  /**
    * Outstanding pings, kept apart from #pending because their contracts differ:
    * #pending treats `ok: false` as a failure, and a ping treats it as an answer.
    */
@@ -616,7 +623,7 @@ export class BrokerBackend implements KernelBackend {
       sent,
       this.#options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS,
     );
-    return new Promise<T>((resolve, reject) => {
+    const answer = new Promise<T>((resolve, reject) => {
       // No timer at all when there is no ceiling, so this waits exactly as long
       // as a private kernel would.
       const timer =
@@ -676,6 +683,12 @@ export class BrokerBackend implements KernelBackend {
         }
       });
     });
+    this.#outstanding.add(answer);
+    // Both ways, so this side's copy of a rejection is handled; the caller
+    // handles its own.
+    const settled = () => this.#outstanding.delete(answer);
+    answer.then(settled, settled);
+    return answer;
   }
 
   onKernelReady(handler: KernelReadyHandler): void {
@@ -766,6 +779,21 @@ export class BrokerBackend implements KernelBackend {
     pid: number;
   }> {
     return this.#request("status", undefined, timeoutMs);
+  }
+
+  /**
+   * See `KernelBackend.retire`. After `shuttingDown` the broker answers what it
+   * was already asked and then goes, but it reads this connection closing as
+   * its proxy vanishing and aborts that work. So the socket is kept until each
+   * request on it has settled — answered, run out, cancelled, or failed by the
+   * broker closing first — and closed only then (#76). It holds the event loop
+   * meanwhile as an attached connection does, since a caller is waiting on it,
+   * and `stop()` still closes it at once.
+   */
+  async retire(): Promise<void> {
+    this.#closed = true;
+    await Promise.allSettled([...this.#outstanding]);
+    await this.stop();
   }
 
   async stop(): Promise<void> {

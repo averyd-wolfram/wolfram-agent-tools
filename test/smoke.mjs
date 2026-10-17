@@ -2015,10 +2015,12 @@ heading("A call in flight when its broker stops fails at once, not at its ceilin
   // The same wait, reached from the session's side. A broker whose address no
   // longer holds its socket (#32) says shuttingDown, and answers what it was
   // already asked before it goes. A session that makes its next request in the
-  // meantime chooses again, and stops the old connection on the way: that close
-  // failed nothing either, so the call still on it waited out its ceiling. It
-  // fails at once now; letting the leaving broker answer it instead is #76,
-  // and passes here too.
+  // meantime chooses again, and stopped the old connection on the way: that
+  // close failed nothing either, so the call still on it waited out its
+  // ceiling (#75). Failed at once instead, it was still lost, since the broker
+  // read the close as its proxy vanishing and aborted the call it was about to
+  // answer (#76). The session now keeps that connection until what is on it
+  // has settled, so the leaving broker answers.
   const told = () => s.stderr().split("the broker is shutting down").length - 1;
   const toldBefore = told();
   const aStarted = Date.now();
@@ -2036,11 +2038,8 @@ heading("A call in flight when its broker stops fails at once, not at its ceilin
   const aTook = Date.now() - aStarted;
   const aText = aResult.content?.[0]?.text ?? "";
   check(
-    "a call still on a broker that is leaving settles when the session chooses again",
-    heard &&
-      pendingAtChoice &&
-      aTook < 8_000 &&
-      (answeredByFake(aResult) || /session closed its connection/.test(aText)),
+    "a call still on a broker that is leaving is answered by it, though the session chose again",
+    heard && pendingAtChoice && aTook < 8_000 && answeredByFake(aResult),
     `${heard ? "told it was shutting down" : "never told"}, ` +
       `${pendingAtChoice ? "the call still out" : "the call already settled"} when it chose again; ` +
       `settled after ${(aTook / 1000).toFixed(1)}s: ${aText.slice(0, 120)}`,
@@ -2054,6 +2053,54 @@ heading("A call in flight when its broker stops fails at once, not at its ceilin
   await s.client.close();
   signalOwnBrokers("SIGKILL", runtime);
   await new Promise((r) => setTimeout(r, 300));
+}
+
+// ---------------------------------------------------------------------------
+// That drain has an end: a session that stops while a connection it gave up on
+// is still finishing a call closes that connection at once, as it does the one
+// it is using. Left to drain, its calls would run on for nobody, and its socket
+// would hold a library caller's process open. On fakes, because what is
+// measured is which backend is stopped, and when.
+heading("A session that stops closes a connection still draining, at once");
+{
+  const events = [];
+  let leaving = false;
+  const fake = (name, extra = {}) => ({
+    kind: "broker",
+    onKernelReady() {},
+    async listTools() {
+      return { tools: [] };
+    },
+    usable: () => !(name === "first" && leaving),
+    async stop() {
+      events.push(`${name} stopped`);
+    },
+    ...extra,
+  });
+  // Draining until stopped: its calls never settle by themselves.
+  const first = fake("first", {
+    retire() {
+      events.push("first draining");
+      return new Promise(() => {});
+    },
+  });
+  const made = [first, fake("second")];
+  const deferred = new lib.DeferredBackend(async () => made.shift(), () => {}, { startTimeoutMs: 1_000 });
+  await deferred.listTools();
+  leaving = true;
+  await deferred.listTools();
+  const atChoice = events.join(", ");
+  check(
+    "choosing again leaves the connection it gave up to drain, rather than closing it",
+    atChoice === "first draining",
+    atChoice || "(nothing)",
+  );
+  await deferred.stop();
+  check(
+    "and stopping the session closes it at once, with the one in use",
+    events.includes("first stopped") && events.includes("second stopped"),
+    events.join(", "),
+  );
 }
 
 // ---------------------------------------------------------------------------
