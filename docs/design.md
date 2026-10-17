@@ -277,7 +277,9 @@ flavour now, so one broker serves them all. Protocol and package version are in 
 proxy never talks to a broker it cannot understand; the kernel binary because a broker runs
 the one it was started with; uid because a socket in a shared temp directory would otherwise
 be reachable across accounts. The digest is short because a macOS `sockaddr_un` path is
-capped at 104 bytes.
+capped at 104 bytes. An address that still does not fit, under a runtime directory too deep,
+is refused, and the session takes a private kernel at once (#100). Node truncates such a path,
+which can put the socket outside the directory checked, or cannot listen at it at all.
 
 **Startup race.** Whoever takes the address wins, and a loser connects instead. A
 leftover socket from a killed broker is indistinguishable from a live one by inspection, so
@@ -286,11 +288,9 @@ unlinked, and only if it is still the file that was judged. A broker binds under
 its own beside the address and then links it into place, which fails if anything is
 there. That way it knows exactly which socket is its own, and its server's close unlinks
 only that name, never a successor's socket at the address. Where a socket cannot be linked
-(an address too long for a socket path, a filesystem without hard links, a named pipe), it
+(a staging name too long for a socket path, a filesystem without hard links, a named pipe), it
 binds at the address as before. Closing such a server unlinks the address, so one that is
-no longer at its address leaves without closing it. A truncated address is the exception:
-the close unlinks the full path, which never existed, and leaves the truncated socket where
-nothing can clear it, so no later broker binds there (#74).
+no longer at its address leaves without closing it.
 
 Removing a dead socket is still a check followed by an unlink, and nothing makes that
 pair atomic. A broker descheduled between the two can unlink a winner's fresh socket and

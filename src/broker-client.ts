@@ -265,12 +265,15 @@ export class BrokerBackend implements KernelBackend {
     // derived from public facts, so it can be squatted, and the frames carry no
     // authentication that would notice. Declining costs a licence seat and is
     // the documented fallback; connecting costs whatever the code we hand our
-    // evaluations to decides to do with them.
+    // evaluations to decides to do with them. An address too long for a socket
+    // path is refused here too, at once: Node 26 cannot listen at one, and a
+    // session that tried waited out the connect deadline first (#100).
     const fault = socketFault(address);
     if (fault) {
       log(
         `not sharing kernels: ${fault}. Using a private kernel instead; ` +
-          `sharing resumes when WOLFRAM_MCP_RUNTIME_DIR (or XDG_RUNTIME_DIR) names a directory only you can write to`,
+          `sharing resumes when WOLFRAM_MCP_RUNTIME_DIR (or XDG_RUNTIME_DIR) names a directory only you can write to, ` +
+          `at a path short enough for a socket`,
       );
       return null;
     }

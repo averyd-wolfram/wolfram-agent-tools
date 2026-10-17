@@ -291,6 +291,15 @@ of this as absent: `proxy.ts` forwards `progressToken`, `kernel.ts` handles both
    refusal line also names the remedy — `XDG_RUNTIME_DIR` pointing at a private directory —
    because the common way to hit it is `TMPDIR` being unset over ssh, where `tmpdir()` falls
    back to `/tmp` and sharing goes quietly missing.
+
+   **Reversed: an over-long address is refused** (#100, 2026-10-17). The degraded case was
+   neither working nor safe. On Node 22.13, the floor, macOS truncates a 152-byte address and
+   binds its socket one directory up, named after the directory it was meant to be in —
+   outside the directory the check examined — and Linux's Node 22 does the same. Node 26
+   refuses such an address (`EINVAL`), so every session waited out the five-second connect
+   deadline for a broker that could never listen. `socketFault` now refuses any address that
+   does not fit `sun_path`, before anything binds or connects, and the session goes private at
+   once, saying why. Sharing at such an address is #74, as design.
 3. **Bound kernels machine-wide.** Done for the case that made it unbounded, and narrowed to
    one that is not. The socket path keyed on the server name, so every name — and a name may
    be the user's own, so the count was user-determined — ran its own broker deriving a full

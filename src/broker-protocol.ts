@@ -46,6 +46,14 @@ export const BROKER_PROTOCOL = 6;
  */
 export const MAX_SOCKET_PATH = 100;
 
+/**
+ * `sockaddr_un.sun_path`, its terminating NUL included: 108 bytes on Linux, 104
+ * on macOS and the BSDs. An address must be shorter, or `socketFault` refuses
+ * it. Some Nodes accept more on macOS, which is no reason to rely on it: the
+ * floor's does not (see `socketFault`).
+ */
+export const SUN_PATH_BYTES = process.platform === "linux" ? 108 : 104;
+
 export type BrokerOp =
   | "capabilities"
   | "listTools"
@@ -253,27 +261,22 @@ export function brokerAddress(kernelPath: string): string {
     return String.raw`\\.\pipe\wolfram-mcp-${digest}`;
   }
 
-  // `sockaddr_un.sun_path` is 104 bytes on macOS, and the kernel *truncates*
-  // rather than refusing: bind() then creates the socket at a shortened path
-  // while every check here still looks at the full one. A killed broker's
-  // leftover file therefore became invisible and unclearable, no later broker
-  // could ever bind, and sharing was dead until someone deleted a file they
-  // could not see. Measured: a 112-byte path under a deep XDG_RUNTIME_DIR.
-  // Shorten the name, never move the directory. The directory is what keeps one
-  // set of sessions from meeting another — an unusable XDG_RUNTIME_DIR is
-  // supposed to end in a private kernel, not in a shared socket somewhere else
-  // — so the only thing that gives here is the filename. The digest already
-  // covers the uid, so the terse form is no less specific.
+  // `sockaddr_un.sun_path` is 104 bytes on macOS, and an address longer than
+  // that was *truncated* rather than refused: bind() created the socket at a
+  // shortened path while every check here still looked at the full one. A
+  // killed broker's leftover file therefore became invisible and unclearable,
+  // no later broker could ever bind, and sharing was dead until someone deleted
+  // a file they could not see. Measured: a 112-byte path under a deep
+  // XDG_RUNTIME_DIR. Shorten the name, never move the directory. The directory
+  // is what keeps one set of sessions from meeting another — an unusable
+  // XDG_RUNTIME_DIR is supposed to end in a private kernel, not in a shared
+  // socket somewhere else — so the only thing that gives here is the filename.
+  // The digest already covers the uid, so the terse form is no less specific.
   const base = brokerDirectory();
   const descriptive = join(base, `wolfram-mcp-${uid}-${digest}.sock`);
   if (Buffer.byteLength(descriptive) <= MAX_SOCKET_PATH) return descriptive;
-  // Still too long if the directory itself is enormous. This used to say bind
-  // would then "fail with a real error at the real path rather than silently
-  // truncating" — measured, it does not: a 152-byte address bound successfully
-  // and created nothing at the path we asked for. Sharing survives it, because
-  // connect truncates to the same bytes; what does not survive is anything that
-  // touches the file by name, which is why the socket is created 0600 through a
-  // umask rather than chmod'ed after the fact.
+  // Still too long if the directory itself is deep, and then `socketFault`
+  // refuses it: no Node uses such an address both safely and everywhere.
   return join(base, `wm-${digest}.sock`);
 }
 
@@ -325,11 +328,18 @@ export function brokerDirectory(): string {
 /**
  * Why this socket path cannot be used safely, or `null` if it can.
  *
- * Length is deliberately *not* one of the ways. An over-long address is
- * truncated by bind — but connect truncates it identically, so the two still
- * meet and sharing works; what breaks is only the filesystem checks that use the
- * untruncated path. Refusing on length would trade a working degraded case for
- * no sharing at all, which is the wrong direction for an optimisation.
+ * An address too long for `sun_path` is the first way. It was accepted, on the
+ * reasoning that bind and connect truncate it alike and so still meet. But the
+ * truncated path can end in an ancestor of the directory checked below, which
+ * that check never sees: on Node 22.13, this package's floor, a 152-byte address
+ * on macOS bound its socket one directory up, named after the directory it was
+ * meant to be in, and Linux's Node 22 truncates the same way. Whoever can write
+ * to that ancestor — `/tmp`, say — can be listening there first. Node 26
+ * refuses such an address outright (`EINVAL`), so no broker ever listened, and
+ * every session waited out the connect deadline before going private (#100).
+ * Refused here, a session goes private at once and says why. Newer Nodes bind
+ * longer addresses in full on macOS, and that is no reason to accept them: the
+ * floor does not, and which Node runs is not the session's choice.
  *
  * The socket's own mode stops other users *connecting* (it is created 0600), but
  * it cannot stop them getting there first. Anyone who can write to the directory
@@ -353,6 +363,10 @@ export function socketFault(address: string): string | null {
   // Named pipes are not in the filesystem, so none of this applies. The uid-0
   // collision that *is* Windows's version of this problem is parked: plan.md §9.
   if (process.platform === "win32") return null;
+  const bytes = Buffer.byteLength(address);
+  if (bytes >= SUN_PATH_BYTES) {
+    return `${address} is ${bytes} bytes, too long for a socket path here (at most ${SUN_PATH_BYTES - 1})`;
+  }
   return directoryFault(dirname(address));
 }
 
