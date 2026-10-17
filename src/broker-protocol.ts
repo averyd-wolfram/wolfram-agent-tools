@@ -216,6 +216,14 @@ function entitlementOptions(): string[] {
   return value === undefined ? [] : [value];
 }
 
+/** Hex characters of the digest that names a broker's socket. */
+const DIGEST_CHARS = 12;
+
+/** The socket's name where the descriptive one does not fit: the shortest used. */
+function terseName(digest: string): string {
+  return `wm-${digest}.sock`;
+}
+
 /**
  * Where the broker for this installation listens.
  *
@@ -255,7 +263,7 @@ export function brokerAddress(kernelPath: string): string {
       ].join("\u0000"),
     )
     .digest("hex")
-    .slice(0, 12);
+    .slice(0, DIGEST_CHARS);
 
   if (process.platform === "win32") {
     // Named pipes live in their own namespace; no filesystem, no length worry.
@@ -278,7 +286,7 @@ export function brokerAddress(kernelPath: string): string {
   if (Buffer.byteLength(descriptive) <= MAX_SOCKET_PATH) return descriptive;
   // Still too long if the directory itself is deep, and then `socketFault`
   // refuses it: no Node uses such an address both safely and everywhere.
-  return join(base, `wm-${digest}.sock`);
+  return join(base, terseName(digest));
 }
 
 /** A directory this process makes for its own use: created private, or left as it is. */
@@ -323,9 +331,11 @@ export function brokerDirectory(): string {
   const runtime = process.env["XDG_RUNTIME_DIR"];
   if (runtime) return runtime;
   const temporary = tmpdir();
-  // The terse name is the shortest `brokerAddress` uses.
-  const fits = Buffer.byteLength(join(temporary, `wm-${"0".repeat(12)}.sock`)) < SUN_PATH_BYTES;
-  if (fits && directoryFault(temporary) === null) return temporary;
+  // Asked of an address there, the shortest `brokerAddress` would make, so the
+  // question is the one a session and a broker will ask of the real address.
+  if (socketFault(join(temporary, terseName("0".repeat(DIGEST_CHARS)))) === null) {
+    return temporary;
+  }
   const own = join(cacheDir(), "run");
   ensurePrivateDirectory(own);
   return own;

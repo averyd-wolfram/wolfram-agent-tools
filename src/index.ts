@@ -87,7 +87,7 @@ Environment
                                      (default: 1)
   WOLFRAM_MCP_RUNTIME_DIR            directory for the shared broker's socket; it
                                      must be yours, writable by no one else, and
-                                     at most 82 bytes long (86 on Linux)
+                                     short enough for a socket's path
                                      (default: XDG_RUNTIME_DIR, else a private
                                      directory under the cache)
   WOLFRAM_MCP_MAX_KERNELS            cap on pooled kernels. Default is derived

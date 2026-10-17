@@ -38,10 +38,12 @@ const nodeFloor = `${floorMajor}.${floorMinor}`;
 // a section whose directory is too deep would share nothing. macOS's per-user
 // tmpdir() is 49 bytes before this run adds any; /tmp is 4, and mkdtemp makes
 // this run's directory private inside it. tmpdir() where /tmp cannot be
-// written, as in a sandbox that allows only its TMPDIR. Deliberately NOT
-// realpath'd, which would lengthen it again: on macOS /tmp is a symlink to
-// /private/tmp. Discovery resolves symlinks, so checks comparing a path
-// discovery returned wrap their expectation in realpathSync instead.
+// written, as in a sandbox that allows only its TMPDIR, so the suite still
+// runs there; under a deep one its sharing sections are refused, and each says
+// why. Deliberately NOT realpath'd, which would lengthen it again: on macOS
+// /tmp is a symlink to /private/tmp. Discovery resolves symlinks, so checks
+// comparing a path discovery returned wrap their expectation in realpathSync
+// instead.
 const home = (() => {
   if (process.platform !== "win32") {
     try {
@@ -2327,7 +2329,11 @@ heading("An address too long for a socket path is refused, and one that fits is 
   // The longest address accepted, under a name shorter than the staging name a
   // broker binds beside its address first, so that only the address fits.
   const name = "b.sock";
-  const fitsDir = privateDir(join(home, "f".repeat(limit - 3 - home.length - name.length)));
+  // Counted in bytes, as sun_path is, and never below one: a home too deep to
+  // build it under fails the check below rather than ending the run.
+  const fitsDir = privateDir(
+    join(home, "f".repeat(Math.max(1, limit - 3 - Buffer.byteLength(home) - name.length))),
+  );
   const fits = join(fitsDir, name);
   const over = join(fitsDir, `${name}x`);
   check(
@@ -2420,9 +2426,11 @@ heading("A session whose runtime directory is too deep for a socket path goes pr
   const elapsed = Date.now() - begun;
   const logs = sessions.map((s) => s.stderr());
   const said = (pattern) => logs.map((l) => l.split("\n").find((line) => pattern.test(line)) ?? "(nothing)");
+  // Inside the connect deadline (CONNECT_DEADLINE_MS, 5s), which a session that
+  // tried for a broker that could not listen waited out first.
   check(
-    "both are answered, each by a kernel of its own",
-    answered.every(Boolean) && !logs.some((l) => l.includes("attached to the broker")),
+    "both are answered, each by a kernel of its own, inside the connect deadline",
+    answered.every(Boolean) && !logs.some((l) => l.includes("attached to the broker")) && elapsed < 5_000,
     `answered ${answered} in ${elapsed}ms; ${said(/broker|sharing/).join(" | ").slice(0, 200)}`,
   );
   check(

@@ -57,15 +57,18 @@ the oldest Node this supports, truncates such a path on macOS, as Node 22 does o
 truncated one can end in a directory above the one just checked, a shared `/tmp` for instance,
 where anyone could be listening first. Node 26 on Linux cannot listen at one at all. Newer Nodes
 bind longer paths in full on macOS, which is not something to rely on, since which Node runs
-is not this server's choice. Only a runtime directory deeper than 82 bytes on macOS, or 86 on
-Linux, gets there, and a temporary directory that deep is passed over for the cache's `run/`.
+is not this server's choice. Only a runtime directory that leaves too little room for the
+socket's name gets there, and a temporary directory that deep is passed over for the cache's
+`run/`.
 
-A refusal can arrive on a machine where you never set `XDG_RUNTIME_DIR`: on macOS with
-`TMPDIR` unset — a plain `ssh` session is the common case — and on Linux without systemd's pam
-session, a container being the common case, `tmpdir()` falls back to `/tmp`, which fails this
-check by design (measured: refused as belonging to root, before its mode is even considered).
-The log line names what is wrong and the remedy: point `XDG_RUNTIME_DIR` at a directory that
-exists, is yours, and is not writable by anyone else, and sharing resumes.
+Where you never set `XDG_RUNTIME_DIR`, on macOS with `TMPDIR` unset (a plain `ssh` session is
+the common case) and on Linux without systemd's pam session (a container being the common case),
+`tmpdir()` falls back to `/tmp`, which fails this check by design (measured: refused as
+belonging to root, before its mode is even considered). The socket then goes in `run/` under
+the cache directory, created private, and so it does when the temporary directory is too deep
+for a socket's path. A directory you named, through `XDG_RUNTIME_DIR` or
+`WOLFRAM_MCP_RUNTIME_DIR`, is never swapped for another: if it fails, the log line names what
+is wrong and the remedy, and sharing resumes once it is fixed.
 
 ## What is deliberately not protected
 
