@@ -52,10 +52,13 @@ seat. Group- and world-*readable* are fine: reading a directory does not let any
 0600 socket.
 
 The socket's whole path must also fit `sun_path`: under 104 bytes on macOS, 108 on Linux. A
-longer one is refused before anything binds or connects, with the reason logged. Node 22
-truncates such a path, and the truncated one can end in a directory above the one just checked,
-a shared `/tmp` for instance, where anyone could be listening first. Node 26 cannot listen at
-one at all. Only a runtime directory deeper than 82 bytes on macOS, or 86 on Linux, gets there.
+longer one is refused before anything binds or connects, with the reason logged. Node 22.13,
+the oldest Node this supports, truncates such a path on macOS, as Node 22 does on Linux, and the
+truncated one can end in a directory above the one just checked, a shared `/tmp` for instance,
+where anyone could be listening first. Node 26 on Linux cannot listen at one at all. Newer Nodes
+bind longer paths in full on macOS, which is not something to rely on, since which Node runs
+is not this server's choice. Only a runtime directory deeper than 82 bytes on macOS, or 86 on
+Linux, gets there, and a temporary directory that deep is passed over for the cache's `run/`.
 
 A refusal can arrive on a machine where you never set `XDG_RUNTIME_DIR`: on macOS with
 `TMPDIR` unset — a plain `ssh` session is the common case — and on Linux without systemd's pam

@@ -33,15 +33,25 @@ const [, floorMajor, floorMinor = "0"] = /(\d+)(?:\.(\d+))?/.exec(
 );
 const nodeFloor = `${floorMajor}.${floorMinor}`;
 
-// Short, because a broker's address is its runtime directory and a name of up
-// to 31 bytes, and one that does not fit sun_path — 104 bytes on macOS — is
-// refused, so a section whose directory is too deep would share nothing. macOS's
-// per-user tmpdir() is 49 bytes before this run adds any; /tmp is 4, and mkdtemp
-// makes this run's directory private inside it. Deliberately NOT realpath'd,
-// which would lengthen it again: on macOS /tmp is a symlink to /private/tmp.
-// Discovery resolves symlinks, so checks comparing a path discovery returned
-// wrap their expectation in realpathSync instead.
-const home = mkdtempSync(join(process.platform === "win32" ? tmpdir() : "/tmp", "wolfram-mcp-"));
+// Short, because a broker's address is its runtime directory and a socket's
+// name, and one that does not fit sun_path — 104 bytes on macOS — is refused, so
+// a section whose directory is too deep would share nothing. macOS's per-user
+// tmpdir() is 49 bytes before this run adds any; /tmp is 4, and mkdtemp makes
+// this run's directory private inside it. tmpdir() where /tmp cannot be
+// written, as in a sandbox that allows only its TMPDIR. Deliberately NOT
+// realpath'd, which would lengthen it again: on macOS /tmp is a symlink to
+// /private/tmp. Discovery resolves symlinks, so checks comparing a path
+// discovery returned wrap their expectation in realpathSync instead.
+const home = (() => {
+  if (process.platform !== "win32") {
+    try {
+      return mkdtempSync("/tmp/wolfram-mcp-");
+    } catch {
+      // Not writable here; the temporary directory this process was given is.
+    }
+  }
+  return mkdtempSync(join(tmpdir(), "wolfram-mcp-"));
+})();
 process.env.XDG_CACHE_HOME = join(home, "cache");
 process.env.LOCALAPPDATA = join(home, "cache");
 
@@ -2432,6 +2442,48 @@ heading("A session whose runtime directory is too deep for a socket path goes pr
   );
   for (const s of sessions) await s.client.close();
   signalOwnBrokers("SIGKILL", runtime);
+  await new Promise((r) => setTimeout(r, 300));
+}
+
+// ---------------------------------------------------------------------------
+// Nobody named the temporary directory as the broker's, so one too deep for a
+// socket path is passed over, as one others can write to is, for the cache's
+// run/. Taken anyway, it ended in the refusal above, and every session under a
+// deep but private TMPDIR — a sandbox's, say — spent a seat that the cache's
+// directory would have saved.
+heading("A temporary directory too deep for a socket path is passed over for the cache's");
+{
+  wipeCache();
+  const deepTmp = privateDir(join(home, "d".repeat(Math.max(1, 110 - home.length))));
+  const run = join(home, "cache", "wolfram-mcp-server", "run");
+  const shared = {
+    WOLFRAM_MCP_SHARE: "1",
+    TMPDIR: deepTmp,
+    WOLFRAM_MCP_LICENSE_LIMIT: "4",
+    WOLFRAM_MCP_IDLE_MINUTES: "5",
+  };
+  const sessions = [await connect(shared), await connect(shared)];
+  const answered = await Promise.all(
+    sessions.map((s, i) =>
+      s.client
+        .callTool({ name: "WolframLanguageEvaluator", arguments: { code: `${i}+${i}` } }, undefined, { timeout: 30_000 })
+        .then((r) => !r.isError && answeredByFake(r), () => false),
+    ),
+  );
+  const logs = sessions.map((s) => s.stderr());
+  check(
+    "both are answered, by one broker in the cache's run/ they are both attached to",
+    answered.every(Boolean) &&
+      ownBrokers(run).length === 1 &&
+      logs.every((l) => l.includes("attached to the broker")),
+    `answered ${answered}, brokers in run/ ${ownBrokers(run).length}; ` +
+      logs
+        .map((l) => l.split("\n").find((line) => /attached|not sharing/.test(line)) ?? "(nothing)")
+        .join(" | ")
+        .slice(0, 240),
+  );
+  for (const s of sessions) await s.client.close();
+  signalOwnBrokers("SIGKILL", run);
   await new Promise((r) => setTimeout(r, 300));
 }
 

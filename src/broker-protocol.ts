@@ -41,8 +41,9 @@ import { PKG } from "./version.js";
 export const BROKER_PROTOCOL = 6;
 
 /**
- * Longest socket path we will use, leaving room inside the 104-byte
- * `sockaddr_un.sun_path` on macOS for the trailing NUL and a little slack.
+ * Longest address `brokerAddress` gives the descriptive socket name; past it,
+ * the terse `wm-<digest>.sock`. Inside macOS's 104-byte `sun_path` with a
+ * little slack. Whether an address fits at all is `SUN_PATH_BYTES`'s question.
  */
 export const MAX_SOCKET_PATH = 100;
 
@@ -298,7 +299,10 @@ function ensurePrivateDirectory(dir: string): void {
  *     unsafe still ends in a private kernel, never in a socket somewhere else:
  *     whoever set it meant this directory.
  *  3. The system's temporary directory, when it passes the same test — macOS's
- *     per-user one does.
+ *     per-user one does — and leaves room for the socket's name in `sun_path`.
+ *     Nobody chose it for this, so one too deep is passed over rather than
+ *     refused: taken, it ended in a private kernel under a sandbox's deep but
+ *     private `TMPDIR`, where the cache's directory would have fitted.
  *  4. `run/` under this package's cache directory, created private.
  *
  * The fourth is new. Without `XDG_RUNTIME_DIR` — a headless Linux host, an ssh
@@ -319,7 +323,9 @@ export function brokerDirectory(): string {
   const runtime = process.env["XDG_RUNTIME_DIR"];
   if (runtime) return runtime;
   const temporary = tmpdir();
-  if (directoryFault(temporary) === null) return temporary;
+  // The terse name is the shortest `brokerAddress` uses.
+  const fits = Buffer.byteLength(join(temporary, `wm-${"0".repeat(12)}.sock`)) < SUN_PATH_BYTES;
+  if (fits && directoryFault(temporary) === null) return temporary;
   const own = join(cacheDir(), "run");
   ensurePrivateDirectory(own);
   return own;

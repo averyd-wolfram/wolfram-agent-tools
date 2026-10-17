@@ -733,11 +733,11 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
     // is 104 bytes on macOS, and this is no longer than the terse
     // `wm-<digest>.sock`. Random, and never cleared first. Named for the
     // process and a count of its claims, it was cleared on the reasoning that
-    // any file of that name was left by a process that died with this pid. That holds inside one PID namespace only:
-    // two containers sharing this directory can each run a broker as the same
-    // pid, and clearing the name removed the other's socket between its bind
-    // and its link. A name already taken fails the bind, and the claim stands
-    // down rather than take it.
+    // any file of that name was left by a process that died with this pid.
+    // That holds inside one PID namespace only: two containers sharing this
+    // directory can each run a broker as the same pid, and clearing the name
+    // removed the other's socket between its bind and its link. A name already
+    // taken fails the bind, and the claim stands down rather than take it.
     const staging = join(dirname(address), `.b${process.pid}-${randomBytes(4).toString("hex")}`);
     // A library caller's address may have a shorter name than this, and fit
     // where the staging name beside it does not. Bound, that name would be
