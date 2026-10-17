@@ -206,10 +206,9 @@ export class BrokerBackend implements KernelBackend {
   >();
   readonly #progress = new Map<number, (progress: Progress) => void>();
   /**
-   * Every request's answer as its caller sees it, until it settles. Not
-   * `#pending`, which a request that ran out or was cancelled leaves while the
-   * broker may still be running it: `retire` waits for callers, not for work
-   * nobody is waiting on.
+   * Every request's answer as its caller sees it, until it settles: what
+   * `retire` waits for. `#pending` tracks the same requests, but holds the
+   * functions that settle them, which nothing can wait on.
    */
   readonly #outstanding = new Set<Promise<unknown>>();
   /**
@@ -420,7 +419,11 @@ export class BrokerBackend implements KernelBackend {
    * working session, since a broker serves the code it started with.
    */
   #answers(): Promise<boolean> {
-    if (this.#closed || !this.#socket.writable) return Promise.resolve(false);
+    // Asked whether or not the connection still takes new work. One told
+    // `shuttingDown`, or left to drain, still has calls on it, and a broker that
+    // stops answering while they are out was never asked, so each waited out
+    // its own ceiling, or for ever with none (#76's review).
+    if (!this.#socket.writable) return Promise.resolve(false);
     const id = this.#nextId++;
     return new Promise<boolean>((resolve) => {
       // Not unref'd, for the reason `delay` is not: in `doctor` there is no
@@ -462,7 +465,9 @@ export class BrokerBackend implements KernelBackend {
       this.#options.log(`${op} ran out; asking the broker whether it is still running`);
       this.#asking = this.#answers().then((alive) => {
         this.#asking = null;
-        if (!alive && !this.#closed) {
+        // On the socket rather than `#closed`, for the same reason: a draining
+        // connection is closed to new work, and its calls are still out.
+        if (!alive && this.#socket.writable) {
           this.#options.log("the broker did not answer; will choose again");
           // Every call still on it is lost with it, so each is failed now,
           // with the reason. Only marked closed, the connection waited for the
@@ -792,6 +797,10 @@ export class BrokerBackend implements KernelBackend {
    */
   async retire(): Promise<void> {
     this.#closed = true;
+    // A kernel the leaving broker starts meanwhile, for some call queued there,
+    // is not the session's to list any more, and a later page of its tools
+    // could not be asked for on a connection closed to new work.
+    this.#onKernelReady = undefined;
     await Promise.allSettled([...this.#outstanding]);
     await this.stop();
   }

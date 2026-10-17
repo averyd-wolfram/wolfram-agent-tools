@@ -151,9 +151,10 @@ export interface KernelBackend {
   /**
    * Stop being used, without abandoning what was already asked: take no new
    * request, and stop once every request outstanding has settled. `stop()`
-   * still ends it at once. `DeferredBackend` retires a backend it gives up on
-   * this way; backends with nothing that could outlive that may leave it
-   * undefined, and are stopped instead.
+   * still ends it at once, and must bear being called again when the retiring
+   * finishes. `DeferredBackend` retires a backend it gives up on this way;
+   * backends with nothing that could outlive that may leave it undefined, and
+   * are stopped instead.
    */
   retire?(): Promise<void>;
   /**
@@ -529,7 +530,9 @@ export class DeferredBackend implements KernelBackend {
     await Promise.all([
       this.#preparing?.stop(),
       this.#resolved?.stop(),
-      ...[...this.#retiring].map((backend) => backend.stop()),
+      // Caught, as `#retire` catches them: one that fails to stop must not cut
+      // short the bounded wait below for a preparation still holding a seat.
+      ...[...this.#retiring].map((backend) => backend.stop().catch(() => {})),
     ]);
     // Returns once the preparation has wound down, so a caller that awaits
     // stop() knows nothing it started is still holding a seat — but bounded,
