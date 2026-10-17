@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.7](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.6...v0.1.7) (2026-10-17)
+
+
+### Bug Fixes
+
+* refuse a broker address too long for a socket path, rather than bind it truncated ([#108](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/108)) ([daae61f](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/daae61fd2fa11c7e1297201e9335e2c314a0f17a))
+
 ## [0.1.6](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.5...v0.1.6) (2026-10-17)
 
 
