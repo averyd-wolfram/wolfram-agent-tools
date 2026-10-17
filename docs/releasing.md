@@ -196,8 +196,10 @@ install script would reach them. The cache service enforces the mode through eac
 token, so it binds a `run:` step as well as a caching action. It also carries into the
 workflows a release run calls: measured on #97, a called workflow's save was refused with
 "cache write denied: token has no writable scopes", while the same save under no mode
-succeeded. actionlint 1.7.12 predates the key, so `.github/actionlint.yaml` ignores that one
-message.
+succeeded. A called workflow may also declare its own, as `release-build.yml` does. `ci.yml`'s
+`setup-node` cache is skipped at both ends inside a release run, not failed: "Cache restore
+skipped: the effective cache-mode 'none' does not permit reads". actionlint 1.7.12 predates
+the key, so `.github/actionlint.yaml` ignores that one message.
 
 Release runs never overlap, and GitHub keeps only the newest pending one, so pushes that land
 while one runs collapse into one run that sees all of them. The version is stamped into the CI
