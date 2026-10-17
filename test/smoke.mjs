@@ -637,6 +637,56 @@ heading("Unit — version pinning");
 }
 
 // ---------------------------------------------------------------------------
+// Discovery reads a version out of a path, and a macOS bundle out of a
+// binary's path. CodeQL found both regexes quadratic (#95): the unanchored
+// digit run was retried from every digit of a run with no dot, and the bundle's
+// `.*$` from every repeated `/Contents/MacOS/` when a newline followed. No real
+// path is long enough to show it — 8 ms at Linux's 4096 bytes — so the parsers
+// are driven directly, at lengths that took seconds before.
+heading("Unit — reading a version or a bundle out of a path is linear in its length");
+{
+  const locate = await import(join(root, "dist", "locate.js"));
+  const timed = (parse) => {
+    const began = performance.now();
+    const value = parse();
+    return { value, ms: Math.round(performance.now() - began) };
+  };
+  const v = locate.versionFromString;
+  check(
+    "a version is read out of an installation's path",
+    v("/usr/local/Wolfram/Wolfram/14.3/Executables/WolframKernel") === "14.3",
+  );
+  check("the first dotted version wins", v("Wolfram 15.0.0 (build 12345)") === "15.0.0");
+  check("a run of digits with no dot is not a version", v("build 12345") === null);
+  const digits = timed(() => v("9".repeat(65536)));
+  check(
+    "a 64 KiB run of digits is read in linear time",
+    digits.value === null && digits.ms < 200,
+    `${digits.ms}ms; it took 2 s before #95`,
+  );
+  check(
+    "a binary's bundle is its path before Contents/MacOS",
+    locate.bundleOf("/Applications/Wolfram.app/Contents/MacOS/WolframKernel") ===
+      "/Applications/Wolfram.app",
+  );
+  check(
+    "or before Contents/Resources",
+    locate.bundleOf("/Applications/Wolfram.app/Contents/Resources/Wolfram") ===
+      "/Applications/Wolfram.app",
+  );
+  check(
+    "and a path outside a bundle is its own",
+    locate.bundleOf("/usr/local/bin/wolfram") === "/usr/local/bin/wolfram",
+  );
+  const segments = timed(() => locate.bundleOf(`${"/Contents/MacOS/".repeat(16384)}\n`));
+  check(
+    "a 256 KiB path of repeated bundle segments is read in linear time",
+    segments.ms < 200,
+    `${segments.ms}ms`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 heading("Unit — licence seat budget");
 {
   // The common licences are 2 and 4 seats. Neither can be reproduced on a

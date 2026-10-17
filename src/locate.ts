@@ -198,8 +198,16 @@ function plistVersion(appPath: string): string | null {
   }
 }
 
-function versionFromString(text: string): string | null {
-  return text.match(/(\d+(?:\.\d+)+)/)?.[1] ?? null;
+/**
+ * The first dotted version in `text`, such as `14.3` in an installation's path.
+ *
+ * A match starts only where no digit precedes it. Unanchored, a run of digits
+ * with no dot was retried from each of its digits, quadratic in its length
+ * (#95). The match is unchanged: wherever one could start inside a run, it
+ * could start at the run's first digit too, and leftmost wins.
+ */
+export function versionFromString(text: string): string | null {
+  return text.match(/(?<!\d)\d+(?:\.\d+)+/)?.[0] ?? null;
 }
 
 function safeReaddir(dir: string): string[] {
@@ -582,10 +590,24 @@ function versionForBinary(bin: string): string | null {
   const known = platformScan().find((c) => c.bin === bin);
   if (known?.version) return known.version;
   if (process.platform === "darwin") {
-    const app = bin.replace(/\/Contents\/(MacOS|Resources)\/.*$/, "");
+    const app = bundleOf(bin);
     if (app !== bin) return plistVersion(app);
   }
   return versionFromString(bin);
+}
+
+/**
+ * The macOS bundle a binary inside one belongs to: its path before the first
+ * `/Contents/MacOS/` or `/Contents/Resources/`, or the path itself when it has
+ * neither. By string search rather than `\/Contents\/(MacOS|Resources)\/.*$`,
+ * which was retried at every repeated segment when a newline followed, since
+ * `.` stops there: quadratic in the path's length (#95).
+ */
+export function bundleOf(bin: string): string {
+  const cuts = ["/Contents/MacOS/", "/Contents/Resources/"]
+    .map((segment) => bin.indexOf(segment))
+    .filter((at) => at >= 0);
+  return cuts.length ? bin.slice(0, Math.min(...cuts)) : bin;
 }
 
 export function locateKernel({
