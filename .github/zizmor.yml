@@ -1,0 +1,15 @@
+# What zizmor reports and this repository accepts, each with its reason
+# (#85). Anything else it reports fails CI's workflows job; zizmor finds this
+# file by itself, here.
+rules:
+  # zizmor asks for GitHub's `$/` self-repository syntax in place of `./`.
+  # actionlint 1.7.12 refuses `$/` (rhysd/actionlint#711), and the only `./`
+  # here are the reusable workflow calls in these two files, which GitHub
+  # already resolves at the caller's own commit, the pin `$/` would add. By
+  # file, not disabled: a step's `./` action, which resolves from the
+  # checkout instead, is what the audit is for, and anywhere else it still
+  # fails.
+  self-repository:
+    ignore:
+      - release-build.yml
+      - release-please.yml

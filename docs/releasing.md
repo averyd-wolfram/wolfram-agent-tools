@@ -81,6 +81,18 @@ on its commit instead (`workflow_call`, with the commit as `ref`).
   pushed branch of a public repository is already public, so the pre-commit hook that
   `npm install` enables (`.githooks/pre-commit`, the same check over what is staged) is what
   keeps a finding out of history.
+- **`workflows`**: the workflows themselves (#85). actionlint checks their syntax, their
+  `${{ }}` expressions and, through shellcheck, every `run:` script, which matters most for
+  the release path: it runs only on `main`, so a broken expression in it would otherwise show
+  only after the merge. zizmor checks what makes a workflow unsafe — a token left in a
+  checkout, an expression spliced into a script (#84), an action not pinned to a commit
+  (#46) — including its online audits, which read GitHub for impostor commits and actions
+  with a known advisory. What it reports and the repository accepts is in
+  `.github/zizmor.yml`, each with its reason. Never skipped, since an advisory published
+  against a pinned action turns it red on a PR that changed no workflow; the fix is the
+  action's Dependabot update. Both are pinned: actionlint as its author's image by digest,
+  which Dependabot can't read, and zizmor by the version its pinned action is given. So a
+  new version of either is a PR made by hand, which triages what the new version reports.
 - **`ci-ok`**: the one check branch protection requires (see the repository settings below).
   It runs last, always, and passes only if every job above passed or was skipped.
 - **`validate-plugin`**: Claude Code's own `claude plugin validate`, on the archive from `build`,
@@ -89,13 +101,16 @@ on its commit instead (`workflow_call`, with the commit as `ref`).
   unchanged PR. That pin is the validator's, not the plugin's supported client floor. It needs
   no login.
 
-All three run locally:
+The suite, the build and the validator run locally, and so do both of `workflows`' tools
+(*Trying it locally*, below):
 
 ```bash
 npm test
 npm run release:artifacts
 mkdir -p /tmp/wolfram-plugin && unzip -o release/wolfram-plugin-*.zip -d /tmp/wolfram-plugin
 npx -y @anthropic-ai/claude-code@2.1.289 plugin validate /tmp/wolfram-plugin
+actionlint
+GH_TOKEN=$(gh auth token) uvx zizmor@<version> .   # the version ci.yml's workflows job gives
 ```
 
 ### `release-please.yml` — the whole release, one run per push to `main`
@@ -288,7 +303,7 @@ just quietly fails to do its job, which is worse.
   reporting". `SECURITY.md` sends reporters there; with it off, its *Report a vulnerability*
   button does not exist and the only way left to report is a public issue.
 - **Require the checks on `main`.** In the branch protection rules, require `conventional-title`,
-  `commit-types` and `ci-ok` to pass before merge (`ci-ok` covers `public-content`) — `ci-ok` alone, not `test`, `build` or `validate-plugin`.
+  `commit-types` and `ci-ok` to pass before merge (`ci-ok` covers `public-content` and `workflows`) — `ci-ok` alone, not `test`, `build` or `validate-plugin`.
   Those are skipped on a prose-only PR, and a skipped matrix job reports one `test` check
   rather than `test (22.13.0)` and `test (node)`, so requiring them would leave such a PR
   waiting forever. `ci-ok` always runs, under that one name, and fails if any of them failed
@@ -388,7 +403,10 @@ those is on the real repo:
   merging the PR makes the draft, the tag, and the published release. Check a build with
   `gh release download <tag> -D <dir>` and `shasum -a 256 -c SHA256SUMS.txt`.
 - **`actionlint`** (`brew install actionlint`) statically checks the workflow syntax and the
-  `${{ }}` expressions without running anything.
+  `${{ }}` expressions without running anything, and **zizmor** (`brew install zizmor`, or
+  `uvx zizmor@<version>` for CI's exact one) checks them for security, as CI's `workflows`
+  job does. Run both from the repository root. zizmor's online audits need a token
+  (`GH_TOKEN=$(gh auth token) zizmor .`), and `--offline` skips them.
 - **`act`** (`brew install act`; v0.2.81 or later, the first to run the Node 24 actions every
   workflow here uses) runs `ci.yml` in a Docker container. It cannot stand in for the
   release path, which depends on GitHub's release API and token, so scope it to CI:
