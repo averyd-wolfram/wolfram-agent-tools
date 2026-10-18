@@ -4939,6 +4939,107 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
 }
 
 // ---------------------------------------------------------------------------
+// The pool's window is about starting kernels, and it was checked before the
+// pool looked for an idle one: so one failed *extra* start of a flavour, for a
+// passing reason such as a server file unreadable mid-rewrite, turned the
+// whole flavour away for its 15s though the kernel it had running could answer.
+// And nothing said so: the broker's status left the window out, so
+// wolfram_status could not report it as it reports a private back-off (#101).
+heading("The pool's refusal window spares a flavour's idle kernel, and is reported");
+{
+  const savedMode = process.env.FAKE_MODE;
+  const pool = new lib.KernelPool({
+    bin: fakeKernel,
+    serverName: "WolframLanguage",
+    idleMs: 60_000,
+    startTimeoutMs: 20_000,
+    clientInfo: { name: "smoke", version: "1.0.0" },
+    log: () => {},
+    reserveSeats: 0,
+    licence: { maxProcesses: 2, type: null },
+    learnFromKernels: false,
+  });
+  const flavour = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" });
+  const evaluate = (client) =>
+    client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } });
+  const outcome = (run) => run.then((r) => r.content?.[0]?.text ?? "(empty)", (e) => `failed: ${e.message}`);
+  // A kernel of the flavour, held busy so the next request has to start another.
+  const hold = () => {
+    let release;
+    const held = new Promise((resolve) => (release = resolve));
+    let running = false;
+    const done = outcome(
+      pool.run(flavour, async (client) => {
+        running = true;
+        await held;
+        return evaluate(client);
+      }),
+    );
+    return { release: () => release(), running: () => running, done };
+  };
+  try {
+    delete process.env.FAKE_MODE;
+    const first = hold();
+    await until(first.running, 10_000);
+    // Its second start fails, as a server that will not resolve fails.
+    process.env.FAKE_MODE = "no-such-server";
+    const extra = await outcome(pool.run(flavour, evaluate));
+    delete process.env.FAKE_MODE;
+    first.release();
+    await first.done;
+    const served = await outcome(pool.run(flavour, evaluate));
+    check(
+      "a request its flavour's idle kernel can serve is served, though a start of that flavour just failed",
+      /^failed/.test(extra) && /^evaluated/.test(served),
+      `extra start: ${extra.replace(/\s+/g, " ").slice(0, 60)}; then: ${served.replace(/\s+/g, " ").slice(0, 80)}`,
+    );
+    // What would start a kernel is still turned away, inside the window.
+    const again = hold();
+    await until(again.running, 10_000);
+    const refused = await outcome(pool.run(flavour, evaluate));
+    again.release();
+    await again.done;
+    check(
+      "and one that would start a kernel is still refused",
+      /none was started for this request/.test(refused),
+      refused.replace(/\s+/g, " ").slice(0, 100),
+    );
+  } finally {
+    await pool.stop();
+    if (savedMode === undefined) delete process.env.FAKE_MODE;
+    else process.env.FAKE_MODE = savedMode;
+  }
+
+  // The same window, as a shared session sees it: refused at once, and
+  // wolfram_status saying why and for how long.
+  wipeCache();
+  const runtime = privateDir(join(home, "run-refusing"));
+  const s = await connect({
+    WOLFRAM_MCP_SHARE: "1",
+    XDG_RUNTIME_DIR: runtime,
+    WOLFRAM_MCP_LICENSE_LIMIT: "4",
+    MCP_SERVER_NAME: "WolframVerifier/Verifier",
+    FAKE_MODE: "no-paclet-extension",
+    WOLFRAM_MCP_KERNEL_ENV: "FAKE_MODE",
+  });
+  const call = () =>
+    s.client
+      .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 })
+      .then((r) => r.content?.[0]?.text ?? "", (e) => e.message);
+  await call(); // the start that fails, and opens the window
+  const status = (await s.client.callTool({ name: "wolfram_status", arguments: {} })).content?.[0]?.text ?? "";
+  const refusing = status.split("\n").find((line) => line.startsWith("refusing")) ?? "(no refusing line)";
+  check(
+    "a shared session's wolfram_status says the broker is refusing its server, and for how long",
+    /tried again in \d/.test(refusing),
+    refusing.slice(0, 160),
+  );
+  await s.client.close();
+  signalOwnBrokers("SIGKILL", runtime);
+  await new Promise((r) => setTimeout(r, 300));
+}
+
+// ---------------------------------------------------------------------------
 heading("Findings the August audit recorded and nothing tracked");
 {
   // S7 — a cursor is one kernel's paging state, and the pool hands out whichever

@@ -320,6 +320,13 @@ export class KernelPool {
       free.busy = true;
       return free;
     }
+    // Turned away here, once an idle kernel of its flavour has been looked for
+    // and before anything below starts one, or retires another session's to
+    // make room: the window is about starts. Checked before that look, it also
+    // refused a request its flavour's running kernel could answer, so one failed
+    // extra start turned the whole flavour away (#101).
+    const refusal = this.#refusal(flavour);
+    if (refusal) throw refusal;
     // A fresh kernel beats stopping one that may still be finishing something.
     if (this.#slots.length < this.#budget) return this.#grow(flavour);
 
@@ -454,14 +461,6 @@ export class KernelPool {
       const head = this.#waiters[0];
       if (!head) return;
       const { flavour } = head;
-      // Turned away before any tier below can grow a kernel or retire another
-      // session's for it: its flavour's server stopped starting while it waited.
-      const refusal = this.#refusal(flavour);
-      if (refusal) {
-        this.#waiters.shift();
-        head.reject(refusal);
-        continue;
-      }
       const mine = (s: Slot) => s.flavour.digest === flavour.digest;
 
       const take = (slot: Slot): void => {
@@ -473,6 +472,15 @@ export class KernelPool {
       const fresh = this.#slots.find((s) => !s.busy && !s.session.abandoned && mine(s));
       if (fresh) {
         take(fresh);
+        continue;
+      }
+      // Turned away before any tier below can grow a kernel or retire another
+      // session's for it, its flavour's server having stopped starting while it
+      // waited; but only then, as in #acquire (#101).
+      const refusal = this.#refusal(flavour);
+      if (refusal) {
+        this.#waiters.shift();
+        head.reject(refusal);
         continue;
       }
       if (this.#slots.length < this.#budget) {
@@ -510,8 +518,6 @@ export class KernelPool {
     fn: (client: Client, request: RequestOptions) => Promise<T>,
     options: RunOptions = {},
   ): Promise<T> {
-    const refusal = this.#refusal(flavour);
-    if (refusal) throw refusal;
     // Cancelled before it reached the pool, so no room is made for it: let in,
     // it could grow a kernel, or retire another session's idle one, for a
     // request `session.run` then dropped.
@@ -546,6 +552,23 @@ export class KernelPool {
       if (now - known.at >= NOT_RESOLVED_BACKOFF_MS) this.#unresolved.delete(key);
     }
     this.#unresolved.set(digest, { at: now, reason: errorText(err) });
+  }
+
+  /**
+   * The flavours this pool is refusing to start a kernel for, how much longer
+   * for, and why. For the broker's `status`: on the shared path the window is
+   * the pool's, and `wolfram_status` could say nothing of why a session's
+   * requests were turned away, where it reports a private session's back-off
+   * (#101).
+   */
+  refusals(): { digest: string; remainingMs: number; reason: string }[] {
+    const now = this.#now();
+    const refusing = [];
+    for (const [digest, known] of this.#unresolved) {
+      const remainingMs = NOT_RESOLVED_BACKOFF_MS - (now - known.at);
+      if (remainingMs > 0) refusing.push({ digest, remainingMs, reason: known.reason });
+    }
+    return refusing;
   }
 
   /** The refusal for a request while its flavour's server recently would not start. */

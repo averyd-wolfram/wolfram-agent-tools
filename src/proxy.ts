@@ -28,7 +28,7 @@ import type { DirectOps, KernelBackend } from "./backend.js";
 import type { BrokerBackend } from "./broker-client.js";
 import { doctorCommand } from "./doctor.js";
 import { budgetText, elapsedText, idleText, waitText } from "./duration.js";
-import type { BackoffState } from "./prepare.js";
+import { NOT_RESOLVED_ADVICE, type BackoffState } from "./prepare.js";
 import { readFacts } from "./inspect.js";
 import { drainPages } from "./kernel.js";
 import { exampleKernelPath, listKernels, locateKernel, type KernelInstall } from "./locate.js";
@@ -226,9 +226,19 @@ async function describeSharing(
     try {
       const status = await broker.status(ceilingMs);
       const others = Math.max(0, status.connections - 1);
-      return (
+      const line =
         `on — broker pid ${status.pid}, ${others} other session(s) attached, ` +
-        `${status.kernels} kernel(s) running, ${status.busy} busy, budget ${status.budget}`
+        `${status.kernels} kernel(s) running, ${status.busy} busy, budget ${status.budget}`;
+      // The shared path's back-off is the pool's, per flavour, and said as the
+      // private one is, on lines of its own: while it stands, this session's
+      // requests that would start a kernel are turned away at once (#101).
+      const refused = status.refusing?.find((r) => r.digest === config.flavour.digest);
+      if (!refused) return line;
+      return (
+        `${line}\n` +
+        `refusing    the broker starts no kernel for this server; tried again in ` +
+        `${waitText(refused.remainingMs)}; ${NOT_RESOLVED_ADVICE}\n` +
+        `            ${refused.reason}`
       );
     } catch (err) {
       return `on — the broker did not answer: ${errorText(err)}`;

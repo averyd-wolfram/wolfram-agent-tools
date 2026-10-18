@@ -441,6 +441,7 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
             licence: pool.licence,
             connections: connections.size,
             pid: process.pid,
+            refusing: pool.refusals(),
           });
         default:
           return { id: request.id, ok: false, error: `unknown broker op: ${String(request.op)}` };
