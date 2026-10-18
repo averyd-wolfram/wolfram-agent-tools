@@ -54,6 +54,8 @@
  * FAKE_INIT_DELAY_MS  delay before answering initialize: a slow handshake, the
  *                     last stage of a preparation, that does eventually answer
  * FAKE_EMPTY_TOOLS    report zero tools, successfully
+ * FAKE_EXTRA_TOOLS  JSON array: tools to list as given, after the others, for a
+ *                     list holding a tool this server cannot relay
  * FAKE_OUTPUT_SCHEMA  JSON: serve one more tool, Structured, declaring this as its
  *                     outputSchema and answering with structuredContent. No server
  *                     AgentTools 2.2.7 serves can: it builds a tool's entry from
@@ -311,6 +313,8 @@ function run() {
       outputSchema: JSON.parse(process.env.FAKE_OUTPUT_SCHEMA),
     });
   }
+
+  if (process.env.FAKE_EXTRA_TOOLS) tools.push(...JSON.parse(process.env.FAKE_EXTRA_TOOLS));
 
   /** An error response, carrying FAKE_ERROR_DATA as its `data` when set. */
   const fail = (msg, code, message) =>

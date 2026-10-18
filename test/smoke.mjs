@@ -3929,6 +3929,50 @@ heading("A tool whose output schema cannot be compiled costs only itself, on eit
     await s.client.close();
     await new Promise((r) => setTimeout(r, 300));
   }
+
+  // What cannot be relayed is left out, one tool at a time, saying why: an
+  // entry with no name, which this server cannot address, and an input schema
+  // that is not an object, which a model cannot be given and which no client
+  // was measured taking. Either failed the whole list, the other tools with it.
+  const unrelayable = [
+    { name: "BadInput", description: "Takes a string.", inputSchema: { type: "string" } },
+    { description: "Has no name.", inputSchema: { type: "object" } },
+  ];
+  for (const sharing of ["0", "1"]) {
+    const path = sharing === "1" ? "shared" : "private";
+    wipeCache();
+    const runtime = join(home, `run-unrelayable-${sharing}`);
+    privateDir(runtime);
+    const s = await connect({
+      WOLFRAM_MCP_SHARE: sharing,
+      XDG_RUNTIME_DIR: runtime,
+      WOLFRAM_MCP_LICENSE_LIMIT: "4",
+      FAKE_EXTRA_TOOLS: JSON.stringify(unrelayable),
+    });
+    const listed = await s.client
+      .request({ method: "tools/list" }, ResultSchema, { timeout: 20_000 })
+      .then(
+        (r) => ({ tools: upstreamTools(r.tools ?? []) }),
+        (err) => ({ error: err.message }),
+      );
+    const names = listed.tools?.map((t) => t.name).join(", ");
+    check(
+      `a tool that cannot be relayed is left out, and the rest are listed (${path})`,
+      names === "WolframLanguageEvaluator",
+      listed.error?.slice(0, 120) ?? names,
+    );
+    if (sharing === "0") {
+      const said = s.stderr();
+      check(
+        "and the session says which it left out, and why",
+        /left out \(BadInput\): its inputSchema is not an object schema/.test(said) &&
+          /left out \(number 3 of 3\): it has no name/.test(said),
+        said.split("\n").filter((l) => /left out/.test(l)).join(" | ").slice(0, 200) || "(nothing said)",
+      );
+    }
+    await s.client.close();
+    await new Promise((r) => setTimeout(r, 300));
+  }
 }
 
 // ---------------------------------------------------------------------------

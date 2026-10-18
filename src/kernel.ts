@@ -13,8 +13,8 @@ import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.j
 import {
   ErrorCode,
   McpError,
+  PaginatedResultSchema,
   PromptListChangedNotificationSchema,
-  ResultSchema,
   ToolListChangedNotificationSchema,
   type ListToolsRequest,
   type ListToolsResult,
@@ -147,36 +147,72 @@ function requestOptions(signal: AbortSignal | undefined): RequestOptions {
  * Nor does it hold the list to the SDK's `ListToolsResultSchema`, which
  * requires each tool's `inputSchema`, and any `outputSchema`, to be an
  * object: one tool that was not failed the whole parse, and every tool of the
- * server with it, by the same route (#69). The client judges each tool for
- * itself, and measured, Claude Code 2.1.302 lists a tool whose output schema is
- * an array. So the list is taken as the kernel sent it, held only to being a
- * list of named tools, which is what this server reads of it.
+ * server with it, by the same route (#69). Each tool is judged on its own
+ * instead, and one this server cannot relay is left out, saying why, while
+ * the rest are listed. An `outputSchema` that is not an object is relayed as
+ * the kernel sent it: measured, Claude Code 2.1.302 lists such a tool. An
+ * `inputSchema` that is not an object schema is not: the Messages API takes
+ * a tool's input schema only as an object, so a client that sent one on could
+ * fail every model request in its session, which was never measured.
  */
 class RelayClient extends Client {
+  readonly #log: (message: string) => void;
+
+  constructor(
+    info: ConstructorParameters<typeof Client>[0],
+    options: ConstructorParameters<typeof Client>[1],
+    log: (message: string) => void,
+  ) {
+    super(info, options);
+    this.#log = log;
+  }
+
   override async listTools(
     params?: ListToolsRequest["params"],
     options?: RequestOptions,
   ): Promise<ListToolsResult> {
-    const result = await this.request({ method: "tools/list", params }, ResultSchema, options);
-    const { tools, nextCursor } = result;
-    const named = (tool: unknown) =>
-      typeof tool === "object" &&
-      tool !== null &&
-      typeof (tool as { name?: unknown }).name === "string";
-    if (!Array.isArray(tools) || !tools.every(named)) {
+    // Paginated, so the cursor is held to a string as every other list's is.
+    const result = await this.request(
+      { method: "tools/list", params },
+      PaginatedResultSchema,
+      options,
+    );
+    const tools: unknown = (result as { tools?: unknown }).tools;
+    if (!Array.isArray(tools)) {
       throw new McpError(
         ErrorCode.InternalError,
-        "the kernel's tools/list result is not a list of named tools",
+        `the kernel's tools/list result holds no list of tools: ${JSON.stringify(tools)?.slice(0, 120)}`,
       );
     }
-    if (nextCursor !== undefined && typeof nextCursor !== "string") {
-      throw new McpError(
-        ErrorCode.InternalError,
-        "the kernel's tools/list result has a cursor that is not a string",
-      );
-    }
-    return result as ListToolsResult;
+    const listed: unknown[] = tools;
+    const kept = listed.filter((tool, index) => {
+      const why = unrelayable(tool);
+      if (why === null) return true;
+      const name = (tool as { name?: unknown } | null)?.name;
+      const which = typeof name === "string" ? name : `number ${index + 1} of ${listed.length}`;
+      this.#log(`a tool the kernel listed is left out (${which}): ${why}`);
+      return false;
+    });
+    // Each kept one has the name and input schema this server reads; the rest
+    // of it is the kernel's, relayed for the client to judge.
+    return { ...result, tools: kept as ListToolsResult["tools"] };
   }
+}
+
+/**
+ * Why a tool the kernel listed cannot be relayed, or `null` if it can: what
+ * this server reads of it, a name, and an input schema a model can be given.
+ */
+function unrelayable(tool: unknown): string | null {
+  if (typeof tool !== "object" || tool === null)
+    return `it is not an object: ${JSON.stringify(tool)}`;
+  const { name, inputSchema } = tool as { name?: unknown; inputSchema?: unknown };
+  if (typeof name !== "string") return "it has no name";
+  const type = (inputSchema as { type?: unknown } | null | undefined)?.type;
+  if (typeof inputSchema !== "object" || inputSchema === null || type !== "object") {
+    return `its inputSchema is not an object schema: ${JSON.stringify(inputSchema)?.slice(0, 120)}`;
+  }
+  return null;
 }
 
 /**
@@ -491,7 +527,7 @@ export class KernelSession {
       onFatal: (error) => reportFatal(error),
     });
 
-    const client = new RelayClient(clientInfo, { capabilities: {} });
+    const client = new RelayClient(clientInfo, { capabilities: {} }, log);
     this.#handshaking = { transport, abort: (error) => reportFatal(error) };
     client.onerror = (err) => log(`upstream error: ${errorText(err)}`);
     client.onclose = () => {
