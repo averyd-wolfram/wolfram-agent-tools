@@ -140,6 +140,13 @@ function clampBudget(value: number): number {
   return Math.max(1, Math.min(Math.floor(value), HARD_KERNEL_CAP));
 }
 
+/** A flavour's refusal window, while it stands (`KernelPool.#window`). */
+interface Window {
+  ageMs: number;
+  remainingMs: number;
+  reason: string;
+}
+
 export class KernelPool {
   readonly #options: KernelPoolOptions;
   readonly #slots: Slot[] = [];
@@ -289,6 +296,23 @@ export class KernelPool {
   }
 
   /**
+   * A slot that can take a request of this flavour now. While the flavour's
+   * server would not start (`refusing`), only one whose kernel is running: the
+   * window is about starts, and a slot whose kernel stopped for idleness starts
+   * one when used. Checked before the idle kernel was looked for at all, the
+   * window refused what a running kernel could answer, so one failed extra
+   * start turned the whole flavour away (#101).
+   */
+  #servable(slot: Slot, flavour: KernelFlavour, refusing: boolean): boolean {
+    return (
+      !slot.busy &&
+      !slot.session.abandoned &&
+      slot.flavour.digest === flavour.digest &&
+      (!refusing || slot.session.running)
+    );
+  }
+
+  /**
    * An idle kernel, preferring one with nothing outstanding.
    *
    * A kernel holding an abandoned call is idle only in the sense that nobody is
@@ -313,41 +337,34 @@ export class KernelPool {
    * session from a kernel that is not its own kind.
    */
   async #acquire(flavour: KernelFlavour, signal?: AbortSignal): Promise<Slot> {
-    const mine = (s: Slot) => s.flavour.digest === flavour.digest;
-    // While its flavour's server would not start, nothing may start a kernel
-    // for it: only a kernel already running serves. Checked before any of this,
-    // the window also refused a request such a kernel could answer, so one
-    // failed extra start turned the whole flavour away (#101). And a slot
-    // whose kernel stopped for idleness is not running: used, it starts one.
-    const refusal = this.#refusal(flavour);
-    const ready = (s: Slot) => refusal === null || s.session.running;
-
-    const free = this.#slots.find((s) => !s.busy && !s.session.abandoned && mine(s) && ready(s));
+    const window = this.#window(flavour.digest);
+    const free = this.#slots.find((s) => this.#servable(s, flavour, window !== null));
     if (free) {
       free.busy = true;
       return free;
     }
-    if (refusal) {
-      // Waiting for a running kernel of its own starts nothing, so it waits.
-      // With none, every tier below would start one.
-      if (!this.#slots.some((s) => mine(s) && s.session.running)) throw refusal;
-    } else {
-      // A fresh kernel beats stopping one that may still be finishing something.
-      if (this.#slots.length < this.#budget) return this.#grow(flavour);
+    // Turned away before anything below starts a kernel, or retires another
+    // session's to make room. Waiting instead for a running kernel of its own
+    // was tried in #113 and reverted (#115): queued in the window, a request
+    // could wait out its ceiling behind an abandoned call, or hold up every
+    // other flavour's waiter behind it.
+    if (window) throw this.#refusal(window);
 
-      // Nothing of ours is free and the budget is spent, so a seat has to come
-      // from somewhere. An idle kernel of another flavour is the cheapest loss.
-      if (this.#swapOut(flavour)) return this.#grow(flavour);
+    // A fresh kernel beats stopping one that may still be finishing something.
+    if (this.#slots.length < this.#budget) return this.#grow(flavour);
 
-      const spent = this.#idle(flavour);
-      if (spent) {
-        this.#options.log(
-          `budget reached; reusing a kernel that holds an abandoned call, which ` +
-            `stops it — no other kernel can serve this request`,
-        );
-        spent.busy = true;
-        return spent;
-      }
+    // Nothing of ours is free and the budget is spent, so a seat has to come
+    // from somewhere. An idle kernel of another flavour is the cheapest loss.
+    if (this.#swapOut(flavour)) return this.#grow(flavour);
+
+    const spent = this.#idle(flavour);
+    if (spent) {
+      this.#options.log(
+        `budget reached; reusing a kernel that holds an abandoned call, which ` +
+          `stops it — no other kernel can serve this request`,
+      );
+      spent.busy = true;
+      return spent;
     }
 
     this.#options.log(
@@ -467,7 +484,6 @@ export class KernelPool {
       const head = this.#waiters[0];
       if (!head) return;
       const { flavour } = head;
-      const mine = (s: Slot) => s.flavour.digest === flavour.digest;
 
       const take = (slot: Slot): void => {
         this.#waiters.shift();
@@ -475,23 +491,18 @@ export class KernelPool {
         head.resolve(slot);
       };
 
-      // As in #acquire: inside the window only a running kernel serves, a
-      // waiter keeps waiting while one of its own runs, and with none it is
-      // turned away before any tier below can start a kernel or retire
-      // another session's for it (#101).
-      const refusal = this.#refusal(flavour);
-      const fresh = this.#slots.find(
-        (s) =>
-          !s.busy && !s.session.abandoned && mine(s) && (refusal === null || s.session.running),
-      );
+      // As in #acquire: inside the window only a running kernel serves, and
+      // with none free the waiter is turned away before any tier below can
+      // start a kernel or retire another session's for it (#101).
+      const window = this.#window(flavour.digest);
+      const fresh = this.#slots.find((s) => this.#servable(s, flavour, window !== null));
       if (fresh) {
         take(fresh);
         continue;
       }
-      if (refusal) {
-        if (this.#slots.some((s) => mine(s) && s.session.running)) return;
+      if (window) {
         this.#waiters.shift();
-        head.reject(refusal);
+        head.reject(this.#refusal(window));
         continue;
       }
       if (this.#slots.length < this.#budget) {
@@ -567,7 +578,7 @@ export class KernelPool {
    * it runs, and the kernel's words. The one place that is worked out, so the
    * refusal and what `status` reports of it cannot disagree at the edge.
    */
-  #window(digest: string): { ageMs: number; remainingMs: number; reason: string } | null {
+  #window(digest: string): Window | null {
     const known = this.#unresolved.get(digest);
     if (!known) return null;
     const ageMs = this.#now() - known.at;
@@ -590,10 +601,12 @@ export class KernelPool {
     return window && { remainingMs: window.remainingMs, reason: window.reason };
   }
 
-  /** The refusal for a request while its flavour's server recently would not start. */
-  #refusal(flavour: KernelFlavour): ServerNotResolved | null {
-    const window = this.#window(flavour.digest);
-    if (!window) return null;
+  /**
+   * The refusal for a request while its flavour's server recently would not
+   * start. Built only where it is thrown: a request inside the window that a
+   * running kernel serves needs no error.
+   */
+  #refusal(window: Window): ServerNotResolved {
     return new ServerNotResolved(
       `a kernel for this server could not start it ${elapsedText(window.ageMs)} ago, so ` +
         `none was started for this request; it is tried again in ` +

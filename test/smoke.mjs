@@ -4996,19 +4996,16 @@ heading("The pool's refusal window spares a flavour's idle kernel, and is report
       /^failed/.test(extra) && /^evaluated/.test(served),
       `extra start: ${extra.replace(/\s+/g, " ").slice(0, 60)}; then: ${served.replace(/\s+/g, " ").slice(0, 80)}`,
     );
-    // One that would start a kernel waits instead for its flavour's running
-    // one, which starts nothing, and is served when it frees.
+    // What would start a kernel is still turned away, inside the window.
     const again = hold();
     await until(again.running, 10_000);
-    const waiting = outcome(pool.run(flavour, evaluate));
-    await new Promise((r) => setTimeout(r, 200));
+    const refused = await outcome(pool.run(flavour, evaluate));
     again.release();
     await again.done;
-    const waited = await waiting;
     check(
-      "and one that would start a kernel waits for its flavour's running one instead",
-      /^evaluated/.test(waited),
-      waited.replace(/\s+/g, " ").slice(0, 100),
+      "and one that would start a kernel is still refused",
+      /none was started for this request/.test(refused),
+      refused.replace(/\s+/g, " ").slice(0, 100),
     );
   } finally {
     await pool.stop();
@@ -5071,6 +5068,19 @@ heading("The pool's refusal window spares a flavour's idle kernel, and is report
     "a shared session's wolfram_status says the broker is refusing its server, and for how long",
     /tried again in \d/.test(refusing),
     refusing.slice(0, 160),
+  );
+  // The kernel's words come with its last output, several lines of it, which
+  // ran flush left through the report from its second line on.
+  const report = status.split("\n");
+  const from = report.findIndex((line) => line.startsWith("refusing"));
+  // Up to the next label, which is always the tool list's: any line between
+  // that does not start under the label is the spill.
+  const to = report.findIndex((line, i) => i > from && line.startsWith("tool list"));
+  const spilled = report.slice(from + 1, to).filter((line) => line && !line.startsWith("            "));
+  check(
+    "and the kernel's words beneath it stay under the label",
+    from !== -1 && to > from + 1 && spilled.length === 0,
+    spilled.slice(0, 2).join(" | ").slice(0, 120) || `${to - from - 1} line(s) beneath`,
   );
   // Asked by a session of another flavour, the same broker says nothing of it:
   // the failure carries that server's error, paths and all.

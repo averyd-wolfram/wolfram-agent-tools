@@ -238,7 +238,12 @@ async function describeSharing(
         `${line}\n` +
         `refusing    the broker starts no kernel for this server; tried again in ` +
         `${waitText(refused.remainingMs)}; ${NOT_RESOLVED_ADVICE}\n` +
-        `            ${refused.reason}`
+        // Every line under the label: the reason carries the kernel's last
+        // output, which otherwise ran flush left through the report.
+        refused.reason
+          .split("\n")
+          .map((line) => (line ? `            ${line}` : line))
+          .join("\n")
       );
     } catch (err) {
       return `on — the broker did not answer: ${errorText(err)}`;
