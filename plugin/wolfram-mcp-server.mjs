@@ -6997,7 +6997,7 @@ var init_version = __esm({
   "dist/version.js"() {
     "use strict";
     here = dirname(fileURLToPath(import.meta.url));
-    PKG = true ? JSON.parse('{"name":"wolfram-mcp-server","version":"0.1.6","description":"MCP server that drives a locally installed Wolfram kernel, with lazy start and idle shutdown."}') : JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8"));
+    PKG = true ? JSON.parse('{"name":"wolfram-mcp-server","version":"0.1.7","description":"MCP server that drives a locally installed Wolfram kernel, with lazy start and idle shutdown."}') : JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8"));
   }
 });
 
@@ -7133,11 +7133,12 @@ var broker_protocol_exports = {};
 __export(broker_protocol_exports, {
   BROKER_PROTOCOL: () => BROKER_PROTOCOL,
   FrameReader: () => FrameReader,
-  MAX_SOCKET_PATH: () => MAX_SOCKET_PATH,
   SOCKET_MODE: () => SOCKET_MODE,
+  SUN_PATH_BYTES: () => SUN_PATH_BYTES,
   brokerAddress: () => brokerAddress,
   brokerDirectory: () => brokerDirectory,
   encodeFrame: () => encodeFrame,
+  fitsSocketPath: () => fitsSocketPath,
   isEvent: () => isEvent,
   socketFault: () => socketFault
 });
@@ -7146,6 +7147,9 @@ import { mkdirSync as mkdirSync2, readdirSync, readFileSync as readFileSync2, st
 import { tmpdir } from "node:os";
 import { dirname as dirname3, join as join3 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
+function fitsSocketPath(path) {
+  return Buffer.byteLength(path) < SUN_PATH_BYTES;
+}
 function isEvent(frame) {
   return typeof frame.event === "string";
 }
@@ -7167,6 +7171,9 @@ function entitlementOptions() {
   const value = settingValue(process.env["WOLFRAMINIT"]);
   return value === void 0 ? [] : [value];
 }
+function terseName(digest) {
+  return `wm-${digest}.sock`;
+}
 function brokerAddress(kernelPath) {
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
   const digest = createHash3("sha256").update([
@@ -7180,15 +7187,15 @@ function brokerAddress(kernelPath) {
     // behind one broker throttled each other or overran the smaller. Only
     // when set, so every other session keeps the socket it had.
     ...entitlementOptions()
-  ].join("\0")).digest("hex").slice(0, 12);
+  ].join("\0")).digest("hex").slice(0, DIGEST_CHARS);
   if (process.platform === "win32") {
     return String.raw`\\.\pipe\wolfram-mcp-${digest}`;
   }
   const base = brokerDirectory();
   const descriptive = join3(base, `wolfram-mcp-${uid}-${digest}.sock`);
-  if (Buffer.byteLength(descriptive) <= MAX_SOCKET_PATH)
+  if (fitsSocketPath(descriptive))
     return descriptive;
-  return join3(base, `wm-${digest}.sock`);
+  return join3(base, terseName(digest));
 }
 function ensurePrivateDirectory(dir) {
   try {
@@ -7206,8 +7213,9 @@ function brokerDirectory() {
   if (runtime)
     return runtime;
   const temporary = tmpdir();
-  if (directoryFault(temporary) === null)
+  if (socketFault(join3(temporary, terseName("0".repeat(DIGEST_CHARS)))) === null) {
     return temporary;
+  }
   const own = join3(cacheDir(), "run");
   ensurePrivateDirectory(own);
   return own;
@@ -7215,7 +7223,14 @@ function brokerDirectory() {
 function socketFault(address) {
   if (process.platform === "win32")
     return null;
-  return directoryFault(dirname3(address));
+  const faults = [];
+  if (!fitsSocketPath(address)) {
+    faults.push(`${address} is ${Buffer.byteLength(address)} bytes, too long for a socket path here (at most ${SUN_PATH_BYTES - 1})`);
+  }
+  const directory = directoryFault(dirname3(address));
+  if (directory)
+    faults.push(directory);
+  return faults.length > 0 ? faults.join("; and ") : null;
 }
 function directoryFault(dir) {
   if (process.platform === "win32")
@@ -7244,7 +7259,7 @@ function encodeFrame(frame) {
   return `${JSON.stringify(frame)}
 `;
 }
-var BROKER_PROTOCOL, MAX_SOCKET_PATH, buildIdentity, SOCKET_MODE, MAX_UNTERMINATED_BYTES, FrameReader;
+var BROKER_PROTOCOL, SUN_PATH_BYTES, buildIdentity, DIGEST_CHARS, SOCKET_MODE, MAX_UNTERMINATED_BYTES, FrameReader;
 var init_broker_protocol = __esm({
   "dist/broker-protocol.js"() {
     "use strict";
@@ -7252,7 +7267,8 @@ var init_broker_protocol = __esm({
     init_flavour();
     init_version();
     BROKER_PROTOCOL = 6;
-    MAX_SOCKET_PATH = 100;
+    SUN_PATH_BYTES = process.platform === "linux" ? 108 : 104;
+    DIGEST_CHARS = 12;
     SOCKET_MODE = 384;
     MAX_UNTERMINATED_BYTES = 4 * 1024 * 1024;
     FrameReader = class {
@@ -17448,8 +17464,61 @@ var init_kernel = __esm({
     SDK_REQUEST_TIMEOUT_MS = MAX_TIMER_MS;
     DEFAULT_DEADLINE_MS = 6e4;
     RelayClient = class extends Client {
-      listTools(params, options) {
-        return this.request({ method: "tools/list", params }, ListToolsResultSchema, options);
+      #log;
+      constructor(info, options, log) {
+        super(info, options);
+        this.#log = log;
+      }
+      async listTools(params, options) {
+        const result = await this.request({ method: "tools/list", params }, PaginatedResultSchema, options);
+        const tools = this.#judge(result, "tool", (tool) => {
+          const { outputSchema, ...rest } = tool;
+          const parsed = ToolSchema.safeParse(rest);
+          if (!parsed.success || outputSchema === void 0)
+            return parsed;
+          return { success: true, data: { ...parsed.data, outputSchema } };
+        });
+        return { ...result, tools };
+      }
+      async listPrompts(params, options) {
+        const result = await this.request({ method: "prompts/list", params }, PaginatedResultSchema, options);
+        const prompts = this.#judge(result, "prompt", (prompt) => PromptSchema.safeParse(prompt));
+        return { ...result, prompts };
+      }
+      async listResources(params, options) {
+        const result = await this.request({ method: "resources/list", params }, PaginatedResultSchema, options);
+        const resources = this.#judge(result, "resource", (resource) => ResourceSchema.safeParse(resource));
+        return { ...result, resources };
+      }
+      /**
+       * Each item of one page of a kernel's list, on its own: one that `parse`
+       * refuses is left out, saying which and why, and the rest are kept. The
+       * list's key and method follow from what it lists, so they are not spelled
+       * at each call, where a slip would log one list's name for another's.
+       */
+      #judge(result, kind, parse4) {
+        const key = `${kind}s`;
+        const method = `${key}/list`;
+        const items = result[key];
+        if (!Array.isArray(items)) {
+          throw new McpError(ErrorCode.InternalError, `the kernel's ${method} result holds no list of ${key}: ${JSON.stringify(items)?.slice(0, 120)}`);
+        }
+        const listed = items;
+        const kept = [];
+        listed.forEach((item, index) => {
+          const fields = typeof item === "object" && item !== null ? item : {};
+          const parsed = parse4(fields);
+          if (parsed.success) {
+            kept.push(parsed.data);
+            return;
+          }
+          const named = [fields["name"], fields["uri"]].find((v) => typeof v === "string" && v !== "");
+          const which = named ?? `entry ${index + 1} of ${listed.length} on this page`;
+          const issue2 = parsed.error.issues[0];
+          const why = issue2 ? `${issue2.path.join(".") || `the ${kind}`}: ${issue2.message}` : `it is not a ${kind}`;
+          this.#log(`a ${kind} the kernel listed is left out (${which}): ${why}; it was ${JSON.stringify(item)?.slice(0, 160)}`);
+        });
+        return kept;
       }
     };
     REQUEST_TIMEOUT = ErrorCode.RequestTimeout;
@@ -17546,7 +17615,7 @@ var init_kernel = __esm({
           },
           onFatal: (error2) => reportFatal(error2)
         });
-        const client = new RelayClient(clientInfo, { capabilities: {} });
+        const client = new RelayClient(clientInfo, { capabilities: {} }, log);
         this.#handshaking = { transport, abort: (error2) => reportFatal(error2) };
         client.onerror = (err) => log(`upstream error: ${errorText(err)}`);
         client.onclose = () => {
@@ -17876,7 +17945,7 @@ function tryConnect(address) {
     socket.once("error", fail);
   });
 }
-var CONNECT_DEADLINE_MS, CONNECT_RETRY_MS, REQUEST_GRACE_MS, FROM_KERNEL, PING_DEADLINE_MS, delay, BrokerBackend;
+var CONNECT_DEADLINE_MS, CONNECT_RETRY_MS, REQUEST_GRACE_MS, FROM_KERNEL, PING_DEADLINE_MS, DRAIN_PING_INTERVAL_MS, delay, BrokerBackend;
 var init_broker_client = __esm({
   "dist/broker-client.js"() {
     "use strict";
@@ -17904,6 +17973,7 @@ var init_broker_client = __esm({
       ready: false
     };
     PING_DEADLINE_MS = REQUEST_GRACE_MS;
+    DRAIN_PING_INTERVAL_MS = 3 * PING_DEADLINE_MS;
     delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     BrokerBackend = class _BrokerBackend {
       kind = "broker";
@@ -17924,6 +17994,12 @@ var init_broker_client = __esm({
       #pending = /* @__PURE__ */ new Map();
       #progress = /* @__PURE__ */ new Map();
       /**
+       * Every request's answer as its caller sees it, until it settles: what
+       * `retire` waits for. `#pending` tracks the same requests, but holds the
+       * functions that settle them, which nothing can wait on.
+       */
+      #outstanding = /* @__PURE__ */ new Set();
+      /**
        * Outstanding pings, kept apart from #pending because their contracts differ:
        * #pending treats `ok: false` as a failure, and a ping treats it as an answer.
        */
@@ -17931,8 +18007,12 @@ var init_broker_client = __esm({
       #onKernelReady;
       /** No new work goes out on this connection; the next call chooses again. */
       #closed = false;
+      /** The session has chosen again, and left this connection to drain (`retire`). */
+      #retired = false;
       /** Whether the broker still answers, while that is being asked (`#stillAnswering`). */
       #asking = null;
+      /** The interval asking a leaving broker whether it still answers (`#watchDrain`). */
+      #drainWatch = null;
       constructor(options, socket) {
         this.#options = options;
         this.#socket = socket;
@@ -17975,7 +18055,7 @@ var init_broker_client = __esm({
         const { address, log } = options;
         const fault = socketFault(address);
         if (fault) {
-          log(`not sharing kernels: ${fault}. Using a private kernel instead; sharing resumes when WOLFRAM_MCP_RUNTIME_DIR (or XDG_RUNTIME_DIR) names a directory only you can write to`);
+          log(`not sharing kernels: ${fault}. Using a private kernel instead; sharing resumes when WOLFRAM_MCP_RUNTIME_DIR (or XDG_RUNTIME_DIR) names a directory only you can write to, at a path short enough for a socket`);
           return null;
         }
         const existing = await tryConnect(address);
@@ -18071,7 +18151,7 @@ var init_broker_client = __esm({
        * working session, since a broker serves the code it started with.
        */
       #answers() {
-        if (this.#closed || !this.#socket.writable)
+        if (!this.#socket.writable)
           return Promise.resolve(false);
         const id = this.#nextId++;
         return new Promise((resolve) => {
@@ -18105,14 +18185,15 @@ var init_broker_client = __esm({
        * `settled()` holds the session's next request until this is known: sent to
        * a frozen broker meanwhile, it was held to its own whole ceiling.
        */
-      #stillAnswering(op) {
+      #stillAnswering(why, { quietly = false } = {}) {
         if (!this.#asking) {
-          this.#options.log(`${op} ran out; asking the broker whether it is still running`);
+          if (!quietly)
+            this.#options.log(`${why}; asking the broker whether it is still running`);
           this.#asking = this.#answers().then((alive) => {
             this.#asking = null;
-            if (!alive && !this.#closed) {
-              this.#options.log("the broker did not answer; will choose again");
-              this.#failAll(new Error(`the Wolfram broker stopped answering: ${op} ran out, and it did not answer when asked whether it was still running`));
+            if (!alive && this.#socket.writable) {
+              this.#options.log(this.#retired ? "the leaving broker did not answer; failing what was still on it" : "the broker did not answer; will choose again");
+              this.#failAll(new Error(`the Wolfram broker stopped answering: ${why}, and it did not answer when asked whether it was still running`));
               this.#socket.destroy();
             }
             return alive;
@@ -18123,6 +18204,44 @@ var init_broker_client = __esm({
       /** See `KernelBackend.settled`: whether the broker still answers, once asked. */
       async settled() {
         await this.#asking;
+      }
+      /**
+       * Ask a leaving broker, on an interval, whether it still answers, for as long
+       * as calls are on this connection, and give it up on the first ping it does
+       * not answer.
+       *
+       * A connection is asked when a request on it runs out, and a call with no
+       * ceiling never does. Nor can anything new be sent on a connection closed to
+       * new work to ask instead: so on a leaving broker that froze, such a call
+       * waited for ever, the socket holding the session's loop open, and the
+       * backend stayed retiring until the session stopped (#111). Started at the
+       * broker's word rather than at `retire`, since a session that makes no
+       * request after it never retires the connection at all. Every call is
+       * covered, not only one with no ceiling: a frozen broker is then found out in
+       * seconds rather than at whichever ceiling is longest. Said once, not at each
+       * ping, which a long evaluation would have repeated for its whole length.
+       *
+       * Unref'd: the socket already holds the loop while a caller waits on it, so
+       * the interval adds nothing to that. A ping it has out when the last call
+       * settles holds the loop for what is left of its deadline, as every ping does
+       * (`#answers`). A broker that answers but never finishes, holding its seats,
+       * is #80's.
+       */
+      #watchDrain() {
+        if (this.#drainWatch || this.#outstanding.size === 0)
+          return;
+        this.#options.log(`${this.#outstanding.size} call(s) still on the leaving broker; asking every ${budgetText(DRAIN_PING_INTERVAL_MS)} whether it still answers`);
+        this.#drainWatch = setInterval(() => {
+          void this.#stillAnswering("it said it was leaving, with calls still on it", {
+            quietly: true
+          });
+        }, DRAIN_PING_INTERVAL_MS);
+        this.#drainWatch.unref();
+      }
+      #unwatchDrain() {
+        if (this.#drainWatch)
+          clearInterval(this.#drainWatch);
+        this.#drainWatch = null;
       }
       /**
        * Tell the broker what this session's kernels must be started with.
@@ -18155,6 +18274,7 @@ var init_broker_client = __esm({
           if (frame.event === "shuttingDown") {
             this.#options.log("the broker is shutting down; will choose again");
             this.#closed = true;
+            this.#watchDrain();
             return;
           }
           if (frame.event === "progress") {
@@ -18189,6 +18309,7 @@ var init_broker_client = __esm({
       }
       #failAll(err) {
         this.#closed = true;
+        this.#unwatchDrain();
         for (const [, waiter] of this.#pending)
           waiter.reject(err);
         this.#pending.clear();
@@ -18213,12 +18334,12 @@ var init_broker_client = __esm({
           ...sent === void 0 ? {} : { timeoutMs: sent }
         };
         const ceiling = brokerCeilingMs(op, sent, this.#options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS);
-        return new Promise((resolve, reject) => {
+        const answer = new Promise((resolve, reject) => {
           const timer = ceiling === 0 ? void 0 : setTimeout(() => {
             this.#pending.delete(id);
             this.#progress.delete(id);
             reject(new Error(`the Wolfram broker did not answer ${op} within ${budgetText(ceiling)}`));
-            void this.#stillAnswering(op);
+            void this.#stillAnswering(`${op} ran out`);
           }, timerDelay(ceiling));
           timer?.unref?.();
           const settle = {
@@ -18256,6 +18377,14 @@ var init_broker_client = __esm({
             }
           });
         });
+        this.#outstanding.add(answer);
+        const settled = () => {
+          this.#outstanding.delete(answer);
+          if (this.#outstanding.size === 0)
+            this.#unwatchDrain();
+        };
+        answer.then(settled, settled);
+        return answer;
       }
       onKernelReady(handler) {
         this.#onKernelReady = handler;
@@ -18313,6 +18442,22 @@ var init_broker_client = __esm({
        */
       status(timeoutMs) {
         return this.#request("status", void 0, timeoutMs);
+      }
+      /**
+       * See `KernelBackend.retire`. After `shuttingDown` the broker answers what it
+       * was already asked and then goes, but it reads this connection closing as
+       * its proxy vanishing and aborts that work. So the socket is kept until each
+       * request on it has settled — answered, run out, cancelled, or failed by the
+       * broker closing first — and closed only then (#76). It holds the event loop
+       * meanwhile as an attached connection does, since a caller is waiting on it,
+       * and `stop()` still closes it at once.
+       */
+      async retire() {
+        this.#closed = true;
+        this.#retired = true;
+        this.#onKernelReady = void 0;
+        await Promise.allSettled([...this.#outstanding]);
+        await this.stop();
       }
       async stop() {
         this.#failAll(new Error("the session closed its connection to the Wolfram broker"));
@@ -19497,6 +19642,12 @@ var init_backend = __esm({
        * kernel to finish starting and keep its seat after the server had stopped.
        */
       #preparing = null;
+      /**
+       * Backends given up on that are still finishing what they were asked (#76).
+       * `stop()` has to reach them too, or a session that ended while one drained
+       * left its calls running on the broker for nobody.
+       */
+      #retiring = /* @__PURE__ */ new Set();
       /** Ends the preparation in flight, from inside whichever stage it is in. */
       #abort = null;
       #stopped = false;
@@ -19523,10 +19674,8 @@ var init_backend = __esm({
         await this.#resolved?.settled?.();
         if (this.#resolved && this.#resolved.usable?.() === false) {
           this.#log?.("the chosen backend is gone; deciding again");
-          const dead = this.#resolved;
+          this.#retire(this.#resolved);
           this.#resolved = null;
-          void dead.stop().catch(() => {
-          });
         }
         if (this.#resolved)
           return this.#resolved;
@@ -19565,6 +19714,29 @@ The failure was: ${waiting.reason}`);
       }
       #backoffWindow() {
         return this.#backoff.current(this.#identity())?.remainingMs ?? 0;
+      }
+      /**
+       * Leave a backend given up on to finish what it was asked, rather than stop
+       * it on the way out. A broker that said `shuttingDown` answers what it was
+       * already asked before it goes, but it read this session closing the
+       * connection as the proxy vanishing, and aborted that work: a call it was
+       * about to answer was lost to the session's next request choosing again (#76).
+       * A backend that is merely gone has nothing outstanding, and retires at once.
+       */
+      #retire(backend) {
+        if (!backend.retire) {
+          void backend.stop().catch((err) => this.#stopFailed(err));
+          return;
+        }
+        this.#retiring.add(backend);
+        void backend.retire().catch((err) => this.#stopFailed(err)).finally(() => this.#retiring.delete(backend));
+      }
+      /**
+       * Said, though nothing waits on it: a backend that would not stop may still
+       * hold a kernel and its seat, and this line is the one trace of that.
+       */
+      #stopFailed(err) {
+        this.#log?.(`a backend did not stop cleanly: ${errorText(err)}`);
       }
       /**
        * One preparation under one deadline: the factory (inspection, broker
@@ -19622,7 +19794,8 @@ The failure was: ${waiting.reason}`);
       async stop() {
         this.#stopped = true;
         this.#abort?.abort();
-        await Promise.all([this.#preparing?.stop(), this.#resolved?.stop()]);
+        const backends = [this.#preparing, this.#resolved, ...this.#retiring].filter((backend) => backend !== null);
+        await Promise.all(backends.map((backend) => backend.stop().catch((err) => this.#stopFailed(err))));
         const resolving = this.#resolving;
         if (resolving) {
           let timer;
@@ -20001,6 +20174,17 @@ var init_pool = __esm({
       get size() {
         return this.#slots.length;
       }
+      /**
+       * Slots with a kernel process: running, or busy, which a slot is while its
+       * kernel starts. Not `size`: a slot whose kernel stopped for idleness stays
+       * in the pool until it is used or retired, and reported as running it read,
+       * beside a refusal window, as an idle kernel of the flavour that would not
+       * serve (#119). Counting only `session.running` would say "0 running, 1
+       * busy" of a kernel that is starting.
+       */
+      get running() {
+        return this.#slots.filter((s) => s.busy || s.session.running).length;
+      }
       get busy() {
         return this.#slots.filter((s) => s.busy).length;
       }
@@ -20087,6 +20271,17 @@ var init_pool = __esm({
         return true;
       }
       /**
+       * A slot that can take a request of this flavour now. While the flavour's
+       * server would not start (`refusing`), only one whose kernel is running: the
+       * window is about starts, and a slot whose kernel stopped for idleness starts
+       * one when used. Checked before the idle kernel was looked for at all, the
+       * window refused what a running kernel could answer, so one failed extra
+       * start turned the whole flavour away (#101).
+       */
+      #servable(slot, flavour, refusing) {
+        return !slot.busy && !slot.session.abandoned && slot.flavour.digest === flavour.digest && (!refusing || slot.session.running);
+      }
+      /**
        * An idle kernel, preferring one with nothing outstanding.
        *
        * A kernel holding an abandoned call is idle only in the sense that nobody is
@@ -20097,22 +20292,25 @@ var init_pool = __esm({
        * never "has this run too long" but "does anyone need the seat".
        */
       #idle(flavour) {
-        const mine = (s) => s.flavour.digest === flavour.digest;
-        return this.#slots.find((s) => !s.busy && !s.session.abandoned && mine(s)) ?? this.#slots.find((s) => !s.busy && mine(s));
+        return this.#slots.find((s) => this.#servable(s, flavour, false)) ?? this.#slots.find((s) => !s.busy && s.flavour.digest === flavour.digest);
       }
       /**
        * Take an idle kernel of this flavour, grow one, make room for one, or wait.
        *
        * Five tiers, and the order is what keeps sharing wide while never serving a
-       * session from a kernel that is not its own kind.
+       * session from a kernel that is not its own kind. While the flavour's server
+       * would not start, only the first applies, to running kernels only, and a
+       * request it cannot serve is refused before any other (#101).
        */
       async #acquire(flavour, signal) {
-        const mine = (s) => s.flavour.digest === flavour.digest;
-        const free = this.#slots.find((s) => !s.busy && !s.session.abandoned && mine(s));
+        const window = this.#window(flavour.digest);
+        const free = this.#slots.find((s) => this.#servable(s, flavour, window !== null));
         if (free) {
           free.busy = true;
           return free;
         }
+        if (window)
+          throw this.#refusal(window);
         if (this.#slots.length < this.#budget)
           return this.#grow(flavour);
         if (this.#swapOut(flavour))
@@ -20216,21 +20414,20 @@ var init_pool = __esm({
           if (!head)
             return;
           const { flavour } = head;
-          const refusal = this.#refusal(flavour);
-          if (refusal) {
-            this.#waiters.shift();
-            head.reject(refusal);
-            continue;
-          }
-          const mine = (s) => s.flavour.digest === flavour.digest;
           const take = (slot) => {
             this.#waiters.shift();
             slot.busy = true;
             head.resolve(slot);
           };
-          const fresh = this.#slots.find((s) => !s.busy && !s.session.abandoned && mine(s));
+          const window = this.#window(flavour.digest);
+          const fresh = this.#slots.find((s) => this.#servable(s, flavour, window !== null));
           if (fresh) {
             take(fresh);
+            continue;
+          }
+          if (window) {
+            this.#waiters.shift();
+            head.reject(this.#refusal(window));
             continue;
           }
           if (this.#slots.length < this.#budget) {
@@ -20260,9 +20457,6 @@ var init_pool = __esm({
        * what must not decide anything.
        */
       async run(flavour, fn, options = {}) {
-        const refusal = this.#refusal(flavour);
-        if (refusal)
-          throw refusal;
         if (options.signal?.aborted)
           throw new RequestDropped(options.signal.reason);
         const slot = await this.#acquire(flavour, options.signal);
@@ -20292,19 +20486,42 @@ var init_pool = __esm({
         }
         this.#unresolved.set(digest, { at: now, reason: errorText(err) });
       }
-      /** The refusal for a request while its flavour's server recently would not start. */
-      #refusal(flavour) {
-        const known = this.#unresolved.get(flavour.digest);
+      /**
+       * A flavour's window, while it stands: how long it has run, how much longer
+       * it runs, and the kernel's words. The one place that is worked out, so the
+       * refusal and what `status` reports of it cannot disagree at the edge.
+       */
+      #window(digest) {
+        const known = this.#unresolved.get(digest);
         if (!known)
           return null;
-        const age = this.#now() - known.at;
-        if (age >= NOT_RESOLVED_BACKOFF_MS) {
-          this.#unresolved.delete(flavour.digest);
+        const ageMs = this.#now() - known.at;
+        if (ageMs >= NOT_RESOLVED_BACKOFF_MS) {
+          this.#unresolved.delete(digest);
           return null;
         }
-        return new ServerNotResolved(`a kernel for this server could not start it ${elapsedText(age)} ago, so none was started for this request; it is tried again in ${waitText(NOT_RESOLVED_BACKOFF_MS - age)}; ${NOT_RESOLVED_ADVICE}.
+        return { ageMs, remainingMs: NOT_RESOLVED_BACKOFF_MS - ageMs, reason: known.reason };
+      }
+      /**
+       * Whether this pool is refusing to start a kernel for a flavour, how much
+       * longer for, and why. For the broker's `status`: on the shared path the
+       * window is the pool's, and `wolfram_status` could say nothing of why a
+       * session's requests were turned away, where it reports a private session's
+       * back-off (#101).
+       */
+      refusing(digest) {
+        const window = this.#window(digest);
+        return window && { remainingMs: window.remainingMs, reason: window.reason };
+      }
+      /**
+       * The refusal for a request while its flavour's server recently would not
+       * start. Built only where it is thrown: a request inside the window that a
+       * running kernel serves needs no error.
+       */
+      #refusal(window) {
+        return new ServerNotResolved(`a kernel for this server could not start it ${elapsedText(window.ageMs)} ago, so none was started for this request; it is tried again in ${waitText(window.remainingMs)}; ${NOT_RESOLVED_ADVICE}.
 
-The failure was: ${known.reason}`);
+The failure was: ${window.reason}`);
       }
       async stop() {
         await Promise.all(this.#slots.map((s) => s.session.stop().catch(() => {
@@ -20525,12 +20742,16 @@ async function startBroker(options) {
           ));
         case "status":
           return reply({
-            kernels: pool.size,
+            // What doctor and wolfram_status print as running (#119).
+            kernels: pool.running,
             busy: pool.busy,
             budget: pool.budget,
             licence: pool.licence,
             connections: connections.size,
-            pid: process.pid
+            pid: process.pid,
+            // This session's own, only: another's carries its server's error,
+            // paths and all, to a session that has no use for it.
+            refusing: pool.refusing(declared.digest)
           });
         default:
           return { id: request.id, ok: false, error: `unknown broker op: ${String(request.op)}` };
@@ -20717,10 +20938,11 @@ async function startBroker(options) {
     return true;
   }
   async function claimSocket() {
-    if (process.platform === "win32" || Buffer.byteLength(address) > MAX_SOCKET_PATH) {
+    if (process.platform === "win32")
       return claimDirect();
-    }
     const staging = join9(dirname8(address), `.b${process.pid}-${randomBytes(4).toString("hex")}`);
+    if (!fitsSocketPath(staging))
+      return claimDirect();
     const server = await listenAt(staging, 1);
     if (!server)
       return null;
@@ -20777,7 +20999,7 @@ async function startBroker(options) {
   }
   const fault = socketFault(address);
   if (fault) {
-    log(`refusing to listen: ${fault}. Sessions will use private kernels until WOLFRAM_MCP_RUNTIME_DIR (or XDG_RUNTIME_DIR) names a directory only you can write to`);
+    log(`refusing to listen: ${fault}. Sessions will use private kernels until WOLFRAM_MCP_RUNTIME_DIR (or XDG_RUNTIME_DIR) names a directory only you can write to, at a path short enough for a socket`);
     return null;
   }
   claim = await claimSocket();
@@ -21529,6 +21751,7 @@ init_cache();
 init_config();
 init_doctor();
 init_duration();
+init_prepare();
 init_inspect();
 init_kernel();
 init_locate();
@@ -21588,6 +21811,9 @@ function describeToolList(config2, cache, age) {
     return `${cache.tools.length} tools, in memory (WOLFRAM_MCP_CACHE=0)`;
   return `${cache.tools.length} tools, cached ${age}`;
 }
+function underLabel(text) {
+  return text.split("\n").map((line) => line ? `            ${line}` : line).join("\n");
+}
 async function describeSharing(config2, install, backend) {
   const inUse = backend.kind === "deferred" ? backend.resolved ?? null : backend;
   if (inUse?.kind === "local") {
@@ -21598,7 +21824,13 @@ async function describeSharing(config2, install, backend) {
     try {
       const status = await broker.status(ceilingMs);
       const others = Math.max(0, status.connections - 1);
-      return `on \u2014 broker pid ${status.pid}, ${others} other session(s) attached, ${status.kernels} kernel(s) running, ${status.busy} busy, budget ${status.budget}`;
+      const summary = `on \u2014 broker pid ${status.pid}, ${others} other session(s) attached, ${status.kernels} kernel(s) running, ${status.busy} busy, budget ${status.budget}`;
+      const refused = status.refusing;
+      if (!refused)
+        return summary;
+      return `${summary}
+refusing    the broker starts no kernel for this server; tried again in ${waitText(refused.remainingMs)}; ${NOT_RESOLVED_ADVICE}
+` + underLabel(refused.reason);
     } catch (err) {
       return `on \u2014 the broker did not answer: ${errorText(err)}`;
     }
@@ -21653,7 +21885,7 @@ function describeStatus(config2, install, cache, backoff = null, sharing = null)
   if (backoff) {
     lines.push(`preparing   the last attempt failed; retried in ${waitText(backoff.remainingMs)}` + // The same pointer the failed call gave: for a server that would not
     // start, the server, not the installation.
-    (backoff.advice ? `; ${backoff.advice}` : `, or as soon as the installation changes`), `            ${backoff.reason}`);
+    (backoff.advice ? `; ${backoff.advice}` : `, or as soon as the installation changes`), underLabel(backoff.reason));
   }
   lines.push(`sharing     ${config2.share ? sharing ?? "on \u2014 kernels are shared with other sessions" : "off \u2014 this session has its own kernel"}`, `tool list   ${describeToolList(config2, cache, age)}`, `logs        ${process.env["WOLFRAM_MCP_LOG"] ?? "stderr, captured by your MCP client"}`, `timeouts    start ${budgetText(config2.startTimeoutMs)}, call ${budgetText(config2.callTimeoutMs)}, idle ${idleText(config2.idleMs)}`, `evaluation  the evaluator stops itself at ${EVALUATOR_DEFAULT_TEXT} unless MCP_TOOL_OPTIONS or a timeConstraint argument says otherwise`, `            past the call timeout this server stops waiting but leaves the kernel running, so a long call keeps its session`);
   return lines.join("\n");
@@ -21917,7 +22149,8 @@ Environment
                                      sharing one with other sessions
                                      (default: 1)
   WOLFRAM_MCP_RUNTIME_DIR            directory for the shared broker's socket; it
-                                     must be yours and writable by no one else
+                                     must be yours, writable by no one else, and
+                                     short enough for a socket's path
                                      (default: XDG_RUNTIME_DIR, else a private
                                      directory under the cache)
   WOLFRAM_MCP_MAX_KERNELS            cap on pooled kernels. Default is derived

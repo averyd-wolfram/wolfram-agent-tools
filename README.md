@@ -1,9 +1,9 @@
-# wolfram 0.1.6, the latest release
+# wolfram 0.1.7, the latest release
 
 This branch is written by the release workflow, never by hand. It holds the
 `wolfram` Claude Code plugin from the newest release of
 [wolfram-agent-tools](https://github.com/averyd-wolfram/wolfram-agent-tools) —
-`plugin/` is exactly that release's `wolfram-plugin-0.1.6.zip` — as a
+`plugin/` is exactly that release's `wolfram-plugin-0.1.7.zip` — as a
 marketplace named `wolfram-agent-tools`. It moves only after a release's assets are
 published and verified, and only forward.
 
@@ -28,4 +28,4 @@ To follow every release in a project, commit this to its `.claude/settings.json`
 ```
 
 To stay on one version, use its tag as the `ref` instead, without `autoUpdate`:
-`"ref": "wolfram--v0.1.6"`.
+`"ref": "wolfram--v0.1.7"`.

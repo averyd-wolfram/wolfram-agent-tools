@@ -129,5 +129,5 @@ plugin; a new session fixes the second.
 | Activation fails behind a proxy | Set `https_proxy` before running `wolframscript` |
 | macOS blocks the app | Right-click the `.app`, Open, then confirm |
 | Every call fails at once, "retried in …" | A kernel failed to start and the plugin is waiting before trying again. `wolfram_status` shows why. Fixing or replacing the installation ends the wait immediately |
-| doctor or the log says "not sharing kernels" | Sessions are using a kernel each, which costs a seat each. The directory for the shared socket must be the user's and writable by no one else; set `WOLFRAM_MCP_RUNTIME_DIR` to such a directory if the default does not suit |
+| doctor or the log says "not sharing kernels" | Sessions are using a kernel each, which costs a seat each. The directory for the shared socket must be the user's, writable by no one else, and short enough for a socket path (the log line says which failed); set `WOLFRAM_MCP_RUNTIME_DIR` to such a directory if the default does not suit |
 | Calls fail after a long wait | The first call can include a paclet download; a slow network or an unactivated Engine shows up here. `/wolfram:doctor` shows the kernel's own words |
