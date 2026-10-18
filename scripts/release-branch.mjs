@@ -110,11 +110,17 @@ export function advancePlan({ releases, history, latestTag, tags }) {
   // project following it would get: pushed by hand, most likely. Versions due
   // now are judged below, where the branch is about to carry them.
   const prefix = `${PLUGIN}--v`;
+  const newest = latestRelease(releases);
+  const version = newest === undefined ? undefined : tagVersion(newest);
+  // What the steps below give the branch: the releases above its head, or,
+  // for a new branch, the newest alone.
+  const due = (v) =>
+    head ? releaseVersions.has(v) && compareVersions(v, head.version) > 0 : v === version;
   for (const [tag, at] of tagAt) {
-    const version = tag.startsWith(prefix) ? tag.slice(prefix.length) : undefined;
-    if (!version || carried.has(version) || !tagVersion(`v${version}`, { core: true })) continue;
-    if (head && compareVersions(version, head.version) > 0 && releaseVersions.has(version)) continue;
-    result.warnings.push(`${tag} is at ${at}, but the ${BRANCH} branch has never carried ${version}`);
+    const tagged = tag.startsWith(prefix) ? tag.slice(prefix.length) : undefined;
+    if (!tagged || carried.has(tagged) || !tagVersion(`v${tagged}`, { core: true })) continue;
+    if (due(tagged)) continue;
+    result.warnings.push(`${tag} is at ${at}, but the ${BRANCH} branch has never carried ${tagged}`);
   }
   // A release published after the branch passed it, one finished late, has
   // no commit to carry it, since the branch never moves back; so no tag to pin
@@ -132,9 +138,7 @@ export function advancePlan({ releases, history, latestTag, tags }) {
     }
   }
 
-  const newest = latestRelease(releases);
   if (!newest) return result;
-  const version = tagVersion(newest);
   Object.assign(result, { newest, version, latest: latestTag !== newest });
   const order = head ? compareVersions(version, head.version) : 1;
   // Latest stays put too: moving it would name a release the branch, which
@@ -150,10 +154,7 @@ export function advancePlan({ releases, history, latestTag, tags }) {
   // the branch passes is left with no commit to pin (#58). A new branch starts
   // at the newest: the releases before the branch existed have no plugin
   // archive to build one from.
-  const due = head
-    ? [...releaseVersions].filter((v) => compareVersions(v, head.version) > 0).sort(compareVersions)
-    : [version];
-  for (const v of due) {
+  for (const v of [...releaseVersions].filter(due).sort(compareVersions)) {
     const tag = versionTag(v);
     const at = tagAt.get(tag);
     if (at === undefined) {

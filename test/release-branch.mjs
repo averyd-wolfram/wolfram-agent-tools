@@ -140,6 +140,12 @@ check(
   stray.warnings?.some((w) => /wolfram--v0\.1\.1/.test(w) && /c999/.test(w)) && stray.warnings?.length === 1,
   show(stray),
 );
+const fresh = plan({ history: [], latestTag: undefined, tags: [["wolfram--v0.1.2", "c999"]] });
+check(
+  "and with no branch yet, one already there for the newest is reported once, as given",
+  versions(fresh) === "0.1.2" && fresh.warnings?.length === 1 && /c999 already/.test(fresh.warnings[0]),
+  show(fresh),
+);
 const early = plan({ releases: [...published, rel("v0.1.3")], tags: [...tagged(...branch), ["wolfram--v0.1.3", "c999"]] });
 check(
   "and one already there for a version the branch is only now given is left, untouched, and reported",
