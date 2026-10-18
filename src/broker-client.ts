@@ -796,6 +796,13 @@ export class BrokerBackend implements KernelBackend {
     licence: { maxProcesses: number | null; type: string | null } | null;
     connections: number;
     pid: number;
+    /**
+     * Whether the pool is refusing to start a kernel for this session's
+     * flavour (`KernelPool.refusing`). Absent from a broker older than it,
+     * which is no reason to bump the protocol: a field of a reply, not a
+     * frame's shape.
+     */
+    refusing?: { remainingMs: number; reason: string } | null;
   }> {
     return this.#request("status", undefined, timeoutMs);
   }

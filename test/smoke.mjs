@@ -5138,6 +5138,195 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
 }
 
 // ---------------------------------------------------------------------------
+// The pool's window is about starting kernels, and it was checked before the
+// pool looked for an idle one: so one failed *extra* start of a flavour, for a
+// passing reason such as a server file unreadable mid-rewrite, turned the
+// whole flavour away for its 15s though the kernel it had running could answer.
+// And nothing said so: the broker's status left the window out, so
+// wolfram_status could not report it as it reports a private back-off (#101).
+heading("The pool's refusal window spares a flavour's idle kernel, and is reported");
+{
+  const savedMode = process.env.FAKE_MODE;
+  const savedMarker = process.env.FAKE_MARKER;
+  const poolOf = (idleMs) =>
+    new lib.KernelPool({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 2, type: null },
+      learnFromKernels: false,
+    });
+  const pool = poolOf(60_000);
+  const flavour = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" });
+  const evaluate = (client) =>
+    client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } });
+  const outcome = (run) => run.then((r) => r.content?.[0]?.text ?? "(empty)", (e) => `failed: ${e.message}`);
+  // A kernel of the flavour, held busy so the next request has to start another.
+  const hold = (on = pool) => {
+    let release;
+    const held = new Promise((resolve) => (release = resolve));
+    let running = false;
+    const done = outcome(
+      on.run(flavour, async (client) => {
+        running = true;
+        await held;
+        return evaluate(client);
+      }),
+    );
+    return { release: () => release(), running: () => running, done };
+  };
+  try {
+    delete process.env.FAKE_MODE;
+    const first = hold();
+    await until(first.running, 10_000);
+    // Its second start fails, as a server that will not resolve fails.
+    process.env.FAKE_MODE = "no-such-server";
+    const extra = await outcome(pool.run(flavour, evaluate));
+    delete process.env.FAKE_MODE;
+    first.release();
+    await first.done;
+    const served = await outcome(pool.run(flavour, evaluate));
+    check(
+      "a request its flavour's idle kernel can serve is served, though a start of that flavour just failed",
+      /^failed/.test(extra) && /^evaluated/.test(served),
+      `extra start: ${extra.replace(/\s+/g, " ").slice(0, 60)}; then: ${served.replace(/\s+/g, " ").slice(0, 80)}`,
+    );
+    // What would start a kernel is still turned away, inside the window.
+    const again = hold();
+    await until(again.running, 10_000);
+    const refused = await outcome(pool.run(flavour, evaluate));
+    again.release();
+    await again.done;
+    check(
+      "and one that would start a kernel is still refused",
+      /none was started for this request/.test(refused),
+      refused.replace(/\s+/g, " ").slice(0, 100),
+    );
+  } finally {
+    await pool.stop();
+  }
+
+  // A slot whose kernel stopped for idleness is not running: taken inside the
+  // window, it started its kernel again, one start per such slot.
+  const idleMarker = join(home, "starts-refusal-idle");
+  process.env.FAKE_MARKER = idleMarker;
+  const sleepy = poolOf(300);
+  try {
+    delete process.env.FAKE_MODE;
+    const a = hold(sleepy);
+    await until(a.running, 10_000);
+    const b = hold(sleepy);
+    await until(b.running, 10_000);
+    a.release();
+    b.release();
+    await Promise.all([a.done, b.done]);
+    // Both left to stop for idleness, their slots still in the pool.
+    await new Promise((r) => setTimeout(r, 1_500));
+    process.env.FAKE_MODE = "no-such-server";
+    await outcome(sleepy.run(flavour, evaluate)); // restarts one, fails, opens the window
+    const before = starts(idleMarker);
+    const second = await outcome(sleepy.run(flavour, evaluate));
+    const started = starts(idleMarker) - before;
+    check(
+      "and a slot whose kernel stopped for idleness is not used to start one inside the window",
+      /none was started for this request/.test(second) && started === 0,
+      `${started} start(s): ${second.replace(/\s+/g, " ").slice(0, 90)}`,
+    );
+  } finally {
+    await sleepy.stop();
+    if (savedMode === undefined) delete process.env.FAKE_MODE;
+    else process.env.FAKE_MODE = savedMode;
+    if (savedMarker === undefined) delete process.env.FAKE_MARKER;
+    else process.env.FAKE_MARKER = savedMarker;
+  }
+
+  // The same window, as a shared session sees it: refused at once, and
+  // wolfram_status saying why and for how long.
+  wipeCache();
+  const runtime = privateDir(join(home, "run-refusing"));
+  const s = await connect({
+    WOLFRAM_MCP_SHARE: "1",
+    XDG_RUNTIME_DIR: runtime,
+    WOLFRAM_MCP_LICENSE_LIMIT: "4",
+    MCP_SERVER_NAME: "WolframVerifier/Verifier",
+    FAKE_MODE: "no-paclet-extension",
+    WOLFRAM_MCP_KERNEL_ENV: "FAKE_MODE",
+  });
+  const call = () =>
+    s.client
+      .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 })
+      .then((r) => r.content?.[0]?.text ?? "", (e) => e.message);
+  await call(); // the start that fails, and opens the window
+  const status = (await s.client.callTool({ name: "wolfram_status", arguments: {} })).content?.[0]?.text ?? "";
+  const refusing = status.split("\n").find((line) => line.startsWith("refusing")) ?? "(no refusing line)";
+  check(
+    "a shared session's wolfram_status says the broker is refusing its server, and for how long",
+    /tried again in \d/.test(refusing),
+    refusing.slice(0, 160),
+  );
+  // The kernel's words come with its last output, several lines of it, which
+  // ran flush left through the report from its second line on.
+  const report = status.split("\n");
+  const from = report.findIndex((line) => line.startsWith("refusing"));
+  // Up to the next label, which is always the tool list's: any line between
+  // that does not start under the label is the spill.
+  const to = report.findIndex((line, i) => i > from && line.startsWith("tool list"));
+  const spilled = report.slice(from + 1, to).filter((line) => line && !line.startsWith("            "));
+  check(
+    "and the kernel's words beneath it stay under the label",
+    from !== -1 && to > from + 1 && spilled.length === 0,
+    spilled.slice(0, 2).join(" | ").slice(0, 120) || `${to - from - 1} line(s) beneath`,
+  );
+  // Asked by a session of another flavour, the same broker says nothing of it:
+  // the failure carries that server's error, paths and all.
+  const socket = readdirSync(runtime).find((f) => f.endsWith(".sock"));
+  const other = socket
+    ? await lib.BrokerBackend.attachIfRunning({
+        address: join(runtime, socket),
+        flavour: lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" }),
+        spawnCommand: join(home, "definitely-not-a-binary"),
+        spawnArgs: [],
+        spawnEnv: {},
+        log: () => {},
+      })
+    : null;
+  const told = other ? JSON.stringify((await other.status(2_000)).refusing ?? null) : "could not attach";
+  await other?.stop();
+  check(
+    "and a session of another flavour is told nothing of it",
+    told === "null",
+    told.slice(0, 120),
+  );
+  await s.client.close();
+  // The private back-off's reason carries the same kernel output, and its
+  // line was indented on its first only.
+  const lone = await connect({ WOLFRAM_MCP_SHARE: "0", FAKE_MODE: "no-such-server" });
+  await lone.client
+    .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 })
+    .catch(() => {});
+  const loneStatus =
+    (await lone.client.callTool({ name: "wolfram_status", arguments: {} })).content?.[0]?.text ?? "";
+  const loneReport = loneStatus.split("\n");
+  const loneFrom = loneReport.findIndex((line) => line.startsWith("preparing"));
+  const loneTo = loneReport.findIndex((line, i) => i > loneFrom && line.startsWith("sharing"));
+  const loneSpilled = loneReport
+    .slice(loneFrom + 1, loneTo)
+    .filter((line) => line && !line.startsWith("            "));
+  check(
+    "and a private session's back-off keeps the kernel's words under its label too",
+    loneFrom !== -1 && loneTo > loneFrom + 1 && loneSpilled.length === 0,
+    loneSpilled.slice(0, 2).join(" | ").slice(0, 120) || `${loneTo - loneFrom - 1} line(s) beneath`,
+  );
+  await lone.client.close();
+  signalOwnBrokers("SIGKILL", runtime);
+  await new Promise((r) => setTimeout(r, 300));
+}
+
+// ---------------------------------------------------------------------------
 heading("Findings the August audit recorded and nothing tracked");
 {
   // S7 — a cursor is one kernel's paging state, and the pool hands out whichever

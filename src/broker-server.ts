@@ -441,6 +441,9 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
             licence: pool.licence,
             connections: connections.size,
             pid: process.pid,
+            // This session's own, only: another's carries its server's error,
+            // paths and all, to a session that has no use for it.
+            refusing: pool.refusing(declared.digest),
           });
         default:
           return { id: request.id, ok: false, error: `unknown broker op: ${String(request.op)}` };
