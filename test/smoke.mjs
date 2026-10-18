@@ -4948,28 +4948,31 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
 heading("The pool's refusal window spares a flavour's idle kernel, and is reported");
 {
   const savedMode = process.env.FAKE_MODE;
-  const pool = new lib.KernelPool({
-    bin: fakeKernel,
-    serverName: "WolframLanguage",
-    idleMs: 60_000,
-    startTimeoutMs: 20_000,
-    clientInfo: { name: "smoke", version: "1.0.0" },
-    log: () => {},
-    reserveSeats: 0,
-    licence: { maxProcesses: 2, type: null },
-    learnFromKernels: false,
-  });
+  const savedMarker = process.env.FAKE_MARKER;
+  const poolOf = (idleMs) =>
+    new lib.KernelPool({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 2, type: null },
+      learnFromKernels: false,
+    });
+  const pool = poolOf(60_000);
   const flavour = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" });
   const evaluate = (client) =>
     client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } });
   const outcome = (run) => run.then((r) => r.content?.[0]?.text ?? "(empty)", (e) => `failed: ${e.message}`);
   // A kernel of the flavour, held busy so the next request has to start another.
-  const hold = () => {
+  const hold = (on = pool) => {
     let release;
     const held = new Promise((resolve) => (release = resolve));
     let running = false;
     const done = outcome(
-      pool.run(flavour, async (client) => {
+      on.run(flavour, async (client) => {
         running = true;
         await held;
         return evaluate(client);
@@ -4993,21 +4996,56 @@ heading("The pool's refusal window spares a flavour's idle kernel, and is report
       /^failed/.test(extra) && /^evaluated/.test(served),
       `extra start: ${extra.replace(/\s+/g, " ").slice(0, 60)}; then: ${served.replace(/\s+/g, " ").slice(0, 80)}`,
     );
-    // What would start a kernel is still turned away, inside the window.
+    // One that would start a kernel waits instead for its flavour's running
+    // one, which starts nothing, and is served when it frees.
     const again = hold();
     await until(again.running, 10_000);
-    const refused = await outcome(pool.run(flavour, evaluate));
+    const waiting = outcome(pool.run(flavour, evaluate));
+    await new Promise((r) => setTimeout(r, 200));
     again.release();
     await again.done;
+    const waited = await waiting;
     check(
-      "and one that would start a kernel is still refused",
-      /none was started for this request/.test(refused),
-      refused.replace(/\s+/g, " ").slice(0, 100),
+      "and one that would start a kernel waits for its flavour's running one instead",
+      /^evaluated/.test(waited),
+      waited.replace(/\s+/g, " ").slice(0, 100),
     );
   } finally {
     await pool.stop();
+  }
+
+  // A slot whose kernel stopped for idleness is not running: taken inside the
+  // window, it started its kernel again, one start per such slot.
+  const idleMarker = join(home, "starts-refusal-idle");
+  process.env.FAKE_MARKER = idleMarker;
+  const sleepy = poolOf(300);
+  try {
+    delete process.env.FAKE_MODE;
+    const a = hold(sleepy);
+    await until(a.running, 10_000);
+    const b = hold(sleepy);
+    await until(b.running, 10_000);
+    a.release();
+    b.release();
+    await Promise.all([a.done, b.done]);
+    // Both left to stop for idleness, their slots still in the pool.
+    await new Promise((r) => setTimeout(r, 1_500));
+    process.env.FAKE_MODE = "no-such-server";
+    await outcome(sleepy.run(flavour, evaluate)); // restarts one, fails, opens the window
+    const before = starts(idleMarker);
+    const second = await outcome(sleepy.run(flavour, evaluate));
+    const started = starts(idleMarker) - before;
+    check(
+      "and a slot whose kernel stopped for idleness is not used to start one inside the window",
+      /none was started for this request/.test(second) && started === 0,
+      `${started} start(s): ${second.replace(/\s+/g, " ").slice(0, 90)}`,
+    );
+  } finally {
+    await sleepy.stop();
     if (savedMode === undefined) delete process.env.FAKE_MODE;
     else process.env.FAKE_MODE = savedMode;
+    if (savedMarker === undefined) delete process.env.FAKE_MARKER;
+    else process.env.FAKE_MARKER = savedMarker;
   }
 
   // The same window, as a shared session sees it: refused at once, and
@@ -5033,6 +5071,26 @@ heading("The pool's refusal window spares a flavour's idle kernel, and is report
     "a shared session's wolfram_status says the broker is refusing its server, and for how long",
     /tried again in \d/.test(refusing),
     refusing.slice(0, 160),
+  );
+  // Asked by a session of another flavour, the same broker says nothing of it:
+  // the failure carries that server's error, paths and all.
+  const socket = readdirSync(runtime).find((f) => f.endsWith(".sock"));
+  const other = socket
+    ? await lib.BrokerBackend.attachIfRunning({
+        address: join(runtime, socket),
+        flavour: lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" }),
+        spawnCommand: join(home, "definitely-not-a-binary"),
+        spawnArgs: [],
+        spawnEnv: {},
+        log: () => {},
+      })
+    : null;
+  const told = other ? JSON.stringify((await other.status(2_000)).refusing ?? null) : "could not attach";
+  await other?.stop();
+  check(
+    "and a session of another flavour is told nothing of it",
+    told === "null",
+    told.slice(0, 120),
   );
   await s.client.close();
   signalOwnBrokers("SIGKILL", runtime);

@@ -314,34 +314,40 @@ export class KernelPool {
    */
   async #acquire(flavour: KernelFlavour, signal?: AbortSignal): Promise<Slot> {
     const mine = (s: Slot) => s.flavour.digest === flavour.digest;
+    // While its flavour's server would not start, nothing may start a kernel
+    // for it: only a kernel already running serves. Checked before any of this,
+    // the window also refused a request such a kernel could answer, so one
+    // failed extra start turned the whole flavour away (#101). And a slot
+    // whose kernel stopped for idleness is not running: used, it starts one.
+    const refusal = this.#refusal(flavour);
+    const ready = (s: Slot) => refusal === null || s.session.running;
 
-    const free = this.#slots.find((s) => !s.busy && !s.session.abandoned && mine(s));
+    const free = this.#slots.find((s) => !s.busy && !s.session.abandoned && mine(s) && ready(s));
     if (free) {
       free.busy = true;
       return free;
     }
-    // Turned away here, once an idle kernel of its flavour has been looked for
-    // and before anything below starts one, or retires another session's to
-    // make room: the window is about starts. Checked before that look, it also
-    // refused a request its flavour's running kernel could answer, so one failed
-    // extra start turned the whole flavour away (#101).
-    const refusal = this.#refusal(flavour);
-    if (refusal) throw refusal;
-    // A fresh kernel beats stopping one that may still be finishing something.
-    if (this.#slots.length < this.#budget) return this.#grow(flavour);
+    if (refusal) {
+      // Waiting for a running kernel of its own starts nothing, so it waits.
+      // With none, every tier below would start one.
+      if (!this.#slots.some((s) => mine(s) && s.session.running)) throw refusal;
+    } else {
+      // A fresh kernel beats stopping one that may still be finishing something.
+      if (this.#slots.length < this.#budget) return this.#grow(flavour);
 
-    // Nothing of ours is free and the budget is spent, so a seat has to come
-    // from somewhere. An idle kernel of another flavour is the cheapest loss.
-    if (this.#swapOut(flavour)) return this.#grow(flavour);
+      // Nothing of ours is free and the budget is spent, so a seat has to come
+      // from somewhere. An idle kernel of another flavour is the cheapest loss.
+      if (this.#swapOut(flavour)) return this.#grow(flavour);
 
-    const spent = this.#idle(flavour);
-    if (spent) {
-      this.#options.log(
-        `budget reached; reusing a kernel that holds an abandoned call, which ` +
-          `stops it — no other kernel can serve this request`,
-      );
-      spent.busy = true;
-      return spent;
+      const spent = this.#idle(flavour);
+      if (spent) {
+        this.#options.log(
+          `budget reached; reusing a kernel that holds an abandoned call, which ` +
+            `stops it — no other kernel can serve this request`,
+        );
+        spent.busy = true;
+        return spent;
+      }
     }
 
     this.#options.log(
@@ -469,16 +475,21 @@ export class KernelPool {
         head.resolve(slot);
       };
 
-      const fresh = this.#slots.find((s) => !s.busy && !s.session.abandoned && mine(s));
+      // As in #acquire: inside the window only a running kernel serves, a
+      // waiter keeps waiting while one of its own runs, and with none it is
+      // turned away before any tier below can start a kernel or retire
+      // another session's for it (#101).
+      const refusal = this.#refusal(flavour);
+      const fresh = this.#slots.find(
+        (s) =>
+          !s.busy && !s.session.abandoned && mine(s) && (refusal === null || s.session.running),
+      );
       if (fresh) {
         take(fresh);
         continue;
       }
-      // Turned away before any tier below can grow a kernel or retire another
-      // session's for it, its flavour's server having stopped starting while it
-      // waited; but only then, as in #acquire (#101).
-      const refusal = this.#refusal(flavour);
       if (refusal) {
+        if (this.#slots.some((s) => mine(s) && s.session.running)) return;
         this.#waiters.shift();
         head.reject(refusal);
         continue;
@@ -545,46 +556,49 @@ export class KernelPool {
   }
 
   #recordUnresolved(digest: string, err: unknown): void {
-    const now = this.#now();
     // Pruned here, so a long-lived broker does not keep every name that ever
     // failed, kernel output and all.
-    for (const [key, known] of this.#unresolved) {
-      if (now - known.at >= NOT_RESOLVED_BACKOFF_MS) this.#unresolved.delete(key);
-    }
-    this.#unresolved.set(digest, { at: now, reason: errorText(err) });
+    for (const key of [...this.#unresolved.keys()]) this.#window(key);
+    this.#unresolved.set(digest, { at: this.#now(), reason: errorText(err) });
   }
 
   /**
-   * The flavours this pool is refusing to start a kernel for, how much longer
-   * for, and why. For the broker's `status`: on the shared path the window is
-   * the pool's, and `wolfram_status` could say nothing of why a session's
-   * requests were turned away, where it reports a private session's back-off
-   * (#101).
+   * A flavour's window, while it stands: how long it has run, how much longer
+   * it runs, and the kernel's words. The one place that is worked out, so the
+   * refusal and what `status` reports of it cannot disagree at the edge.
    */
-  refusals(): { digest: string; remainingMs: number; reason: string }[] {
-    const now = this.#now();
-    const refusing = [];
-    for (const [digest, known] of this.#unresolved) {
-      const remainingMs = NOT_RESOLVED_BACKOFF_MS - (now - known.at);
-      if (remainingMs > 0) refusing.push({ digest, remainingMs, reason: known.reason });
+  #window(digest: string): { ageMs: number; remainingMs: number; reason: string } | null {
+    const known = this.#unresolved.get(digest);
+    if (!known) return null;
+    const ageMs = this.#now() - known.at;
+    if (ageMs >= NOT_RESOLVED_BACKOFF_MS) {
+      this.#unresolved.delete(digest);
+      return null;
     }
-    return refusing;
+    return { ageMs, remainingMs: NOT_RESOLVED_BACKOFF_MS - ageMs, reason: known.reason };
+  }
+
+  /**
+   * Whether this pool is refusing to start a kernel for a flavour, how much
+   * longer for, and why. For the broker's `status`: on the shared path the
+   * window is the pool's, and `wolfram_status` could say nothing of why a
+   * session's requests were turned away, where it reports a private session's
+   * back-off (#101).
+   */
+  refusing(digest: string): { remainingMs: number; reason: string } | null {
+    const window = this.#window(digest);
+    return window && { remainingMs: window.remainingMs, reason: window.reason };
   }
 
   /** The refusal for a request while its flavour's server recently would not start. */
   #refusal(flavour: KernelFlavour): ServerNotResolved | null {
-    const known = this.#unresolved.get(flavour.digest);
-    if (!known) return null;
-    const age = this.#now() - known.at;
-    if (age >= NOT_RESOLVED_BACKOFF_MS) {
-      this.#unresolved.delete(flavour.digest);
-      return null;
-    }
+    const window = this.#window(flavour.digest);
+    if (!window) return null;
     return new ServerNotResolved(
-      `a kernel for this server could not start it ${elapsedText(age)} ago, so ` +
+      `a kernel for this server could not start it ${elapsedText(window.ageMs)} ago, so ` +
         `none was started for this request; it is tried again in ` +
-        `${waitText(NOT_RESOLVED_BACKOFF_MS - age)}; ${NOT_RESOLVED_ADVICE}.` +
-        `\n\nThe failure was: ${known.reason}`,
+        `${waitText(window.remainingMs)}; ${NOT_RESOLVED_ADVICE}.` +
+        `\n\nThe failure was: ${window.reason}`,
     );
   }
 

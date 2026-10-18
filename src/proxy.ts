@@ -232,7 +232,7 @@ async function describeSharing(
       // The shared path's back-off is the pool's, per flavour, and said as the
       // private one is, on lines of its own: while it stands, this session's
       // requests that would start a kernel are turned away at once (#101).
-      const refused = status.refusing?.find((r) => r.digest === config.flavour.digest);
+      const refused = status.refusing;
       if (!refused) return line;
       return (
         `${line}\n` +
