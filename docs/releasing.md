@@ -232,17 +232,25 @@ bumps every release.
 The last job of every release run, `advance` (`scripts/release-branch.mjs`), keeps the branch and
 GitHub's Latest on the newest release, read from what is published after every build in the
 run, whatever each did. The newest release is the highest `v<x.y.z>` published and not a
-pre-release. When the branch is behind it, `advance`:
+pre-release. It reads the branch once, fetching its history, and plans from that read. When the
+branch is behind, `advance` takes each published release newer than the branch's version,
+oldest first, so none the branch passes is left without a commit to pin (#58):
 
-1. downloads that release's zip and `SHA256SUMS.txt`, and checks the zip's line;
-2. builds the branch's tree from that zip, refusing one whose `plugin.json` names another
-   version;
-3. commits it to `release` and pushes, refused unless it fast-forwards, so the branch only
-   ever moves forward;
-4. tags the commit `wolfram--v<version>`, Claude Code's `<plugin>--v<version>` convention,
-   never replacing a tag;
-5. marks the release Latest, after the branch, so Latest never names a release the branch
-   doesn't carry.
+1. downloads its zip and `SHA256SUMS.txt`, and checks the zip's line;
+2. builds a tree from that zip, refusing one whose `plugin.json` names another version;
+3. commits each tree in turn on the commit the plan read, then pushes `release` once,
+   refused unless it fast-forwards, so the branch only ever moves forward, and never past
+   a push made meanwhile;
+4. tags each commit `wolfram--v<version>`, Claude Code's `<plugin>--v<version>` convention,
+   after the push and never replacing a tag;
+5. marks the newest release Latest, after the branch, so Latest never names a release the
+   branch doesn't carry.
+
+A tag is checked, not trusted by name. One missing from a commit already on the branch, which a
+run that failed partway leaves, is added at that commit. One at another commit than the branch
+puts its version on is reported as a warning and left where it is, and so is one already there
+for a release the branch is only now given. Releases from before the branch existed, v0.1.0 and
+v0.1.1, are on no branch commit and stay untagged.
 
 A step that fails leaves everything after it for the next release run, which repeats it. A
 release finished late, or built by hand, is published with Latest off and moves neither until a
@@ -414,7 +422,7 @@ GITHUB_REF_NAME=release-please--branches--main GITHUB_REF_TYPE=branch \
   node scripts/release-version.mjs        # the version comes from package.json
 node scripts/commit-types.mjs origin/main HEAD   # what CI asks of a PR's commits
 GITHUB_REPOSITORY=<owner>/<repo> node scripts/pending-release.mjs   # what a release run would finish; reads only
-GITHUB_REPOSITORY=<owner>/<repo> node scripts/release-branch.mjs plan   # where advance would move the branch; reads only
+GITHUB_REPOSITORY=<owner>/<repo> node scripts/release-branch.mjs plan   # where advance would move the branch; reads only, fetching release into origin/release
 node scripts/release-version.mjs --stamp 0.1.0-pre.99   # then restore what it changed (git status)
 ```
 
