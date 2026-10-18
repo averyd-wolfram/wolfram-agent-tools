@@ -323,10 +323,9 @@ export class KernelPool {
    * never "has this run too long" but "does anyone need the seat".
    */
   #idle(flavour: KernelFlavour): Slot | undefined {
-    const mine = (s: Slot) => s.flavour.digest === flavour.digest;
     return (
-      this.#slots.find((s) => !s.busy && !s.session.abandoned && mine(s)) ??
-      this.#slots.find((s) => !s.busy && mine(s))
+      this.#slots.find((s) => this.#servable(s, flavour, false)) ??
+      this.#slots.find((s) => !s.busy && s.flavour.digest === flavour.digest)
     );
   }
 
@@ -334,7 +333,9 @@ export class KernelPool {
    * Take an idle kernel of this flavour, grow one, make room for one, or wait.
    *
    * Five tiers, and the order is what keeps sharing wide while never serving a
-   * session from a kernel that is not its own kind.
+   * session from a kernel that is not its own kind. While the flavour's server
+   * would not start, only the first applies, to running kernels only, and a
+   * request it cannot serve is refused before any other (#101).
    */
   async #acquire(flavour: KernelFlavour, signal?: AbortSignal): Promise<Slot> {
     const window = this.#window(flavour.digest);
@@ -569,8 +570,11 @@ export class KernelPool {
   #recordUnresolved(digest: string, err: unknown): void {
     // Pruned here, so a long-lived broker does not keep every name that ever
     // failed, kernel output and all.
-    for (const key of [...this.#unresolved.keys()]) this.#window(key);
-    this.#unresolved.set(digest, { at: this.#now(), reason: errorText(err) });
+    const now = this.#now();
+    for (const [key, known] of this.#unresolved) {
+      if (now - known.at >= NOT_RESOLVED_BACKOFF_MS) this.#unresolved.delete(key);
+    }
+    this.#unresolved.set(digest, { at: now, reason: errorText(err) });
   }
 
   /**

@@ -5103,6 +5103,26 @@ heading("The pool's refusal window spares a flavour's idle kernel, and is report
     told.slice(0, 120),
   );
   await s.client.close();
+  // The private back-off's reason carries the same kernel output, and its
+  // line was indented on its first only.
+  const lone = await connect({ WOLFRAM_MCP_SHARE: "0", FAKE_MODE: "no-such-server" });
+  await lone.client
+    .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 })
+    .catch(() => {});
+  const loneStatus =
+    (await lone.client.callTool({ name: "wolfram_status", arguments: {} })).content?.[0]?.text ?? "";
+  const loneReport = loneStatus.split("\n");
+  const loneFrom = loneReport.findIndex((line) => line.startsWith("preparing"));
+  const loneTo = loneReport.findIndex((line, i) => i > loneFrom && line.startsWith("sharing"));
+  const loneSpilled = loneReport
+    .slice(loneFrom + 1, loneTo)
+    .filter((line) => line && !line.startsWith("            "));
+  check(
+    "and a private session's back-off keeps the kernel's words under its label too",
+    loneFrom !== -1 && loneTo > loneFrom + 1 && loneSpilled.length === 0,
+    loneSpilled.slice(0, 2).join(" | ").slice(0, 120) || `${loneTo - loneFrom - 1} line(s) beneath`,
+  );
+  await lone.client.close();
   signalOwnBrokers("SIGKILL", runtime);
   await new Promise((r) => setTimeout(r, 300));
 }
