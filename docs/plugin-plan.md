@@ -791,8 +791,12 @@ are *traced* in this tree on 2026-10-05 unless marked otherwise.
    schema refused into a protocol error. The client a session serves validates against the
    schemas relayed to it; measured, Claude Code 2.1.290 lists a server whose tool carries a
    schema ajv refuses. Checked through the private path, the broker, a warm cache and `doctor`,
-   with the fake emitting both. A schema that is not `type: "object"` still fails the whole list,
-   in the SDK's parse rather than ajv, and is non-conformant (#69). *Traced:* AgentTools 2.2.7
+   with the fake emitting both. Nor is the list held to the SDK's parse, which failed the whole of
+   it on one schema that was not `type: "object"` (#69): each tool is judged on its own. An
+   `outputSchema` of another type is relayed, since Claude Code 2.1.302 was measured listing one;
+   a tool with no name, or an `inputSchema` that is not an object schema, which a model cannot
+   be given and no client was measured taking, is left out with the reason logged, and the rest
+   are listed. *Traced:* AgentTools 2.2.7
    emits neither — a tool's entry is built from five fixed keys (`createMCPToolData`,
    `Kernel/Server/Shared.wl`), and its results leave `structuredContent` out on purpose — so
    `test:custom` cannot pin this until a paclet lets a tool declare an output schema.

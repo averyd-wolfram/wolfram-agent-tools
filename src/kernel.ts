@@ -12,10 +12,11 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import {
   ErrorCode,
-  ListToolsResultSchema,
   McpError,
+  PaginatedResultSchema,
   PromptListChangedNotificationSchema,
   ToolListChangedNotificationSchema,
+  ToolSchema,
   type ListToolsRequest,
   type ListToolsResult,
   type Tool,
@@ -143,13 +144,75 @@ function requestOptions(signal: AbortSignal | undefined): RequestOptions {
  * `callTool` no longer refuses a result its tool's schema would, nor a call to
  * a tool that requires task-based execution, which the kernel answers itself.
  * It did either only once this client had happened to list the tools.
+ *
+ * Nor does it hold the list to the SDK's `ListToolsResultSchema`, which
+ * requires each tool's `inputSchema`, and any `outputSchema`, to be an
+ * object: one tool that was not failed the whole parse, and every tool of the
+ * server with it, by the same route (#69). Each tool is judged on its own
+ * instead, by the SDK's `ToolSchema` and all of it but the `outputSchema`,
+ * and one that fails is left out, saying why, while the rest are listed. The
+ * `outputSchema` is relayed as the kernel sent it: measured, Claude Code
+ * 2.1.302 lists a tool whose output schema is an array. Nothing else of a tool
+ * was measured, and a client sends its `inputSchema` on to the Messages API,
+ * which takes a malformed one for the whole request, so every model request
+ * in that client's session could fail.
  */
 class RelayClient extends Client {
-  override listTools(
+  readonly #log: (message: string) => void;
+
+  constructor(
+    info: ConstructorParameters<typeof Client>[0],
+    options: ConstructorParameters<typeof Client>[1],
+    log: (message: string) => void,
+  ) {
+    super(info, options);
+    this.#log = log;
+  }
+
+  override async listTools(
     params?: ListToolsRequest["params"],
     options?: RequestOptions,
   ): Promise<ListToolsResult> {
-    return this.request({ method: "tools/list", params }, ListToolsResultSchema, options);
+    // Paginated, so the cursor is held to a string as every other list's is.
+    const result = await this.request(
+      { method: "tools/list", params },
+      PaginatedResultSchema,
+      options,
+    );
+    const tools: unknown = (result as { tools?: unknown }).tools;
+    if (!Array.isArray(tools)) {
+      throw new McpError(
+        ErrorCode.InternalError,
+        `the kernel's tools/list result holds no list of tools: ${JSON.stringify(tools)?.slice(0, 120)}`,
+      );
+    }
+    const listed: unknown[] = tools;
+    const kept: ListToolsResult["tools"] = [];
+    listed.forEach((tool, index) => {
+      const { outputSchema, ...rest } =
+        typeof tool === "object" && tool !== null ? (tool as Record<string, unknown>) : {};
+      const parsed = ToolSchema.safeParse(rest);
+      if (parsed.success) {
+        kept.push(
+          outputSchema === undefined
+            ? parsed.data
+            : ({ ...parsed.data, outputSchema } as ListToolsResult["tools"][number]),
+        );
+        return;
+      }
+      const name = typeof rest["name"] === "string" ? rest["name"] : null;
+      // Counted on its page, since that is all this call sees of the list.
+      const which = name ?? `entry ${index + 1} of ${listed.length} on this page`;
+      const issue = parsed.error.issues[0];
+      const why = issue
+        ? `${issue.path.join(".") || "the tool"}: ${issue.message}`
+        : "it is not a tool";
+      this.#log(
+        `a tool the kernel listed is left out (${which}): ${why}; ` +
+          `it was ${JSON.stringify(tool)?.slice(0, 160)}`,
+      );
+    });
+    return { ...result, tools: kept };
   }
 }
 
@@ -465,7 +528,7 @@ export class KernelSession {
       onFatal: (error) => reportFatal(error),
     });
 
-    const client = new RelayClient(clientInfo, { capabilities: {} });
+    const client = new RelayClient(clientInfo, { capabilities: {} }, log);
     this.#handshaking = { transport, abort: (error) => reportFatal(error) };
     client.onerror = (err) => log(`upstream error: ${errorText(err)}`);
     client.onclose = () => {
