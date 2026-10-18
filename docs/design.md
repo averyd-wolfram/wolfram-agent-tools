@@ -298,8 +298,11 @@ take the address itself (#32). So every broker checks regularly that the address
 still holds its socket. One that finds it gone or replaced tells its sessions to choose
 again, answers what they had already asked, and leaves. A session that chooses again
 meanwhile keeps the old connection open until what it had asked there has settled, since
-the broker reads a closed connection as its proxy gone and abandons that work (#76). The
-session's own stop still closes it at once.
+the broker reads a closed connection as its proxy gone and abandons that work (#76). While
+calls are on it, the session asks the leaving broker every few seconds whether it still
+answers, and gives it up on the first ping it does not: a call with no ceiling never runs
+out to ask, and on a broker that froze it waited for ever (#111). The session's own stop
+still closes it at once.
 
 **Budget.** Only a kernel can read `$MaxLicenseProcesses`, so the pool starts at one and
 asks the first kernel it starts, then caches the answer. `deriveBudget` is a pure

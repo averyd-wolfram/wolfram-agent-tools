@@ -122,6 +122,13 @@ export function brokerCeilingMs(
 const PING_DEADLINE_MS = REQUEST_GRACE_MS;
 
 /**
+ * How often a connection whose broker is leaving asks whether it still
+ * answers, while calls are on it (`#watchDrain`). A frozen one is then found
+ * out within this and a ping's deadline, whatever the calls' own ceilings.
+ */
+const DRAIN_PING_INTERVAL_MS = 3 * PING_DEADLINE_MS;
+
+/**
  * Rebuild the kernel's failure with its class intact.
  *
  * The proxy decides between an `isError` result and an MCP error response by
@@ -223,6 +230,8 @@ export class BrokerBackend implements KernelBackend {
   #retired = false;
   /** Whether the broker still answers, while that is being asked (`#stillAnswering`). */
   #asking: Promise<boolean> | null = null;
+  /** The interval asking a leaving broker whether it still answers (`#watchDrain`). */
+  #drainWatch: NodeJS.Timeout | null = null;
 
   private constructor(options: BrokerClientOptions, socket: Socket) {
     this.#options = options;
@@ -465,9 +474,9 @@ export class BrokerBackend implements KernelBackend {
    * `settled()` holds the session's next request until this is known: sent to
    * a frozen broker meanwhile, it was held to its own whole ceiling.
    */
-  #stillAnswering(op: BrokerOp): Promise<boolean> {
+  #stillAnswering(why: string, { quietly = false } = {}): Promise<boolean> {
     if (!this.#asking) {
-      this.#options.log(`${op} ran out; asking the broker whether it is still running`);
+      if (!quietly) this.#options.log(`${why}; asking the broker whether it is still running`);
       this.#asking = this.#answers().then((alive) => {
         this.#asking = null;
         // On the socket rather than `#closed`, for the same reason: a draining
@@ -489,7 +498,7 @@ export class BrokerBackend implements KernelBackend {
           // stops the work it was given, which nobody is waiting for any more.
           this.#failAll(
             new Error(
-              `the Wolfram broker stopped answering: ${op} ran out, and it did not answer ` +
+              `the Wolfram broker stopped answering: ${why}, and it did not answer ` +
                 "when asked whether it was still running",
             ),
           );
@@ -504,6 +513,49 @@ export class BrokerBackend implements KernelBackend {
   /** See `KernelBackend.settled`: whether the broker still answers, once asked. */
   async settled(): Promise<void> {
     await this.#asking;
+  }
+
+  /**
+   * Ask a leaving broker, on an interval, whether it still answers, for as long
+   * as calls are on this connection, and give it up on the first ping it does
+   * not answer.
+   *
+   * A connection is asked when a request on it runs out, and a call with no
+   * ceiling never does. Nor can anything new be sent on a connection closed to
+   * new work to ask instead: so on a leaving broker that froze, such a call
+   * waited for ever, the socket holding the session's loop open, and the
+   * backend stayed retiring until the session stopped (#111). Started at the
+   * broker's word rather than at `retire`, since a session that makes no
+   * request after it never retires the connection at all. Every call is
+   * covered, not only one with no ceiling: a frozen broker is then found out in
+   * seconds rather than at whichever ceiling is longest. Said once, not at each
+   * ping, which a long evaluation would have repeated for its whole length.
+   *
+   * Unref'd: the socket already holds the loop while a caller waits on it, so
+   * the interval adds nothing to that. A ping it has out when the last call
+   * settles holds the loop for what is left of its deadline, as every ping does
+   * (`#answers`). A broker that answers but never finishes, holding its seats,
+   * is #80's.
+   */
+  #watchDrain(): void {
+    if (this.#drainWatch || this.#outstanding.size === 0) return;
+    this.#options.log(
+      `${this.#outstanding.size} call(s) still on the leaving broker; asking every ` +
+        `${budgetText(DRAIN_PING_INTERVAL_MS)} whether it still answers`,
+    );
+    // Ended by the last call settling, or by the connection failing: both
+    // leave nothing here to ask for.
+    this.#drainWatch = setInterval(() => {
+      void this.#stillAnswering("it said it was leaving, with calls still on it", {
+        quietly: true,
+      });
+    }, DRAIN_PING_INTERVAL_MS);
+    this.#drainWatch.unref();
+  }
+
+  #unwatchDrain(): void {
+    if (this.#drainWatch) clearInterval(this.#drainWatch);
+    this.#drainWatch = null;
   }
 
   /**
@@ -547,6 +599,7 @@ export class BrokerBackend implements KernelBackend {
         // the close's to fail if it does not.
         this.#options.log("the broker is shutting down; will choose again");
         this.#closed = true;
+        this.#watchDrain();
         return;
       }
       if (frame.event === "progress") {
@@ -595,6 +648,8 @@ export class BrokerBackend implements KernelBackend {
     // Mark it closed: `usable()` is what tells DeferredBackend to decide again,
     // and without it every later call in the session failed identically.
     this.#closed = true;
+    // Nothing is left on it to ask for.
+    this.#unwatchDrain();
     for (const [, waiter] of this.#pending) waiter.reject(err);
     this.#pending.clear();
     // A probe outstanding when the socket dies has its answer, and should not
@@ -659,7 +714,7 @@ export class BrokerBackend implements KernelBackend {
               // The caller is answered; whether the broker is gone is another
               // question (`#stillAnswering`). How long a queued request may
               // wait, on either path, is #80.
-              void this.#stillAnswering(op);
+              void this.#stillAnswering(`${op} ran out`);
             }, timerDelay(ceiling));
       timer?.unref?.();
       const settle = {
@@ -704,8 +759,12 @@ export class BrokerBackend implements KernelBackend {
     });
     this.#outstanding.add(answer);
     // Both ways, so this side's copy of a rejection is handled; the caller
-    // handles its own.
-    const settled = () => this.#outstanding.delete(answer);
+    // handles its own. The last call to settle ends a drain's watch at once,
+    // rather than at its next ping.
+    const settled = () => {
+      this.#outstanding.delete(answer);
+      if (this.#outstanding.size === 0) this.#unwatchDrain();
+    };
     answer.then(settled, settled);
     return answer;
   }
