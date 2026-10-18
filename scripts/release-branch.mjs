@@ -3,7 +3,7 @@
  * The `release` branch, which another project follows to get the plugin, and
  * GitHub's Latest, which must agree with it (#7, #43).
  *
- *   node scripts/release-branch.mjs plan                     newest=… move=… tag=… latest=… for $GITHUB_OUTPUT
+ *   node scripts/release-branch.mjs plan                     newest=… head=… steps=… backfill=… latest=… for $GITHUB_OUTPUT
  *   node scripts/release-branch.mjs tree <zip> <dir> <version>   the branch's files, from a release's plugin archive
  *
  * A project adds this repository as a Claude Code marketplace at
@@ -18,11 +18,13 @@
  * One job decides both, at the end of every release run (release-please.yml),
  * from what is published rather than from what that run built: the newest
  * release is the highest `v<x.y.z>` published and not a pre-release. The
- * branch moves forward to it — never back — from its downloaded and verified
- * archive (the publication order of plugin plan §5 M1), its version is tagged
- * `wolfram--v<version>`, Claude Code's own convention for a plugin's release
- * tags, which a version range in another plugin's dependency resolves
- * against, and it is marked Latest. Builds publish with Latest off. So a
+ * branch moves forward to it — never back — a commit for each release since
+ * the version it carries, each from that release's downloaded and verified
+ * archive (the publication order of plugin plan §5 M1). Each version is
+ * tagged `wolfram--v<version>` at its own commit, Claude Code's own
+ * convention for a plugin's release tags, which a version range in another
+ * plugin's dependency resolves against, and the newest is marked Latest.
+ * Builds publish with Latest off. So a
  * release finished late, or built by hand, moves neither, and every run
  * repeats what one left undone. Release runs never overlap, so the job has no
  * race of its own.
@@ -47,37 +49,155 @@ export function versionTag(version) {
 /**
  * @param {{
  *   releases: { tag: string, draft: boolean, prerelease: boolean }[],
- *   branchVersion: string | undefined,
+ *   history: { commit: string, version: string | undefined }[],
  *   latestTag: string | undefined,
- *   tags: Iterable<string>,
- * }} input every release; the version in the branch's `plugin.json`, if the
- *   branch exists; the release GitHub marks Latest, if any; every tag
- * @returns {{ newest?: string, version?: string, move: boolean, tag?: string, latest: boolean, ahead?: string }}
- *   `move`: commit the newest release's plugin to the branch; `tag`: the tag to
- *   put on the branch's new or current head; `latest`: mark `newest` Latest;
- *   `ahead`: why the branch stays put although it carries no published version
+ *   tags: Iterable<[string, string]>,
+ * }} input every release; the branch's commits, newest first, each with the
+ *   version its `plugin.json` carries (none when the branch does not exist
+ *   yet); the release GitHub marks Latest, if any; every tag, with its commit
+ * @returns {{
+ *   newest?: string, version?: string, head?: string,
+ *   steps: { version: string, tag?: string }[], move: boolean,
+ *   backfill: { tag: string, commit: string }[],
+ *   latest: boolean, ahead?: string, warnings: string[],
+ * }}
+ *   `head`: the branch's commit as read, which `steps` go on top of;
+ *   `steps`: each version to commit to the branch in turn, oldest first, with
+ *   the tag to put on its commit, none when one is already elsewhere;
+ *   `backfill`: tags missing from commits already on the branch;
+ *   `latest`: mark `newest` Latest; `ahead`: why the branch stays put although
+ *   it carries no published version; `warnings`: tags not where the branch
+ *   puts their versions, and releases it passed without a commit
  */
-export function advancePlan({ releases, branchVersion, latestTag, tags }) {
-  if (branchVersion !== undefined && !tagVersion(`v${branchVersion}`, { core: true })) {
-    throw new Error(`the ${BRANCH} branch's plugin.json says ${branchVersion}, which is not x.y.z, so it can't be ordered`);
+export function advancePlan({ releases, history, latestTag, tags }) {
+  const head = history[0];
+  if (head && !(head.version !== undefined && tagVersion(`v${head.version}`, { core: true }))) {
+    throw new Error(`the ${BRANCH} branch's plugin.json says ${head.version}, which is not x.y.z, so it can't be ordered`);
   }
+  const result = { move: false, steps: [], backfill: [], latest: false, warnings: [] };
+  if (head) result.head = head.commit;
+  // Every version the branch has carried, at the newest commit carrying it,
+  // and every published one: only a release is pinned by a tag, so a version
+  // the branch carries that no release does is left untagged.
+  const carried = new Map();
+  for (const { commit, version } of history) {
+    if (version !== undefined && !carried.has(version)) carried.set(version, commit);
+  }
+  const releaseVersions = new Set(
+    releases
+      .filter(({ draft, prerelease }) => !draft && !prerelease)
+      .map(({ tag }) => tagVersion(tag, { core: true }))
+      .filter((version) => version !== undefined),
+  );
+  // Checked, not trusted by name: a tag where the branch does not put its
+  // version was pushed by hand, or by a step that tagged the branch as it
+  // found it rather than the commit its plan read (#58). Never moved here:
+  // the rulesets docs/releasing.md recommends forbid it, and a pin someone
+  // already follows should not change under them.
+  const tagAt = new Map(tags);
+  for (const [version, commit] of carried) {
+    const tag = versionTag(version);
+    const at = tagAt.get(tag);
+    if (at === undefined) {
+      if (releaseVersions.has(version)) result.backfill.push({ tag, commit });
+    } else if (at !== commit) {
+      result.warnings.push(`${tag} is at ${at}, not at ${commit}, the ${BRANCH} commit that carries ${version}`);
+    }
+  }
+  // Oldest first, as they are committed.
+  result.backfill.reverse();
+  // A tag for a version the branch never carried points at something no
+  // project following it would get: pushed by hand, most likely. Versions due
+  // now are judged below, where the branch is about to carry them.
+  const prefix = `${PLUGIN}--v`;
   const newest = latestRelease(releases);
-  if (!newest) return { move: false, latest: false };
-  const version = tagVersion(newest);
-  const order = branchVersion === undefined ? 1 : compareVersions(version, branchVersion);
-  const result = { newest, version, move: order > 0, latest: latestTag !== newest };
+  const version = newest === undefined ? undefined : tagVersion(newest);
+  // What the steps below give the branch: the releases above its head, or,
+  // for a new branch, the newest alone.
+  const due = (v) =>
+    head ? releaseVersions.has(v) && compareVersions(v, head.version) > 0 : v === version;
+  for (const [tag, at] of tagAt) {
+    const tagged = tag.startsWith(prefix) ? tag.slice(prefix.length) : undefined;
+    if (!tagged || carried.has(tagged) || !tagVersion(`v${tagged}`, { core: true })) continue;
+    if (due(tagged)) continue;
+    result.warnings.push(`${tag} is at ${at}, but the ${BRANCH} branch has never carried ${tagged}`);
+  }
+  // A release published after the branch passed it, one finished late, has
+  // no commit to carry it, since the branch never moves back; so no tag to pin
+  // it by either. Said, not mended. The branch's first version is the floor:
+  // what came before the branch was never on it.
+  const first = [...carried.keys()].sort(compareVersions)[0];
+  if (head && first !== undefined) {
+    for (const version of [...releaseVersions].sort(compareVersions)) {
+      if (carried.has(version) || compareVersions(version, first) < 0) continue;
+      if (compareVersions(version, head.version) > 0) continue;
+      result.warnings.push(
+        `v${version} was published after the ${BRANCH} branch passed it, so no commit carries it, ` +
+          `and ${versionTag(version)} cannot be made`,
+      );
+    }
+  }
+
+  if (!newest) return result;
+  Object.assign(result, { newest, version, latest: latestTag !== newest });
+  const order = head ? compareVersions(version, head.version) : 1;
   // Latest stays put too: moving it would name a release the branch, which
   // is what projects run, doesn't carry.
   if (order < 0) {
     result.latest = false;
     result.ahead =
-      `the ${BRANCH} branch carries ${branchVersion}, newer than any published release (${newest}): ` +
+      `the ${BRANCH} branch carries ${head.version}, newer than any published release (${newest}): ` +
       "it never moves back, so it and Latest stay until a release passes it";
     return result;
   }
-  const tag = versionTag(version);
-  if (!new Set(tags).has(tag)) result.tag = tag;
+  // Every release newer than the branch, each a commit of its own, so none
+  // the branch passes is left with no commit to pin (#58). A new branch starts
+  // at the newest: the releases before the branch existed have no plugin
+  // archive to build one from.
+  for (const v of [...releaseVersions].filter(due).sort(compareVersions)) {
+    const tag = versionTag(v);
+    const at = tagAt.get(tag);
+    if (at === undefined) {
+      result.steps.push({ version: v, tag });
+    } else {
+      result.steps.push({ version: v });
+      result.warnings.push(`${tag} is at ${at} already, though the ${BRANCH} branch has never carried ${v}: it is left there`);
+    }
+  }
+  result.move = result.steps.length > 0;
   return result;
+}
+
+/**
+ * The branch's commits, newest first, each with the version its `plugin.json`
+ * carries; none when the branch does not exist. One fetch, so the head the
+ * step builds on and tags, the version it is ordered by, and every commit a
+ * tag is checked against are the same read. The plan once read the version
+ * through the API and left the step to fetch the branch again and tag
+ * whatever it found there (#58). The fetch leaves the commits in this
+ * checkout, which the step, in the same job, builds on.
+ *
+ * @param {(cmd: string, argv: string[]) => string} run
+ */
+export function branchHistory(run) {
+  // The full ref: a bare `release` matches any branch ending in /release.
+  const heads = run("git", ["ls-remote", "--heads", "origin", `refs/heads/${BRANCH}`]).trim();
+  if (!heads) return [];
+  const remote = `refs/remotes/origin/${BRANCH}`;
+  run("git", ["fetch", "-q", "--no-tags", "origin", `+refs/heads/${BRANCH}:${remote}`]);
+  return run("git", ["rev-list", remote])
+    .trim()
+    .split("\n")
+    .map((commit) => {
+      let version;
+      try {
+        version = JSON.parse(run("git", ["show", `${commit}:plugin/.claude-plugin/plugin.json`])).version;
+      } catch {
+        // A commit with no readable plugin.json carries no version; at the
+        // branch's head, advancePlan refuses it.
+      }
+      return { commit, version };
+    });
 }
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -163,13 +283,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       const repo = process.env.GITHUB_REPOSITORY;
       if (!repo) throw new Error("GITHUB_REPOSITORY names no repository");
       const run = (cmd, argv) => execFileSync(cmd, argv, { encoding: "utf8" });
-      // The full ref: a bare `release` matches any branch ending in /release.
-      const heads = run("git", ["ls-remote", "--heads", "origin", `refs/heads/${BRANCH}`]).trim();
-      const branchVersion = heads
-        ? JSON.parse(
-            run("gh", ["api", "-H", "Accept: application/vnd.github.raw+json", `repos/${repo}/contents/plugin/.claude-plugin/plugin.json?ref=refs/heads/${BRANCH}`]),
-          ).version
-        : undefined;
+      const history = branchHistory(run);
       // Only "no Latest yet" is a 404 here; anything else must stop the run.
       let latestTag;
       try {
@@ -177,14 +291,27 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       } catch (err) {
         if (!/HTTP 404/.test(String(err.stderr ?? err.message))) throw err;
       }
-      const tags = tagCommits(run("git", ["ls-remote", "--tags", "origin"])).keys();
-      const result = advancePlan({ releases: listReleases(repo), branchVersion, latestTag, tags });
-      const lines = ["newest", "version", "move", "tag", "latest"]
-        .map((key) => `${key}=${result[key] ?? ""}\n`)
+      const tags = tagCommits(run("git", ["ls-remote", "--tags", "origin"]));
+      const result = advancePlan({ releases: listReleases(repo), history, latestTag, tags });
+      // Space-separated words for the step's shell to loop over: a version
+      // and the tag for its commit, or a commit and the tag it lacks. A step
+      // whose tag is elsewhere already gets none, so `0.1.7=`.
+      const outputs = {
+        newest: result.newest ?? "",
+        head: result.head ?? "",
+        move: result.move,
+        steps: result.steps.map(({ version, tag }) => `${version}=${tag ?? ""}`).join(" "),
+        backfill: result.backfill.map(({ tag, commit }) => `${commit}=${tag}`).join(" "),
+        latest: result.latest,
+      };
+      const lines = Object.entries(outputs)
+        .map(([key, value]) => `${key}=${value}\n`)
         .join("");
       if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, lines);
       process.stdout.write(lines);
-      if (result.ahead) process.stdout.write(`::warning::${result.ahead}\n`);
+      for (const warning of [result.ahead, ...result.warnings]) {
+        if (warning) process.stdout.write(`::warning::${warning}\n`);
+      }
     } else {
       throw new Error("usage: release-branch.mjs plan | tree <zip> <dir> <version>");
     }
