@@ -16,7 +16,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { ListToolsResultSchema } from "@modelcontextprotocol/sdk/types.js";
+import { ListToolsResultSchema, ResultSchema } from "@modelcontextprotocol/sdk/types.js";
 // The derivation the docs now point at, imported rather than repeated so the
 // suite and the script can never disagree about what src/ contains.
 
@@ -3883,6 +3883,48 @@ heading("A tool whose output schema cannot be compiled costs only itself, on eit
       `a result its own schema would refuse is relayed for the client to judge (${path})`,
       isDeepStrictEqual(called.structuredContent, { answer: 42 }),
       called.error ?? JSON.stringify(called).slice(0, 100),
+    );
+    await s.client.close();
+    await new Promise((r) => setTimeout(r, 300));
+  }
+
+  // The same loss through the SDK's parse rather than ajv: its
+  // ListToolsResultSchema holds every tool to an object schema, and one tool
+  // whose outputSchema is anything else failed the whole list, every tool of
+  // the server with it (#69). Measured, Claude Code 2.1.302 lists such a tool,
+  // so the relay passes it on as the kernel sent it, for the client to judge.
+  const nonObject = { type: "array", items: { type: "number" } };
+  for (const sharing of ["0", "1"]) {
+    const path = sharing === "1" ? "shared" : "private";
+    wipeCache();
+    const runtime = join(home, `run-arrayschema-${sharing}`);
+    privateDir(runtime);
+    const s = await connect({
+      WOLFRAM_MCP_SHARE: sharing,
+      XDG_RUNTIME_DIR: runtime,
+      WOLFRAM_MCP_LICENSE_LIMIT: "4",
+      FAKE_OUTPUT_SCHEMA: JSON.stringify(nonObject),
+    });
+    // ResultSchema, not ListToolsResultSchema: this suite's own client would
+    // otherwise refuse the list itself, whatever the server sent.
+    const listed = await s.client
+      .request({ method: "tools/list" }, ResultSchema, { timeout: 20_000 })
+      .then(
+        (r) => ({ tools: upstreamTools(r.tools ?? []) }),
+        (err) => ({ error: err.message }),
+      );
+    const names = listed.tools?.map((t) => t.name).join(", ");
+    check(
+      `a tool whose output schema is not an object is listed with the rest, as the kernel gave it (${path})`,
+      names === "WolframLanguageEvaluator, Structured" &&
+        isDeepStrictEqual(listed.tools?.find((t) => t.name === "Structured")?.outputSchema, nonObject),
+      listed.error?.slice(0, 120) ?? names,
+    );
+    const cached = await until(() => lib.readCache(suiteKey)?.tools?.length === 2, 5_000);
+    check(
+      `and the refresh after a kernel start caches them all (${path})`,
+      cached,
+      `cached: ${lib.readCache(suiteKey)?.tools?.map((t) => t.name).join(", ") ?? "nothing"}`,
     );
     await s.client.close();
     await new Promise((r) => setTimeout(r, 300));
@@ -8203,6 +8245,18 @@ heading("doctor runs, and says what is wrong when something is");
     `status=${structured.status} ${`${structured.stdout}${structured.stderr}`
       .split("\n")
       .filter((l) => /tools\s|malformed/.test(l))
+      .join(" | ")
+      .slice(0, 120)}`,
+  );
+  // And through the SDK's parse, which refused a tool whose output schema is
+  // not an object, and with it the whole list (#69).
+  const arrayOut = doctor({ FAKE_OUTPUT_SCHEMA: JSON.stringify({ type: "array" }) });
+  check(
+    "doctor lists a tool whose output schema is not an object, with the rest",
+    arrayOut.status === 0 && /tools\s+WolframLanguageEvaluator, Structured/.test(arrayOut.stdout),
+    `status=${arrayOut.status} ${`${arrayOut.stdout}${arrayOut.stderr}`
+      .split("\n")
+      .filter((l) => /tools\s|expected/.test(l))
       .join(" | ")
       .slice(0, 120)}`,
   );

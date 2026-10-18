@@ -12,9 +12,9 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import {
   ErrorCode,
-  ListToolsResultSchema,
   McpError,
   PromptListChangedNotificationSchema,
+  ResultSchema,
   ToolListChangedNotificationSchema,
   type ListToolsRequest,
   type ListToolsResult,
@@ -143,13 +143,39 @@ function requestOptions(signal: AbortSignal | undefined): RequestOptions {
  * `callTool` no longer refuses a result its tool's schema would, nor a call to
  * a tool that requires task-based execution, which the kernel answers itself.
  * It did either only once this client had happened to list the tools.
+ *
+ * Nor does it hold the list to the SDK's `ListToolsResultSchema`, which
+ * requires each tool's `inputSchema`, and any `outputSchema`, to be an
+ * object: one tool that was not failed the whole parse, and every tool of the
+ * server with it, by the same route (#69). The client judges each tool for
+ * itself, and measured, Claude Code 2.1.302 lists a tool whose output schema is
+ * an array. So the list is taken as the kernel sent it, held only to being a
+ * list of named tools, which is what this server reads of it.
  */
 class RelayClient extends Client {
-  override listTools(
+  override async listTools(
     params?: ListToolsRequest["params"],
     options?: RequestOptions,
   ): Promise<ListToolsResult> {
-    return this.request({ method: "tools/list", params }, ListToolsResultSchema, options);
+    const result = await this.request({ method: "tools/list", params }, ResultSchema, options);
+    const { tools, nextCursor } = result;
+    const named = (tool: unknown) =>
+      typeof tool === "object" &&
+      tool !== null &&
+      typeof (tool as { name?: unknown }).name === "string";
+    if (!Array.isArray(tools) || !tools.every(named)) {
+      throw new McpError(
+        ErrorCode.InternalError,
+        "the kernel's tools/list result is not a list of named tools",
+      );
+    }
+    if (nextCursor !== undefined && typeof nextCursor !== "string") {
+      throw new McpError(
+        ErrorCode.InternalError,
+        "the kernel's tools/list result has a cursor that is not a string",
+      );
+    }
+    return result as ListToolsResult;
   }
 }
 
