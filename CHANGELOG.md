@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.7](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.6...v0.1.7) (2026-10-18)
+
+
+### Bug Fixes
+
+* let a broker that is leaving answer the calls already on it, though the session chose again ([#110](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/110)) ([224a68c](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/224a68c23ef48b1c6bfbdbf28c46964ffc6692c9))
+* let a flavour's idle kernel serve inside the pool's refusal window, and report the window ([#113](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/113)) ([ce0990c](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/ce0990c2fe70377d1a75e338f4cecbe2bea59516))
+* refuse a broker address too long for a socket path, rather than bind it truncated ([#108](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/108)) ([daae61f](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/daae61fd2fa11c7e1297201e9335e2c314a0f17a))
+* relay a prompt or resource list with a malformed item, rather than lose the whole list ([#121](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/121)) ([30577db](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/30577dbc04fe92d310e3a8bd790d546ec663be3f))
+* relay a tool list whose schemas are not objects, rather than lose the whole list ([#116](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/116)) ([29a97b9](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/29a97b969e7016eb17017dafe15f22d573d45a89))
+* report the kernels a broker has running, not every slot in its pool ([#120](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/120)) ([459a319](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/459a319033a24355c90a9f01c08ecd0d652a2d1a))
+
 ## [0.1.6](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.5...v0.1.6) (2026-10-17)
 
 
