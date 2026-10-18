@@ -206,6 +206,12 @@ export class BrokerBackend implements KernelBackend {
   >();
   readonly #progress = new Map<number, (progress: Progress) => void>();
   /**
+   * Every request's answer as its caller sees it, until it settles: what
+   * `retire` waits for. `#pending` tracks the same requests, but holds the
+   * functions that settle them, which nothing can wait on.
+   */
+  readonly #outstanding = new Set<Promise<unknown>>();
+  /**
    * Outstanding pings, kept apart from #pending because their contracts differ:
    * #pending treats `ok: false` as a failure, and a ping treats it as an answer.
    */
@@ -213,6 +219,8 @@ export class BrokerBackend implements KernelBackend {
   #onKernelReady: KernelReadyHandler | undefined;
   /** No new work goes out on this connection; the next call chooses again. */
   #closed = false;
+  /** The session has chosen again, and left this connection to drain (`retire`). */
+  #retired = false;
   /** Whether the broker still answers, while that is being asked (`#stillAnswering`). */
   #asking: Promise<boolean> | null = null;
 
@@ -416,7 +424,11 @@ export class BrokerBackend implements KernelBackend {
    * working session, since a broker serves the code it started with.
    */
   #answers(): Promise<boolean> {
-    if (this.#closed || !this.#socket.writable) return Promise.resolve(false);
+    // Asked whether or not the connection still takes new work. One told
+    // `shuttingDown`, or left to drain, still has calls on it, and a broker that
+    // stops answering while they are out was never asked, so each waited out
+    // its own ceiling, or for ever with none (#76's review).
+    if (!this.#socket.writable) return Promise.resolve(false);
     const id = this.#nextId++;
     return new Promise<boolean>((resolve) => {
       // Not unref'd, for the reason `delay` is not: in `doctor` there is no
@@ -458,8 +470,17 @@ export class BrokerBackend implements KernelBackend {
       this.#options.log(`${op} ran out; asking the broker whether it is still running`);
       this.#asking = this.#answers().then((alive) => {
         this.#asking = null;
-        if (!alive && !this.#closed) {
-          this.#options.log("the broker did not answer; will choose again");
+        // On the socket rather than `#closed`, for the same reason: a draining
+        // connection is closed to new work, and its calls are still out.
+        if (!alive && this.#socket.writable) {
+          // Said apart for a connection already given up on, whose session
+          // chose again long since: read afterwards, a second "will choose
+          // again" matched no choice.
+          this.#options.log(
+            this.#retired
+              ? "the leaving broker did not answer; failing what was still on it"
+              : "the broker did not answer; will choose again",
+          );
           // Every call still on it is lost with it, so each is failed now,
           // with the reason. Only marked closed, the connection waited for the
           // next request to close it, and with none a call with a long ceiling
@@ -563,12 +584,14 @@ export class BrokerBackend implements KernelBackend {
   }
 
   #failAll(err: Error): void {
-    // No guard. Once #closed is set nothing can join either map, so a second
-    // call (the close after stop(), an error and then its close) finds nothing
-    // left to fail. A guard on #closed is what skipped the waiters: a broker's
-    // `shuttingDown`, a request's timeout and stop() all set it first, and a
-    // call in flight then waited out its whole ceiling, or forever with none
-    // (#75).
+    // No guard. Once #closed is set nothing can join #pending, and a ping joins
+    // #liveness only while the socket is writable, which no path through here
+    // leaves it: the close and the error end it, and giving the broker up and
+    // stop() end it right after. So a second call (the close after stop(), an
+    // error and then its close) finds nothing left to fail. A guard on #closed
+    // is what skipped the waiters: a broker's `shuttingDown`, a request's
+    // timeout and stop() all set it first, and a call in flight then waited out
+    // its whole ceiling, or forever with none (#75).
     // Mark it closed: `usable()` is what tells DeferredBackend to decide again,
     // and without it every later call in the session failed identically.
     this.#closed = true;
@@ -619,7 +642,7 @@ export class BrokerBackend implements KernelBackend {
       sent,
       this.#options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS,
     );
-    return new Promise<T>((resolve, reject) => {
+    const answer = new Promise<T>((resolve, reject) => {
       // No timer at all when there is no ceiling, so this waits exactly as long
       // as a private kernel would.
       const timer =
@@ -679,6 +702,12 @@ export class BrokerBackend implements KernelBackend {
         }
       });
     });
+    this.#outstanding.add(answer);
+    // Both ways, so this side's copy of a rejection is handled; the caller
+    // handles its own.
+    const settled = () => this.#outstanding.delete(answer);
+    answer.then(settled, settled);
+    return answer;
   }
 
   onKernelReady(handler: KernelReadyHandler): void {
@@ -769,6 +798,26 @@ export class BrokerBackend implements KernelBackend {
     pid: number;
   }> {
     return this.#request("status", undefined, timeoutMs);
+  }
+
+  /**
+   * See `KernelBackend.retire`. After `shuttingDown` the broker answers what it
+   * was already asked and then goes, but it reads this connection closing as
+   * its proxy vanishing and aborts that work. So the socket is kept until each
+   * request on it has settled — answered, run out, cancelled, or failed by the
+   * broker closing first — and closed only then (#76). It holds the event loop
+   * meanwhile as an attached connection does, since a caller is waiting on it,
+   * and `stop()` still closes it at once.
+   */
+  async retire(): Promise<void> {
+    this.#closed = true;
+    this.#retired = true;
+    // A kernel the leaving broker starts meanwhile, for some call queued there,
+    // is not the session's to list any more, and a later page of its tools
+    // could not be asked for on a connection closed to new work.
+    this.#onKernelReady = undefined;
+    await Promise.allSettled([...this.#outstanding]);
+    await this.stop();
   }
 
   async stop(): Promise<void> {

@@ -2037,10 +2037,12 @@ heading("A call in flight when its broker stops fails at once, not at its ceilin
   // The same wait, reached from the session's side. A broker whose address no
   // longer holds its socket (#32) says shuttingDown, and answers what it was
   // already asked before it goes. A session that makes its next request in the
-  // meantime chooses again, and stops the old connection on the way: that close
-  // failed nothing either, so the call still on it waited out its ceiling. It
-  // fails at once now; letting the leaving broker answer it instead is #76,
-  // and passes here too.
+  // meantime chooses again, and stopped the old connection on the way: that
+  // close failed nothing either, so the call still on it waited out its
+  // ceiling (#75). Failed at once instead, it was still lost, since the broker
+  // read the close as its proxy vanishing and aborted the call it was about to
+  // answer (#76). The session now keeps that connection until what is on it
+  // has settled, so the leaving broker answers.
   const told = () => s.stderr().split("the broker is shutting down").length - 1;
   const toldBefore = told();
   const aStarted = Date.now();
@@ -2058,11 +2060,8 @@ heading("A call in flight when its broker stops fails at once, not at its ceilin
   const aTook = Date.now() - aStarted;
   const aText = aResult.content?.[0]?.text ?? "";
   check(
-    "a call still on a broker that is leaving settles when the session chooses again",
-    heard &&
-      pendingAtChoice &&
-      aTook < 8_000 &&
-      (answeredByFake(aResult) || /session closed its connection/.test(aText)),
+    "a call still on a broker that is leaving is answered by it, though the session chose again",
+    heard && pendingAtChoice && aTook < 8_000 && answeredByFake(aResult),
     `${heard ? "told it was shutting down" : "never told"}, ` +
       `${pendingAtChoice ? "the call still out" : "the call already settled"} when it chose again; ` +
       `settled after ${(aTook / 1000).toFixed(1)}s: ${aText.slice(0, 120)}`,
@@ -2076,6 +2075,206 @@ heading("A call in flight when its broker stops fails at once, not at its ceilin
   await s.client.close();
   signalOwnBrokers("SIGKILL", runtime);
   await new Promise((r) => setTimeout(r, 300));
+}
+
+// ---------------------------------------------------------------------------
+// That drain has an end: a session that stops while a connection it gave up on
+// is still finishing a call closes that connection at once, as it does the one
+// it is using. Left to drain, its calls would run on for nobody, and its socket
+// would hold a library caller's process open. On fakes, because what is
+// measured is which backend is stopped, and when.
+heading("A session that stops closes a connection still draining, at once");
+{
+  const events = [];
+  let leaving = false;
+  const fake = (name, extra = {}) => ({
+    kind: "broker",
+    onKernelReady() {},
+    async listTools() {
+      return { tools: [] };
+    },
+    usable: () => !(name === "first" && leaving),
+    async stop() {
+      events.push(`${name} stopped`);
+    },
+    ...extra,
+  });
+  // Draining until stopped: its calls never settle by themselves.
+  const first = fake("first", {
+    retire() {
+      events.push("first draining");
+      return new Promise(() => {});
+    },
+  });
+  const made = [first, fake("second")];
+  const deferred = new lib.DeferredBackend(async () => made.shift(), () => {}, { startTimeoutMs: 1_000 });
+  await deferred.listTools();
+  leaving = true;
+  await deferred.listTools();
+  const atChoice = events.join(", ");
+  check(
+    "choosing again leaves the connection it gave up to drain, rather than closing it",
+    atChoice === "first draining",
+    atChoice || "(nothing)",
+  );
+  await deferred.stop();
+  check(
+    "and stopping the session closes it at once, with the one in use",
+    events.includes("first stopped") && events.includes("second stopped"),
+    events.join(", "),
+  );
+
+  // A stop that fails, on either, must not fail the session's: its bounded wait
+  // for a preparation still holding a seat comes after.
+  let gone = false;
+  const failing = (extra = {}) => ({
+    ...fake("failing", extra),
+    usable: () => !gone,
+    async stop() {
+      throw new Error("could not close");
+    },
+  });
+  const unstoppable = [failing({ retire: () => new Promise(() => {}) }), failing()];
+  const stubbornLog = [];
+  const stubborn = new lib.DeferredBackend(async () => unstoppable.shift(), (m) => stubbornLog.push(m), {
+    startTimeoutMs: 1_000,
+  });
+  await stubborn.listTools();
+  gone = true;
+  await stubborn.listTools();
+  const stopped = await stubborn.stop().then(() => "stopped", (err) => `rejected: ${err.message}`);
+  check(
+    "and a session's stop finishes though neither connection will close",
+    stopped === "stopped",
+    stopped,
+  );
+  // Nothing waits on those failures, so the log is the one trace of a kernel,
+  // and its seat, that may still be held.
+  const traced = stubbornLog.filter((m) => /did not stop cleanly: could not close/.test(m)).length;
+  check("and logs each one that would not", traced === 2, `${traced} logged: ${stubbornLog.join(" | ").slice(0, 160)}`);
+}
+
+// ---------------------------------------------------------------------------
+// The connection itself, against a stub broker that says shuttingDown as soon
+// as it is given a call. Retired, it keeps the socket until that call is
+// answered and closes it then; it takes no part in the session's capability
+// cache any more; and a leaving broker that stops answering is still found
+// out, by the ping a request that runs out sends, rather than holding every
+// call left on it to its own ceiling.
+heading("A connection left to drain closes once answered, and still gives up a broker that stops answering");
+{
+  const stubBroker = (dir, { answerAfterMs = 0, freeze = false }) => {
+    const seen = { answeredAt: null, closedAt: null };
+    const server = createServer((socket) => {
+      socket.setEncoding("utf8");
+      socket.on("error", () => socket.destroy());
+      socket.on("close", () => (seen.closedAt = Date.now()));
+      const send = (frame) => socket.writable && socket.write(`${JSON.stringify(frame)}\n`);
+      let frozen = false;
+      let buffered = "";
+      socket.on("data", (chunk) => {
+        buffered += chunk;
+        for (let at; (at = buffered.indexOf("\n")) !== -1; buffered = buffered.slice(at + 1)) {
+          const frame = JSON.parse(buffered.slice(0, at));
+          if (frozen) continue;
+          if (frame.op === "hello") {
+            send({ id: frame.id, ok: true, result: { flavours: true, flavour: frame.params?.digest } });
+          } else if (frame.op === "ping") {
+            send({ id: frame.id, ok: true, result: {} });
+          } else if (frame.op === "callTool") {
+            send({ event: "shuttingDown" });
+            if (freeze) {
+              frozen = true;
+              continue;
+            }
+            // A kernel the leaving broker starts meanwhile, for some queued call.
+            setTimeout(() => send({ event: "kernelReady", capabilities: {}, tools: [], prompts: null }), 300);
+            setTimeout(() => {
+              seen.answeredAt = Date.now();
+              send({ id: frame.id, ok: true, result: { content: [{ type: "text", text: "evaluated" }] } });
+            }, answerAfterMs);
+          }
+        }
+      });
+    });
+    const address = join(privateDir(join(home, dir)), "broker.sock");
+    return { server, address, seen, listening: new Promise((resolve) => server.listen(address, resolve)) };
+  };
+  const attach = (address, log = () => {}) =>
+    lib.BrokerBackend.attachIfRunning({
+      address,
+      flavour: lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" }),
+      spawnCommand: join(home, "definitely-not-a-binary"),
+      spawnArgs: [],
+      spawnEnv: {},
+      log,
+    });
+  const outcome = (call) => call.then((r) => r.content?.[0]?.text ?? "(empty)", (err) => `failed: ${err.message}`);
+  const evaluate = (backend, code, timeoutMs) =>
+    outcome(backend.callTool({ name: "WolframLanguageEvaluator", arguments: { code } }, { timeoutMs }));
+
+  const answering = stubBroker("run-drain-answers", { answerAfterMs: 600 });
+  await answering.listening;
+  const a = await attach(answering.address);
+  try {
+    let refreshed = 0;
+    a?.onKernelReady(async () => void refreshed++);
+    const result = a ? evaluate(a, "1+1", 10_000) : Promise.resolve("could not attach");
+    // Retired as DeferredBackend retires it: once told, when the session chooses again.
+    if (a && (await until(() => a.usable() === false, 2_000))) void a.retire();
+    const answered = await result;
+    await until(() => answering.seen.closedAt !== null, 2_000);
+    const { answeredAt, closedAt } = answering.seen;
+    check(
+      "a retired connection keeps its socket until the call on it is answered, and closes it then",
+      answered === "evaluated" &&
+        answeredAt !== null &&
+        closedAt !== null &&
+        closedAt >= answeredAt &&
+        closedAt - answeredAt < 1_000,
+      `${answered}; closed ${closedAt === null ? "never" : answeredAt === null ? "before any answer" : `${closedAt - answeredAt}ms after the answer`}`,
+    );
+    check(
+      "and a kernel its broker starts meanwhile no longer refreshes the session's lists",
+      refreshed === 0,
+      `refreshed ${refreshed} time(s)`,
+    );
+  } finally {
+    await a?.stop();
+    answering.server.close();
+  }
+
+  const frozen = stubBroker("run-drain-frozen", { freeze: true });
+  await frozen.listening;
+  const frozenLog = [];
+  const f = await attach(frozen.address, (message) => frozenLog.push(message));
+  try {
+    const started = Date.now();
+    // Both out before the broker's word arrives; the short one runs out first.
+    const short = f ? evaluate(f, "short", 500) : Promise.resolve("could not attach");
+    const long = f ? evaluate(f, "long", 30_000) : Promise.resolve("could not attach");
+    if (f && (await until(() => f.usable() === false, 2_000))) void f.retire();
+    const longResult = await Promise.race([
+      long,
+      new Promise((resolve) => setTimeout(() => resolve("still waiting at 12s"), 12_000)),
+    ]);
+    const took = Date.now() - started;
+    check(
+      "a call on a leaving broker that stops answering fails once the broker is found out, not at its own ceiling",
+      /stopped answering/.test(longResult) && took < 12_000,
+      `short: ${(await short).slice(0, 60)}; long, after ${(took / 1000).toFixed(1)}s: ${longResult.slice(0, 100)}`,
+    );
+    // Its session chose again long since, so "will choose again" here matched
+    // no choice, read afterwards.
+    check(
+      "and says it was the broker being left that did not answer",
+      frozenLog.some((m) => m === "the leaving broker did not answer; failing what was still on it"),
+      frozenLog.filter((m) => /did not answer/.test(m)).join(" | ") || "(nothing)",
+    );
+  } finally {
+    await f?.stop();
+    frozen.server.close();
+  }
 }
 
 // ---------------------------------------------------------------------------

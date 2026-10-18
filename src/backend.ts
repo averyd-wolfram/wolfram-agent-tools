@@ -149,6 +149,15 @@ export interface KernelBackend {
    */
   settled?(): Promise<void>;
   /**
+   * Stop being used, without abandoning what was already asked: take no new
+   * request, and stop once every request outstanding has settled. `stop()`
+   * still ends it at once, and must bear being called again when the retiring
+   * finishes. `DeferredBackend` retires a backend it gives up on this way;
+   * backends with nothing that could outlive that may leave it undefined, and
+   * are stopped instead.
+   */
+  retire?(): Promise<void>;
+  /**
    * Bring this backend to the point where a request reaches a kernel, within
    * `deadline` — the last stage of a preparation `DeferredBackend` runs.
    * Backends that need no such step may leave it undefined.
@@ -330,6 +339,12 @@ export class DeferredBackend implements KernelBackend {
    * kernel to finish starting and keep its seat after the server had stopped.
    */
   #preparing: KernelBackend | null = null;
+  /**
+   * Backends given up on that are still finishing what they were asked (#76).
+   * `stop()` has to reach them too, or a session that ended while one drained
+   * left its calls running on the broker for nobody.
+   */
+  readonly #retiring = new Set<KernelBackend>();
   /** Ends the preparation in flight, from inside whichever stage it is in. */
   #abort: AbortController | null = null;
   #stopped = false;
@@ -368,9 +383,8 @@ export class DeferredBackend implements KernelBackend {
     // restarting the MCP client.
     if (this.#resolved && this.#resolved.usable?.() === false) {
       this.#log?.("the chosen backend is gone; deciding again");
-      const dead = this.#resolved;
+      this.#retire(this.#resolved);
       this.#resolved = null;
-      void dead.stop().catch(() => {});
     }
     if (this.#resolved) return this.#resolved;
     if (this.#stopped) throw new PreparationStopped();
@@ -427,6 +441,34 @@ export class DeferredBackend implements KernelBackend {
 
   #backoffWindow(): number {
     return this.#backoff.current(this.#identity())?.remainingMs ?? 0;
+  }
+
+  /**
+   * Leave a backend given up on to finish what it was asked, rather than stop
+   * it on the way out. A broker that said `shuttingDown` answers what it was
+   * already asked before it goes, but it read this session closing the
+   * connection as the proxy vanishing, and aborted that work: a call it was
+   * about to answer was lost to the session's next request choosing again (#76).
+   * A backend that is merely gone has nothing outstanding, and retires at once.
+   */
+  #retire(backend: KernelBackend): void {
+    if (!backend.retire) {
+      void backend.stop().catch((err: unknown) => this.#stopFailed(err));
+      return;
+    }
+    this.#retiring.add(backend);
+    void backend
+      .retire()
+      .catch((err: unknown) => this.#stopFailed(err))
+      .finally(() => this.#retiring.delete(backend));
+  }
+
+  /**
+   * Said, though nothing waits on it: a backend that would not stop may still
+   * hold a kernel and its seat, and this line is the one trace of that.
+   */
+  #stopFailed(err: unknown): void {
+    this.#log?.(`a backend did not stop cleanly: ${errorText(err)}`);
   }
 
   /**
@@ -493,7 +535,15 @@ export class DeferredBackend implements KernelBackend {
     // The factory's stages — the broker attach and wait — race this
     // signal, so a stop reaches them before they have produced a backend.
     this.#abort?.abort();
-    await Promise.all([this.#preparing?.stop(), this.#resolved?.stop()]);
+    // Each caught, as `#retire` catches its own: one that fails to stop must
+    // not stop the others, or cut short the bounded wait below for a
+    // preparation still holding a seat.
+    const backends = [this.#preparing, this.#resolved, ...this.#retiring].filter(
+      (backend): backend is KernelBackend => backend !== null,
+    );
+    await Promise.all(
+      backends.map((backend) => backend.stop().catch((err: unknown) => this.#stopFailed(err))),
+    );
     // Returns once the preparation has wound down, so a caller that awaits
     // stop() knows nothing it started is still holding a seat — but bounded,
     // because a backend that ignored its stop must not hang the shutdown of
