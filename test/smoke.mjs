@@ -204,12 +204,19 @@ const hasStatusTool = (tools) => tools.some((t) => t.name === STATUS_TOOL);
 
 const answeredByFake = (result) => /^evaluated/.test(result?.content?.[0]?.text ?? "");
 
-/** Wait until `condition` holds, or `ms` passes, rather than sleeping past it. It may be async. */
+/**
+ * Wait until `condition` holds, or `ms` passes, rather than sleeping past it.
+ * It may be async, so its last answer is the one returned: asked once more
+ * after the wait, an async condition that reads state made one request more,
+ * and a check then judged that request's answer, not the one it waited for.
+ */
 const until = async (condition, ms = 10_000) => {
-  for (const by = Date.now() + ms; Date.now() < by && !(await condition()); ) {
+  let held = await condition();
+  for (const by = Date.now() + ms; !held && Date.now() < by; ) {
     await new Promise((r) => setTimeout(r, 20));
+    held = await condition();
   }
-  return condition();
+  return held;
 };
 
 /** The methods a fake kernel logged under FAKE_METHOD_LOG, in order. */
