@@ -67,7 +67,7 @@ export function versionTag(version) {
  *   `backfill`: tags missing from commits already on the branch;
  *   `latest`: mark `newest` Latest; `ahead`: why the branch stays put although
  *   it carries no published version; `warnings`: tags not where the branch
- *   puts their versions
+ *   puts their versions, and releases it passed without a commit
  */
 export function advancePlan({ releases, history, latestTag, tags }) {
   const head = history[0];
@@ -106,6 +106,31 @@ export function advancePlan({ releases, history, latestTag, tags }) {
   }
   // Oldest first, as they are committed.
   result.backfill.reverse();
+  // A tag for a version the branch never carried points at something no
+  // project following it would get: pushed by hand, most likely. Versions due
+  // now are judged below, where the branch is about to carry them.
+  const prefix = `${PLUGIN}--v`;
+  for (const [tag, at] of tagAt) {
+    const version = tag.startsWith(prefix) ? tag.slice(prefix.length) : undefined;
+    if (!version || carried.has(version) || !tagVersion(`v${version}`, { core: true })) continue;
+    if (head && compareVersions(version, head.version) > 0 && releaseVersions.has(version)) continue;
+    result.warnings.push(`${tag} is at ${at}, but the ${BRANCH} branch has never carried ${version}`);
+  }
+  // A release published after the branch passed it, one finished late, has
+  // no commit to carry it, since the branch never moves back; so no tag to pin
+  // it by either. Said, not mended. The branch's first version is the floor:
+  // what came before the branch was never on it.
+  const first = [...carried.keys()].sort(compareVersions)[0];
+  if (head && first !== undefined) {
+    for (const version of [...releaseVersions].sort(compareVersions)) {
+      if (carried.has(version) || compareVersions(version, first) < 0) continue;
+      if (compareVersions(version, head.version) > 0) continue;
+      result.warnings.push(
+        `v${version} was published after the ${BRANCH} branch passed it, so no commit carries it, ` +
+          `and ${versionTag(version)} cannot be made`,
+      );
+    }
+  }
 
   const newest = latestRelease(releases);
   if (!newest) return result;

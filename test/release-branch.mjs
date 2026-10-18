@@ -106,11 +106,25 @@ check(
   show(midway),
 );
 // The branch began at 0.1.2: what came before it was never on it, and stays
-// untagged rather than being tagged at a commit that does not carry it.
+// untagged, unreported, rather than tagged at a commit that does not carry it.
+// v0.1.0 and v0.1.1 are published and untagged here, as on GitHub.
 check(
-  "and a release from before the branch's first version is not",
-  untagged.backfill?.every(({ tag }) => tag === "wolfram--v0.1.2"),
-  show(untagged.backfill),
+  "and a release from before the branch's first version is neither tagged nor reported",
+  steady.backfill?.length === 0 && steady.warnings?.length === 0,
+  show(steady),
+);
+// One finished late, published once the branch had passed it, can be given
+// no commit, since the branch never moves back: said, not left silent.
+const passed = plan({
+  releases: [...published, rel("v0.1.3"), rel("v0.1.4")],
+  history: [carries("0.1.4"), ...branch],
+  latestTag: "v0.1.4",
+  tags: tagged(carries("0.1.4"), ...branch),
+});
+check(
+  "a release the branch passed without a commit is reported",
+  !passed.move && passed.backfill?.length === 0 && passed.warnings?.some((w) => /v0\.1\.3/.test(w)),
+  show(passed),
 );
 // A tag is checked, not trusted by name (#58).
 const moved = plan({ tags: [["wolfram--v0.1.2", "c999"]] });
@@ -120,10 +134,17 @@ check(
     moved.warnings?.some((w) => /wolfram--v0\.1\.2/.test(w) && /c999/.test(w) && /c012/.test(w)),
   show(moved),
 );
+const stray = plan({ tags: [...tagged(...branch), ["wolfram--v0.1.1", "c999"]] });
+check(
+  "so is a tag for a version the branch has never carried",
+  stray.warnings?.some((w) => /wolfram--v0\.1\.1/.test(w) && /c999/.test(w)) && stray.warnings?.length === 1,
+  show(stray),
+);
 const early = plan({ releases: [...published, rel("v0.1.3")], tags: [...tagged(...branch), ["wolfram--v0.1.3", "c999"]] });
 check(
   "and one already there for a version the branch is only now given is left, untouched, and reported",
-  versions(early) === "0.1.3" && early.warnings?.some((w) => /wolfram--v0\.1\.3/.test(w) && /c999/.test(w)),
+  versions(early) === "0.1.3" && early.warnings?.length === 1 &&
+    early.warnings.some((w) => /wolfram--v0\.1\.3/.test(w) && /c999/.test(w)),
   show(early),
 );
 check(

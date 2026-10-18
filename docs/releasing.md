@@ -249,8 +249,10 @@ oldest first, so none the branch passes is left without a commit to pin (#58):
 A tag is checked, not trusted by name. One missing from a commit already on the branch, which a
 run that failed partway leaves, is added at that commit. One at another commit than the branch
 puts its version on is reported as a warning and left where it is, and so is one already there
-for a release the branch is only now given. Releases from before the branch existed, v0.1.0 and
-v0.1.1, are on no branch commit and stay untagged.
+for a release the branch is only now given, or for a version it never carried. A release
+published after the branch passed it, one finished late, can be given no commit, since the
+branch never moves back, so it is reported rather than tagged. Releases from before the branch
+existed, v0.1.0 and v0.1.1, are on no branch commit and stay untagged, unreported.
 
 A step that fails leaves everything after it for the next release run, which repeats it. A
 release finished late, or built by hand, is published with Latest off and moves neither until a
