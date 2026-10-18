@@ -260,8 +260,11 @@ class RelayClient extends Client {
         kept.push(parsed.data);
         return;
       }
-      // A resource always has its URI to be known by, when it has no name.
-      const named = [fields["name"], fields["uri"]].find((v): v is string => typeof v === "string");
+      // A resource always has its URI to be known by, when it has no name; an
+      // empty name names nothing, and was logged as "left out ()".
+      const named = [fields["name"], fields["uri"]].find(
+        (v): v is string => typeof v === "string" && v !== "",
+      );
       // Counted on its page, since that is all this call sees of the list.
       const which = named ?? `entry ${index + 1} of ${listed.length} on this page`;
       const issue = parsed.error.issues[0];

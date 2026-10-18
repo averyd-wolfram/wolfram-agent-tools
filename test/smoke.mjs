@@ -3996,6 +3996,7 @@ heading("A prompt or resource that cannot be relayed costs only itself, on eithe
     { name: "BadArgs", description: "Arguments not a list.", arguments: "x" },
     { description: "Has no name." },
     null,
+    { name: "", description: "Named nothing.", arguments: 5 },
   ];
   const badResources = [{ name: "NoUri", description: "Has no URI." }, { uri: "ui://fake/nameless" }];
   // ResultSchema, not the SDK's list schemas: this suite's own client would
@@ -4063,8 +4064,9 @@ heading("A prompt or resource that cannot be relayed costs only itself, on eithe
       check(
         "and the session says which it left out, and why",
         /prompt the kernel listed is left out \(BadArgs\): arguments/.test(said) &&
-          /prompt the kernel listed is left out \(entry 4 of 5 on this page\): name/.test(said) &&
-          /prompt the kernel listed is left out \(entry 5 of 5 on this page\).*it was null/.test(said) &&
+          /prompt the kernel listed is left out \(entry 4 of 6 on this page\): name/.test(said) &&
+          /prompt the kernel listed is left out \(entry 5 of 6 on this page\).*it was null/.test(said) &&
+          /prompt the kernel listed is left out \(entry 6 of 6 on this page\): arguments/.test(said) &&
           /resource the kernel listed is left out \(NoUri\): uri/.test(said) &&
           /resource the kernel listed is left out \(ui:\/\/fake\/nameless\): name/.test(said),
         said.split("\n").filter((l) => /left out/.test(l)).join(" | ").slice(0, 240) || "(nothing said)",
