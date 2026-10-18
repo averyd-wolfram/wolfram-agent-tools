@@ -3930,13 +3930,16 @@ heading("A tool whose output schema cannot be compiled costs only itself, on eit
     await new Promise((r) => setTimeout(r, 300));
   }
 
-  // What cannot be relayed is left out, one tool at a time, saying why: an
-  // entry with no name, which this server cannot address, and an input schema
-  // that is not an object, which a model cannot be given and which no client
-  // was measured taking. Either failed the whole list, the other tools with it.
+  // What the SDK's ToolSchema refuses, all but the output schema, is left out,
+  // one tool at a time, saying why: an input schema that is not an object, or
+  // is malformed inside, which a client sends on to the model, an entry with
+  // no name, and one that is not a tool at all. Each failed the whole list,
+  // the other tools with it.
   const unrelayable = [
     { name: "BadInput", description: "Takes a string.", inputSchema: { type: "string" } },
     { description: "Has no name.", inputSchema: { type: "object" } },
+    { name: "BadProps", description: "Malformed inside.", inputSchema: { type: "object", properties: "x" } },
+    null,
   ];
   for (const sharing of ["0", "1"]) {
     const path = sharing === "1" ? "shared" : "private";
@@ -3965,8 +3968,10 @@ heading("A tool whose output schema cannot be compiled costs only itself, on eit
       const said = s.stderr();
       check(
         "and the session says which it left out, and why",
-        /left out \(BadInput\): its inputSchema is not an object schema/.test(said) &&
-          /left out \(number 3 of 3\): it has no name/.test(said),
+        /left out \(BadInput\): inputSchema/.test(said) &&
+          /left out \(entry 3 of 5 on this page\): name/.test(said) &&
+          /left out \(BadProps\): inputSchema\.properties/.test(said) &&
+          /left out \(entry 5 of 5 on this page\).*it was null/.test(said),
         said.split("\n").filter((l) => /left out/.test(l)).join(" | ").slice(0, 200) || "(nothing said)",
       );
     }

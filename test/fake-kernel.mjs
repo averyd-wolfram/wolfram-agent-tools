@@ -54,7 +54,7 @@
  * FAKE_INIT_DELAY_MS  delay before answering initialize: a slow handshake, the
  *                     last stage of a preparation, that does eventually answer
  * FAKE_EMPTY_TOOLS    report zero tools, successfully
- * FAKE_EXTRA_TOOLS  JSON array: tools to list as given, after the others, for a
+ * FAKE_EXTRA_TOOLS    JSON array: tools to list as given, after the others, for a
  *                     list holding a tool this server cannot relay
  * FAKE_OUTPUT_SCHEMA  JSON: serve one more tool, Structured, declaring this as its
  *                     outputSchema and answering with structuredContent. No server
@@ -497,7 +497,7 @@ function run() {
     }
     if (msg.method === "tools/call") {
       callsSeen++;
-      if (!tools.some((t) => t.name === msg.params?.name)) {
+      if (!tools.some((t) => t?.name === msg.params?.name)) {
         // What a real MCP server answers for a name it does not have: an error
         // response, not a result that happens to say something went wrong.
         send({

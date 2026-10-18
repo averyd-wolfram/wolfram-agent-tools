@@ -16,6 +16,7 @@ import {
   PaginatedResultSchema,
   PromptListChangedNotificationSchema,
   ToolListChangedNotificationSchema,
+  ToolSchema,
   type ListToolsRequest,
   type ListToolsResult,
   type Tool,
@@ -148,12 +149,13 @@ function requestOptions(signal: AbortSignal | undefined): RequestOptions {
  * requires each tool's `inputSchema`, and any `outputSchema`, to be an
  * object: one tool that was not failed the whole parse, and every tool of the
  * server with it, by the same route (#69). Each tool is judged on its own
- * instead, and one this server cannot relay is left out, saying why, while
- * the rest are listed. An `outputSchema` that is not an object is relayed as
- * the kernel sent it: measured, Claude Code 2.1.302 lists such a tool. An
- * `inputSchema` that is not an object schema is not: the Messages API takes
- * a tool's input schema only as an object, so a client that sent one on could
- * fail every model request in its session, which was never measured.
+ * instead, by the SDK's `ToolSchema` and all of it but the `outputSchema`,
+ * and one that fails is left out, saying why, while the rest are listed. The
+ * `outputSchema` is relayed as the kernel sent it: measured, Claude Code
+ * 2.1.302 lists a tool whose output schema is an array. Nothing else of a tool
+ * was measured, and a client sends its `inputSchema` on to the Messages API,
+ * which takes a malformed one for the whole request, so every model request
+ * in that client's session could fail.
  */
 class RelayClient extends Client {
   readonly #log: (message: string) => void;
@@ -185,34 +187,33 @@ class RelayClient extends Client {
       );
     }
     const listed: unknown[] = tools;
-    const kept = listed.filter((tool, index) => {
-      const why = unrelayable(tool);
-      if (why === null) return true;
-      const name = (tool as { name?: unknown } | null)?.name;
-      const which = typeof name === "string" ? name : `number ${index + 1} of ${listed.length}`;
-      this.#log(`a tool the kernel listed is left out (${which}): ${why}`);
-      return false;
+    const kept: ListToolsResult["tools"] = [];
+    listed.forEach((tool, index) => {
+      const { outputSchema, ...rest } =
+        typeof tool === "object" && tool !== null ? (tool as Record<string, unknown>) : {};
+      const parsed = ToolSchema.safeParse(rest);
+      if (parsed.success) {
+        kept.push(
+          outputSchema === undefined
+            ? parsed.data
+            : ({ ...parsed.data, outputSchema } as ListToolsResult["tools"][number]),
+        );
+        return;
+      }
+      const name = typeof rest["name"] === "string" ? rest["name"] : null;
+      // Counted on its page, since that is all this call sees of the list.
+      const which = name ?? `entry ${index + 1} of ${listed.length} on this page`;
+      const issue = parsed.error.issues[0];
+      const why = issue
+        ? `${issue.path.join(".") || "the tool"}: ${issue.message}`
+        : "it is not a tool";
+      this.#log(
+        `a tool the kernel listed is left out (${which}): ${why}; ` +
+          `it was ${JSON.stringify(tool)?.slice(0, 160)}`,
+      );
     });
-    // Each kept one has the name and input schema this server reads; the rest
-    // of it is the kernel's, relayed for the client to judge.
-    return { ...result, tools: kept as ListToolsResult["tools"] };
+    return { ...result, tools: kept };
   }
-}
-
-/**
- * Why a tool the kernel listed cannot be relayed, or `null` if it can: what
- * this server reads of it, a name, and an input schema a model can be given.
- */
-function unrelayable(tool: unknown): string | null {
-  if (typeof tool !== "object" || tool === null)
-    return `it is not an object: ${JSON.stringify(tool)}`;
-  const { name, inputSchema } = tool as { name?: unknown; inputSchema?: unknown };
-  if (typeof name !== "string") return "it has no name";
-  const type = (inputSchema as { type?: unknown } | null | undefined)?.type;
-  if (typeof inputSchema !== "object" || inputSchema === null || type !== "object") {
-    return `its inputSchema is not an object schema: ${JSON.stringify(inputSchema)?.slice(0, 120)}`;
-  }
-  return null;
 }
 
 /**
