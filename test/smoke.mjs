@@ -204,9 +204,9 @@ const hasStatusTool = (tools) => tools.some((t) => t.name === STATUS_TOOL);
 
 const answeredByFake = (result) => /^evaluated/.test(result?.content?.[0]?.text ?? "");
 
-/** Wait until `condition` holds, or `ms` passes, rather than sleeping past it. */
+/** Wait until `condition` holds, or `ms` passes, rather than sleeping past it. It may be async. */
 const until = async (condition, ms = 10_000) => {
-  for (const by = Date.now() + ms; Date.now() < by && !condition(); ) {
+  for (const by = Date.now() + ms; Date.now() < by && !(await condition()); ) {
     await new Promise((r) => setTimeout(r, 20));
   }
   return condition();
@@ -5427,10 +5427,12 @@ heading("The pool's refusal window spares a flavour's idle kernel, and is report
 heading("A broker reports the kernels it has running, not its pool's slots");
 {
   const address = join(privateDir(join(home, "run-idle-count")), "broker.sock");
-  // Its kernel takes a second to start, declared so the pool starts it so.
+  // Its kernel takes 3s to start, declared so the pool starts it so: long
+  // enough that a status seen while the call is outstanding is one the start
+  // was still running for, however loaded the machine.
   const flavour = lib.kernelFlavour({
     MCP_SERVER_NAME: "WolframLanguage",
-    FAKE_INIT_DELAY_MS: "1000",
+    FAKE_INIT_DELAY_MS: "3000",
     WOLFRAM_MCP_KERNEL_ENV: "FAKE_INIT_DELAY_MS",
   });
   let broker = null;
@@ -5457,27 +5459,23 @@ heading("A broker reports the kernels it has running, not its pool's slots");
     });
     if (!client) throw new Error("could not attach to the broker");
     const askedAt = Date.now();
-    const call = client.callTool(
-      { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } },
-      { timeoutMs: 30_000 },
-    );
-    let starting = await client.status(2_000);
-    while (starting.busy === 0 && Date.now() - askedAt < 5_000) {
-      await new Promise((r) => setTimeout(r, 20));
-      starting = await client.status(2_000);
-    }
+    let settledAt = null;
+    const call = client
+      .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, { timeoutMs: 30_000 })
+      .finally(() => (settledAt = Date.now()));
+    let starting = null;
+    await until(async () => (starting = await client.status(2_000)).busy > 0, 5_000);
     const startingMs = Date.now() - askedAt;
     await call;
+    // Settled at least the start's 3s after it was asked: the start ran.
+    const callMs = settledAt - askedAt;
     check(
       "a kernel still starting is counted as running",
-      starting.kernels === 1 && starting.busy === 1 && startingMs < 1_000,
-      `${starting.kernels} running, ${starting.busy} busy, ${startingMs}ms into a 1s start`,
+      starting.kernels === 1 && starting.busy === 1 && startingMs < callMs && callMs >= 3_000,
+      `${starting.kernels} running, ${starting.busy} busy, at ${startingMs}ms of a call that took ${callMs}ms behind a 3s start`,
     );
-    let stopped = await client.status(2_000);
-    for (const by = Date.now() + 5_000; stopped.kernels !== 0 && Date.now() < by; ) {
-      await new Promise((r) => setTimeout(r, 50));
-      stopped = await client.status(2_000);
-    }
+    let stopped = null;
+    await until(async () => (stopped = await client.status(2_000)).kernels === 0, 5_000);
     check(
       "and one stopped for idleness is not, though its slot is still in the pool",
       stopped.kernels === 0 && stopped.busy === 0,
@@ -5495,24 +5493,24 @@ heading("A broker reports the kernels it has running, not its pool's slots");
     XDG_RUNTIME_DIR: runtime,
     WOLFRAM_MCP_IDLE_MINUTES: "0.02",
   });
-  await s.client.callTool(
-    { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } },
-    undefined,
-    { timeout: 30_000 },
-  );
-  let line = await sharingLine(s.client);
-  for (const by = Date.now() + 10_000; !/ 0 kernel\(s\) running/.test(line) && Date.now() < by; ) {
-    await new Promise((r) => setTimeout(r, 200));
-    line = await sharingLine(s.client);
+  try {
+    await s.client.callTool(
+      { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } },
+      undefined,
+      { timeout: 30_000 },
+    );
+    let line = "";
+    await until(async () => / 0 kernel\(s\) running/.test((line = await sharingLine(s.client))), 10_000);
+    check(
+      "and a shared session's wolfram_status says so",
+      / 0 kernel\(s\) running, 0 busy/.test(line),
+      `${line.slice(0, 140) || "(no sharing line)"}, asked for up to 10s after a call to a kernel idle at 1.2s`,
+    );
+  } finally {
+    await s.client.close();
+    signalOwnBrokers("SIGKILL", runtime);
+    await new Promise((r) => setTimeout(r, 300));
   }
-  check(
-    "and a shared session's wolfram_status says so",
-    / 0 kernel\(s\) running, 0 busy/.test(line),
-    `${line.slice(0, 140) || "(no sharing line)"}, asked for up to 10s after a call to a kernel idle at 1.2s`,
-  );
-  await s.client.close();
-  signalOwnBrokers("SIGKILL", runtime);
-  await new Promise((r) => setTimeout(r, 300));
 }
 
 // ---------------------------------------------------------------------------
