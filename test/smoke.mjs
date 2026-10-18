@@ -3988,6 +3988,107 @@ heading("A tool whose output schema cannot be compiled costs only itself, on eit
 }
 
 // ---------------------------------------------------------------------------
+// The same loss for prompts and resources, which were still held to the SDK's
+// list schemas: one item a schema refused failed the whole prompts/list or
+// resources/list (#118). A session lists prompts from its cache, which the
+// refresh after a kernel start keeps, so that is where the loss landed: it
+// cached no prompts at all, and on the shared path the broker's kernelReady
+// failed whole, its tools with it. A user's own server, reached by name, is
+// what could send such an item; AgentTools 2.2.7 builds its prompts from fixed
+// keys.
+heading("A prompt or resource that cannot be relayed costs only itself, on either path");
+{
+  const extraPrompts = [
+    { name: "Second", description: "A second prompt." },
+    { name: "BadArgs", description: "Arguments not a list.", arguments: "x" },
+    { description: "Has no name." },
+    null,
+    { name: "", description: "Named nothing.", arguments: 5 },
+  ];
+  const badResources = [{ name: "NoUri", description: "Has no URI." }, { uri: "ui://fake/nameless" }];
+  // ResultSchema, not the SDK's list schemas: this suite's own client would
+  // otherwise refuse the list itself, whatever the server sent.
+  const list = (s, method, key) =>
+    s.client.request({ method }, ResultSchema, { timeout: 20_000 }).then(
+      (r) => ({ names: (r[key] ?? []).map((item) => item.name).join(", ") }),
+      (err) => ({ error: err.message }),
+    );
+  const evaluate = (s) =>
+    s.client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, {
+      timeout: 20_000,
+    });
+  for (const sharing of ["0", "1"]) {
+    const path = sharing === "1" ? "shared" : "private";
+    // A runtime directory per session, so a broker still exiting cannot serve
+    // the next session with the last one's fake environment.
+    const runtime = (stage) => join(home, `run-unrelayable-${stage}-${sharing}`);
+    const env = (stage) => ({
+      WOLFRAM_MCP_SHARE: sharing,
+      XDG_RUNTIME_DIR: privateDir(runtime(stage)),
+      WOLFRAM_MCP_LICENSE_LIMIT: "4",
+      FAKE_EXTRA_PROMPTS: JSON.stringify(extraPrompts),
+    });
+    // Cold, then a kernel start, whose refresh caches what it lists.
+    wipeCache();
+    const started = await connect(env("prompts-cold"));
+    await evaluate(started);
+    const cachedNames = () => lib.readCache(suiteKey)?.prompts?.map((p) => p.name).join(", ");
+    const cached = await until(() => cachedNames() === "Search, Second", 5_000);
+    check(
+      `a prompt that cannot be relayed is left out of the cache, and the rest are kept (${path})`,
+      cached,
+      `cached: ${cachedNames() || "no prompts"}`,
+    );
+    await started.client.close();
+    await new Promise((r) => setTimeout(r, 300));
+    // Then the session the cache serves.
+    const served = await connect(env("prompts-warm"));
+    const prompts = await list(served, "prompts/list", "prompts");
+    check(
+      `and the next session lists them (${path})`,
+      prompts.names === "Search, Second",
+      prompts.error?.slice(0, 120) ?? (prompts.names || "no prompts"),
+    );
+    await served.client.close();
+    await new Promise((r) => setTimeout(r, 300));
+
+    // Resources are listed by a kernel, once one has been seen to offer them.
+    wipeCache();
+    await warmCache({ FAKE_RESOURCES: "1" });
+    const resourced = await connect({
+      ...env("resources"),
+      FAKE_RESOURCES: "1",
+      FAKE_EXTRA_RESOURCES: JSON.stringify(badResources),
+    });
+    const resources = await list(resourced, "resources/list", "resources");
+    check(
+      `a resource that cannot be relayed is left out, and the rest are listed (${path})`,
+      resources.names === "view",
+      resources.error?.slice(0, 120) ?? resources.names,
+    );
+    if (sharing === "0") {
+      const said = `${started.stderr()}${resourced.stderr()}`;
+      check(
+        "and the session says which it left out, and why",
+        /prompt the kernel listed is left out \(BadArgs\): arguments/.test(said) &&
+          /prompt the kernel listed is left out \(entry 4 of 6 on this page\): name/.test(said) &&
+          /prompt the kernel listed is left out \(entry 5 of 6 on this page\).*it was null/.test(said) &&
+          /prompt the kernel listed is left out \(entry 6 of 6 on this page\): arguments/.test(said) &&
+          /resource the kernel listed is left out \(NoUri\): uri/.test(said) &&
+          /resource the kernel listed is left out \(ui:\/\/fake\/nameless\): name/.test(said),
+        said.split("\n").filter((l) => /left out/.test(l)).join(" | ").slice(0, 240) || "(nothing said)",
+      );
+    }
+    await resourced.client.close();
+    // Not left to their 60s grace, holding kernels into the sections after.
+    for (const stage of ["prompts-cold", "prompts-warm", "resources"]) {
+      signalOwnBrokers("SIGKILL", runtime(stage));
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // The flip side, and why no timer is needed to bound an abandoned call: a kernel
 // is taken back exactly when something else needs it. A private session has one
 // kernel, so the next call is that moment.

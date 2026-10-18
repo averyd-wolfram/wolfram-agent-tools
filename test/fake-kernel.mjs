@@ -56,6 +56,8 @@
  * FAKE_EMPTY_TOOLS    report zero tools, successfully
  * FAKE_EXTRA_TOOLS    JSON array: tools to list as given, after the others, for a
  *                     list holding a tool this server cannot relay
+ * FAKE_EXTRA_PROMPTS  the same for prompts/list
+ * FAKE_EXTRA_RESOURCES  the same for resources/list, under FAKE_RESOURCES
  * FAKE_OUTPUT_SCHEMA  JSON: serve one more tool, Structured, declaring this as its
  *                     outputSchema and answering with structuredContent. No server
  *                     AgentTools 2.2.7 serves can: it builds a tool's entry from
@@ -439,7 +441,10 @@ function run() {
         jsonrpc: "2.0",
         id: msg.id,
         result: {
-          prompts: [{ name: "Search", description: "Searches Wolfram information." }],
+          prompts: [
+            { name: "Search", description: "Searches Wolfram information." },
+            ...JSON.parse(process.env.FAKE_EXTRA_PROMPTS ?? "[]"),
+          ],
         },
       });
       return;
@@ -473,7 +478,10 @@ function run() {
         jsonrpc: "2.0",
         id: msg.id,
         result: {
-          resources: [{ uri: "ui://fake/view", name: "view", mimeType: "text/html;profile=mcp-app" }],
+          resources: [
+            { uri: "ui://fake/view", name: "view", mimeType: "text/html;profile=mcp-app" },
+            ...JSON.parse(process.env.FAKE_EXTRA_RESOURCES ?? "[]"),
+          ],
         },
       });
       return;

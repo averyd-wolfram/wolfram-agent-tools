@@ -15,8 +15,14 @@ import {
   McpError,
   PaginatedResultSchema,
   PromptListChangedNotificationSchema,
+  PromptSchema,
+  ResourceSchema,
   ToolListChangedNotificationSchema,
   ToolSchema,
+  type ListPromptsRequest,
+  type ListPromptsResult,
+  type ListResourcesRequest,
+  type ListResourcesResult,
   type ListToolsRequest,
   type ListToolsResult,
   type Tool,
@@ -156,6 +162,14 @@ function requestOptions(signal: AbortSignal | undefined): RequestOptions {
  * was measured, and a client sends its `inputSchema` on to the Messages API,
  * which takes a malformed one for the whole request, so every model request
  * in that client's session could fail.
+ *
+ * Prompts and resources are judged the same way, each by the SDK's own
+ * `PromptSchema` or `ResourceSchema`: held to its list schemas, one malformed
+ * item failed the whole `prompts/list` or `resources/list` (#118). The refresh
+ * after a kernel start then cached no prompts, and on the shared path the
+ * broker's `kernelReady` failed whole, its tools with it. A user's own server,
+ * reached by name, is what could send one; AgentTools 2.2.7 builds its prompts
+ * from fixed keys.
  */
 class RelayClient extends Client {
   readonly #log: (message: string) => void;
@@ -179,42 +193,100 @@ class RelayClient extends Client {
       PaginatedResultSchema,
       options,
     );
-    const tools: unknown = (result as { tools?: unknown }).tools;
-    if (!Array.isArray(tools)) {
+    const tools = this.#judge(result, "tool", (tool) => {
+      const { outputSchema, ...rest } = tool;
+      const parsed = ToolSchema.safeParse(rest);
+      if (!parsed.success || outputSchema === undefined) return parsed;
+      return { success: true, data: { ...parsed.data, outputSchema } as Tool };
+    });
+    return { ...result, tools };
+  }
+
+  override async listPrompts(
+    params?: ListPromptsRequest["params"],
+    options?: RequestOptions,
+  ): Promise<ListPromptsResult> {
+    const result = await this.request(
+      { method: "prompts/list", params },
+      PaginatedResultSchema,
+      options,
+    );
+    const prompts = this.#judge(result, "prompt", (prompt) => PromptSchema.safeParse(prompt));
+    return { ...result, prompts };
+  }
+
+  override async listResources(
+    params?: ListResourcesRequest["params"],
+    options?: RequestOptions,
+  ): Promise<ListResourcesResult> {
+    const result = await this.request(
+      { method: "resources/list", params },
+      PaginatedResultSchema,
+      options,
+    );
+    const resources = this.#judge(result, "resource", (resource) =>
+      ResourceSchema.safeParse(resource),
+    );
+    return { ...result, resources };
+  }
+
+  /**
+   * Each item of one page of a kernel's list, on its own: one that `parse`
+   * refuses is left out, saying which and why, and the rest are kept. The
+   * list's key and method follow from what it lists, so they are not spelled
+   * at each call, where a slip would log one list's name for another's.
+   */
+  #judge<T>(
+    result: Record<string, unknown>,
+    kind: "tool" | "prompt" | "resource",
+    parse: (item: Record<string, unknown>) => Judged<T>,
+  ): T[] {
+    const key = `${kind}s`;
+    const method = `${key}/list`;
+    const items = result[key];
+    if (!Array.isArray(items)) {
       throw new McpError(
         ErrorCode.InternalError,
-        `the kernel's tools/list result holds no list of tools: ${JSON.stringify(tools)?.slice(0, 120)}`,
+        `the kernel's ${method} result holds no list of ${key}: ${JSON.stringify(items)?.slice(0, 120)}`,
       );
     }
-    const listed: unknown[] = tools;
-    const kept: ListToolsResult["tools"] = [];
-    listed.forEach((tool, index) => {
-      const { outputSchema, ...rest } =
-        typeof tool === "object" && tool !== null ? (tool as Record<string, unknown>) : {};
-      const parsed = ToolSchema.safeParse(rest);
+    const listed: unknown[] = items;
+    const kept: T[] = [];
+    listed.forEach((item, index) => {
+      const fields =
+        typeof item === "object" && item !== null ? (item as Record<string, unknown>) : {};
+      const parsed = parse(fields);
       if (parsed.success) {
-        kept.push(
-          outputSchema === undefined
-            ? parsed.data
-            : ({ ...parsed.data, outputSchema } as ListToolsResult["tools"][number]),
-        );
+        kept.push(parsed.data);
         return;
       }
-      const name = typeof rest["name"] === "string" ? rest["name"] : null;
+      // A resource always has its URI to be known by, when it has no name; an
+      // empty name names nothing, and was logged as "left out ()".
+      const named = [fields["name"], fields["uri"]].find(
+        (v): v is string => typeof v === "string" && v !== "",
+      );
       // Counted on its page, since that is all this call sees of the list.
-      const which = name ?? `entry ${index + 1} of ${listed.length} on this page`;
+      const which = named ?? `entry ${index + 1} of ${listed.length} on this page`;
       const issue = parsed.error.issues[0];
       const why = issue
-        ? `${issue.path.join(".") || "the tool"}: ${issue.message}`
-        : "it is not a tool";
+        ? `${issue.path.join(".") || `the ${kind}`}: ${issue.message}`
+        : `it is not a ${kind}`;
       this.#log(
-        `a tool the kernel listed is left out (${which}): ${why}; ` +
-          `it was ${JSON.stringify(tool)?.slice(0, 160)}`,
+        `a ${kind} the kernel listed is left out (${which}): ${why}; ` +
+          `it was ${JSON.stringify(item)?.slice(0, 160)}`,
       );
     });
-    return { ...result, tools: kept };
+    return kept;
   }
 }
+
+/** What a per-item judgment answers: the part of zod's `safeParse` result read. */
+type Judged<T> =
+  | { success: true; data: T }
+  | {
+      success: false;
+      error: { issues: readonly { path: readonly PropertyKey[]; message: string }[] };
+    };
 
 /**
  * Every page of something, gathered under whatever hold the caller already has.
