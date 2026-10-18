@@ -193,7 +193,7 @@ class RelayClient extends Client {
       PaginatedResultSchema,
       options,
     );
-    const tools = this.#judge(result, "tools/list", "tools", "tool", (tool) => {
+    const tools = this.#judge(result, "tool", (tool) => {
       const { outputSchema, ...rest } = tool;
       const parsed = ToolSchema.safeParse(rest);
       if (!parsed.success || outputSchema === undefined) return parsed;
@@ -211,9 +211,7 @@ class RelayClient extends Client {
       PaginatedResultSchema,
       options,
     );
-    const prompts = this.#judge(result, "prompts/list", "prompts", "prompt", (prompt) =>
-      PromptSchema.safeParse(prompt),
-    );
+    const prompts = this.#judge(result, "prompt", (prompt) => PromptSchema.safeParse(prompt));
     return { ...result, prompts };
   }
 
@@ -226,7 +224,7 @@ class RelayClient extends Client {
       PaginatedResultSchema,
       options,
     );
-    const resources = this.#judge(result, "resources/list", "resources", "resource", (resource) =>
+    const resources = this.#judge(result, "resource", (resource) =>
       ResourceSchema.safeParse(resource),
     );
     return { ...result, resources };
@@ -234,15 +232,17 @@ class RelayClient extends Client {
 
   /**
    * Each item of one page of a kernel's list, on its own: one that `parse`
-   * refuses is left out, saying which and why, and the rest are kept.
+   * refuses is left out, saying which and why, and the rest are kept. The
+   * list's key and method follow from what it lists, so they are not spelled
+   * at each call, where a slip would log one list's name for another's.
    */
   #judge<T>(
     result: Record<string, unknown>,
-    method: string,
-    key: string,
-    kind: string,
+    kind: "tool" | "prompt" | "resource",
     parse: (item: Record<string, unknown>) => Judged<T>,
   ): T[] {
+    const key = `${kind}s`;
+    const method = `${key}/list`;
     const items = result[key];
     if (!Array.isArray(items)) {
       throw new McpError(
@@ -260,9 +260,10 @@ class RelayClient extends Client {
         kept.push(parsed.data);
         return;
       }
-      const name = typeof fields["name"] === "string" ? fields["name"] : null;
+      // A resource always has its URI to be known by, when it has no name.
+      const named = [fields["name"], fields["uri"]].find((v): v is string => typeof v === "string");
       // Counted on its page, since that is all this call sees of the list.
-      const which = name ?? `entry ${index + 1} of ${listed.length} on this page`;
+      const which = named ?? `entry ${index + 1} of ${listed.length} on this page`;
       const issue = parsed.error.issues[0];
       const why = issue
         ? `${issue.path.join(".") || `the ${kind}`}: ${issue.message}`

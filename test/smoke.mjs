@@ -4011,11 +4011,12 @@ heading("A prompt or resource that cannot be relayed costs only itself, on eithe
     });
   for (const sharing of ["0", "1"]) {
     const path = sharing === "1" ? "shared" : "private";
+    // A runtime directory per session, so a broker still exiting cannot serve
+    // the next session with the last one's fake environment.
+    const runtime = (stage) => join(home, `run-unrelayable-${stage}-${sharing}`);
     const env = (stage) => ({
       WOLFRAM_MCP_SHARE: sharing,
-      // A runtime directory per session, so a broker still exiting cannot
-      // serve the next session with the last one's fake environment.
-      XDG_RUNTIME_DIR: privateDir(join(home, `run-unrelayable-${stage}-${sharing}`)),
+      XDG_RUNTIME_DIR: privateDir(runtime(stage)),
       WOLFRAM_MCP_LICENSE_LIMIT: "4",
       FAKE_EXTRA_PROMPTS: JSON.stringify(extraPrompts),
     });
@@ -4065,11 +4066,15 @@ heading("A prompt or resource that cannot be relayed costs only itself, on eithe
           /prompt the kernel listed is left out \(entry 4 of 5 on this page\): name/.test(said) &&
           /prompt the kernel listed is left out \(entry 5 of 5 on this page\).*it was null/.test(said) &&
           /resource the kernel listed is left out \(NoUri\): uri/.test(said) &&
-          /resource the kernel listed is left out \(entry 3 of 3 on this page\): name/.test(said),
+          /resource the kernel listed is left out \(ui:\/\/fake\/nameless\): name/.test(said),
         said.split("\n").filter((l) => /left out/.test(l)).join(" | ").slice(0, 240) || "(nothing said)",
       );
     }
     await resourced.client.close();
+    // Not left to their 60s grace, holding kernels into the sections after.
+    for (const stage of ["prompts-cold", "prompts-warm", "resources"]) {
+      signalOwnBrokers("SIGKILL", runtime(stage));
+    }
     await new Promise((r) => setTimeout(r, 300));
   }
 }
