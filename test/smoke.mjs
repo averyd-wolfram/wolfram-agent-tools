@@ -2282,6 +2282,54 @@ heading("A connection left to drain closes once answered, and still gives up a b
     await f?.stop();
     frozen.server.close();
   }
+
+  // A call with no ceiling never runs out, so nothing on its connection ever
+  // asked whether a leaving broker that froze still answered: the call waited
+  // for ever, and the socket held the session's loop with it (#111). Retired
+  // or not yet, since a session that makes no request after the broker's word
+  // never retires the connection at all. A leaving broker that is only busy
+  // answers the same question, and its call is kept. Three stubs at once, so
+  // the section waits out one drain rather than three.
+  const unbounded = async (dir, options, retire) => {
+    const stub = stubBroker(dir, options);
+    await stub.listening;
+    const backend = await attach(stub.address);
+    try {
+      const started = Date.now();
+      const result = backend ? evaluate(backend, "unbounded", 0) : Promise.resolve("could not attach");
+      if (backend && retire && (await until(() => backend.usable() === false, 2_000))) {
+        void backend.retire();
+      }
+      const settled = await Promise.race([
+        result,
+        new Promise((resolve) => setTimeout(() => resolve("still waiting at 15s"), 15_000)),
+      ]);
+      return `after ${((Date.now() - started) / 1000).toFixed(1)}s: ${settled}`;
+    } finally {
+      await backend?.stop();
+      stub.server.close();
+    }
+  };
+  const [retiredFrozen, toldFrozen, busy] = await Promise.all([
+    unbounded("run-drain-unbounded-retired", { freeze: true }, true),
+    unbounded("run-drain-unbounded-told", { freeze: true }, false),
+    unbounded("run-drain-unbounded-busy", { answerAfterMs: 8_000 }, true),
+  ]);
+  check(
+    "a call with no ceiling, left on a leaving broker that stops answering, fails once the broker is found out",
+    /stopped answering/.test(retiredFrozen),
+    retiredFrozen.slice(0, 140),
+  );
+  check(
+    "and so does one whose session has not chosen again since the broker said it was leaving",
+    /stopped answering/.test(toldFrozen),
+    toldFrozen.slice(0, 140),
+  );
+  check(
+    "and one left on a leaving broker that is only busy is answered",
+    /: evaluated$/.test(busy),
+    busy.slice(0, 140),
+  );
 }
 
 // ---------------------------------------------------------------------------
