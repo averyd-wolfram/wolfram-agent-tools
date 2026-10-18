@@ -796,7 +796,9 @@ are *traced* in this tree on 2026-10-05 unless marked otherwise.
    `outputSchema` of another type is relayed, since Claude Code 2.1.302 was measured listing one;
    a tool with no name, or an `inputSchema` that is not an object schema, which a model cannot
    be given and no client was measured taking, is left out with the reason logged, and the rest
-   are listed. *Traced:* AgentTools 2.2.7
+   are listed. Prompts and resources are judged the same way, by the SDK's `PromptSchema` and
+   `ResourceSchema` (#118): one malformed prompt had left the cache with none, and on the shared
+   path failed the broker's whole `kernelReady`, its tools with it. *Traced:* AgentTools 2.2.7
    emits neither — a tool's entry is built from five fixed keys (`createMCPToolData`,
    `Kernel/Server/Shared.wl`), and its results leave `structuredContent` out on purpose — so
    `test:custom` cannot pin this until a paclet lets a tool declare an output schema.
