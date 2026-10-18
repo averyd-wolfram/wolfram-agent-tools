@@ -435,7 +435,8 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
           );
         case "status":
           return reply({
-            kernels: pool.size,
+            // What doctor and wolfram_status print as running (#119).
+            kernels: pool.running,
             busy: pool.busy,
             budget: pool.budget,
             licence: pool.licence,

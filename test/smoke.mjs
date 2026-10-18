@@ -5418,6 +5418,104 @@ heading("The pool's refusal window spares a flavour's idle kernel, and is report
 }
 
 // ---------------------------------------------------------------------------
+// The broker's status counted every slot in its pool as a kernel, and doctor
+// and wolfram_status print that count as running: a slot whose kernel had
+// stopped for idleness read as an idle kernel, so beside #113's refusing line a
+// session was told of a running kernel of its flavour that would not serve it
+// (#119). A slot whose kernel is still starting has its process, and is busy:
+// counted out, the report would say "0 running, 1 busy".
+heading("A broker reports the kernels it has running, not its pool's slots");
+{
+  const address = join(privateDir(join(home, "run-idle-count")), "broker.sock");
+  // Its kernel takes a second to start, declared so the pool starts it so.
+  const flavour = lib.kernelFlavour({
+    MCP_SERVER_NAME: "WolframLanguage",
+    FAKE_INIT_DELAY_MS: "1000",
+    WOLFRAM_MCP_KERNEL_ENV: "FAKE_INIT_DELAY_MS",
+  });
+  let broker = null;
+  let client = null;
+  try {
+    broker = await lib.startBroker({
+      address,
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 300,
+      startTimeoutMs: 10_000,
+      reserveSeats: 0,
+      allowInspect: false,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+    });
+    client = await lib.BrokerBackend.attachIfRunning({
+      address,
+      flavour,
+      spawnCommand: join(home, "definitely-not-a-binary"),
+      spawnArgs: [],
+      spawnEnv: {},
+      log: () => {},
+    });
+    if (!client) throw new Error("could not attach to the broker");
+    const askedAt = Date.now();
+    const call = client.callTool(
+      { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } },
+      { timeoutMs: 30_000 },
+    );
+    let starting = await client.status(2_000);
+    while (starting.busy === 0 && Date.now() - askedAt < 5_000) {
+      await new Promise((r) => setTimeout(r, 20));
+      starting = await client.status(2_000);
+    }
+    const startingMs = Date.now() - askedAt;
+    await call;
+    check(
+      "a kernel still starting is counted as running",
+      starting.kernels === 1 && starting.busy === 1 && startingMs < 1_000,
+      `${starting.kernels} running, ${starting.busy} busy, ${startingMs}ms into a 1s start`,
+    );
+    let stopped = await client.status(2_000);
+    for (const by = Date.now() + 5_000; stopped.kernels !== 0 && Date.now() < by; ) {
+      await new Promise((r) => setTimeout(r, 50));
+      stopped = await client.status(2_000);
+    }
+    check(
+      "and one stopped for idleness is not, though its slot is still in the pool",
+      stopped.kernels === 0 && stopped.busy === 0,
+      `${stopped.kernels} running, ${stopped.busy} busy, asked for up to 5s after a call to a kernel idle at 300ms`,
+    );
+  } finally {
+    await client?.stop();
+    await broker?.stop?.();
+  }
+
+  // What a shared session sees of it.
+  const runtime = privateDir(join(home, "run-idle-status"));
+  const s = await connect({
+    WOLFRAM_MCP_SHARE: "1",
+    XDG_RUNTIME_DIR: runtime,
+    WOLFRAM_MCP_IDLE_MINUTES: "0.02",
+  });
+  await s.client.callTool(
+    { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } },
+    undefined,
+    { timeout: 30_000 },
+  );
+  let line = await sharingLine(s.client);
+  for (const by = Date.now() + 10_000; !/ 0 kernel\(s\) running/.test(line) && Date.now() < by; ) {
+    await new Promise((r) => setTimeout(r, 200));
+    line = await sharingLine(s.client);
+  }
+  check(
+    "and a shared session's wolfram_status says so",
+    / 0 kernel\(s\) running, 0 busy/.test(line),
+    `${line.slice(0, 140) || "(no sharing line)"}, asked for up to 10s after a call to a kernel idle at 1.2s`,
+  );
+  await s.client.close();
+  signalOwnBrokers("SIGKILL", runtime);
+  await new Promise((r) => setTimeout(r, 300));
+}
+
+// ---------------------------------------------------------------------------
 heading("Findings the August audit recorded and nothing tracked");
 {
   // S7 — a cursor is one kernel's paging state, and the pool hands out whichever
