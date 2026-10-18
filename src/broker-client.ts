@@ -474,9 +474,9 @@ export class BrokerBackend implements KernelBackend {
    * `settled()` holds the session's next request until this is known: sent to
    * a frozen broker meanwhile, it was held to its own whole ceiling.
    */
-  #stillAnswering(why: string, announce = true): Promise<boolean> {
+  #stillAnswering(why: string, { quietly = false } = {}): Promise<boolean> {
     if (!this.#asking) {
-      if (announce) this.#options.log(`${why}; asking the broker whether it is still running`);
+      if (!quietly) this.#options.log(`${why}; asking the broker whether it is still running`);
       this.#asking = this.#answers().then((alive) => {
         this.#asking = null;
         // On the socket rather than `#closed`, for the same reason: a draining
@@ -531,9 +531,11 @@ export class BrokerBackend implements KernelBackend {
    * seconds rather than at whichever ceiling is longest. Said once, not at each
    * ping, which a long evaluation would have repeated for its whole length.
    *
-   * Unref'd: the socket already holds the loop while a caller waits on it, and
-   * this must never hold it once nothing does. A broker that answers but never
-   * finishes, holding its seats, is #80's.
+   * Unref'd: the socket already holds the loop while a caller waits on it, so
+   * the interval adds nothing to that. A ping it has out when the last call
+   * settles holds the loop for what is left of its deadline, as every ping does
+   * (`#answers`). A broker that answers but never finishes, holding its seats,
+   * is #80's.
    */
   #watchDrain(): void {
     if (this.#drainWatch || this.#outstanding.size === 0) return;
@@ -544,7 +546,9 @@ export class BrokerBackend implements KernelBackend {
     // Ended by the last call settling, or by the connection failing: both
     // leave nothing here to ask for.
     this.#drainWatch = setInterval(() => {
-      void this.#stillAnswering("it said it was leaving, with calls still on it", false);
+      void this.#stillAnswering("it said it was leaving, with calls still on it", {
+        quietly: true,
+      });
     }, DRAIN_PING_INTERVAL_MS);
     this.#drainWatch.unref();
   }

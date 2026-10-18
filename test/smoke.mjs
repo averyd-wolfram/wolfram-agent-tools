@@ -2171,13 +2171,14 @@ heading("A session that stops closes a connection still draining, at once");
 heading("A connection left to drain closes once answered, and still gives up a broker that stops answering");
 {
   const stubBroker = (dir, { answerAfterMs = 0, freeze = false }) => {
-    const seen = { answeredAt: null, closedAt: null };
+    const seen = { answeredAt: null, closedAt: null, pingsWhileLeaving: 0 };
     const server = createServer((socket) => {
       socket.setEncoding("utf8");
       socket.on("error", () => socket.destroy());
       socket.on("close", () => (seen.closedAt = Date.now()));
       const send = (frame) => socket.writable && socket.write(`${JSON.stringify(frame)}\n`);
       let frozen = false;
+      let leaving = false;
       let buffered = "";
       socket.on("data", (chunk) => {
         buffered += chunk;
@@ -2187,9 +2188,11 @@ heading("A connection left to drain closes once answered, and still gives up a b
           if (frame.op === "hello") {
             send({ id: frame.id, ok: true, result: { flavours: true, flavour: frame.params?.digest } });
           } else if (frame.op === "ping") {
+            if (leaving) seen.pingsWhileLeaving++;
             send({ id: frame.id, ok: true, result: {} });
           } else if (frame.op === "callTool") {
             send({ event: "shuttingDown" });
+            leaving = true;
             if (freeze) {
               frozen = true;
               continue;
@@ -2304,7 +2307,10 @@ heading("A connection left to drain closes once answered, and still gives up a b
         result,
         new Promise((resolve) => setTimeout(() => resolve("still waiting at 15s"), 15_000)),
       ]);
-      return `after ${((Date.now() - started) / 1000).toFixed(1)}s: ${settled}`;
+      return {
+        said: `after ${((Date.now() - started) / 1000).toFixed(1)}s: ${settled}`,
+        pings: stub.seen.pingsWhileLeaving,
+      };
     } finally {
       await backend?.stop();
       stub.server.close();
@@ -2317,18 +2323,20 @@ heading("A connection left to drain closes once answered, and still gives up a b
   ]);
   check(
     "a call with no ceiling, left on a leaving broker that stops answering, fails once the broker is found out",
-    /stopped answering/.test(retiredFrozen),
-    retiredFrozen.slice(0, 140),
+    /stopped answering/.test(retiredFrozen.said),
+    retiredFrozen.said.slice(0, 140),
   );
   check(
     "and so does one whose session has not chosen again since the broker said it was leaving",
-    /stopped answering/.test(toldFrozen),
-    toldFrozen.slice(0, 140),
+    /stopped answering/.test(toldFrozen.said),
+    toldFrozen.said.slice(0, 140),
   );
+  // Asked, and kept: a call answered with no ping between would pass on any
+  // code, the watch never having run.
   check(
-    "and one left on a leaving broker that is only busy is answered",
-    /: evaluated$/.test(busy),
-    busy.slice(0, 140),
+    "and one left on a leaving broker that is only busy is answered, though the broker was asked",
+    /: evaluated$/.test(busy.said) && busy.pings >= 1,
+    `${busy.said.slice(0, 120)}; ${busy.pings} ping(s) answered while leaving`,
   );
 }
 
