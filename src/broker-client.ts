@@ -790,6 +790,7 @@ export class BrokerBackend implements KernelBackend {
    * what you ask when things are stuck — passes a ceiling of its own.
    */
   status(timeoutMs?: number): Promise<{
+    /** Running or starting (`KernelPool.running`), not every slot in the pool. */
     kernels: number;
     busy: number;
     budget: number;

@@ -195,6 +195,17 @@ export class KernelPool {
   get size(): number {
     return this.#slots.length;
   }
+  /**
+   * Slots with a kernel process: running, or busy, which a slot is while its
+   * kernel starts. Not `size`: a slot whose kernel stopped for idleness stays
+   * in the pool until it is used or retired, and reported as running it read,
+   * beside a refusal window, as an idle kernel of the flavour that would not
+   * serve (#119). Counting only `session.running` would say "0 running, 1
+   * busy" of a kernel that is starting.
+   */
+  get running(): number {
+    return this.#slots.filter((s) => s.busy || s.session.running).length;
+  }
   get busy(): number {
     return this.#slots.filter((s) => s.busy).length;
   }

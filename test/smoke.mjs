@@ -204,12 +204,19 @@ const hasStatusTool = (tools) => tools.some((t) => t.name === STATUS_TOOL);
 
 const answeredByFake = (result) => /^evaluated/.test(result?.content?.[0]?.text ?? "");
 
-/** Wait until `condition` holds, or `ms` passes, rather than sleeping past it. */
+/**
+ * Wait until `condition` holds, or `ms` passes, rather than sleeping past it.
+ * It may be async, so its last answer is the one returned: asked once more
+ * after the wait, an async condition that reads state made one request more,
+ * and a check then judged that request's answer, not the one it waited for.
+ */
 const until = async (condition, ms = 10_000) => {
-  for (const by = Date.now() + ms; Date.now() < by && !condition(); ) {
+  let held = await condition();
+  for (const by = Date.now() + ms; !held && Date.now() < by; ) {
     await new Promise((r) => setTimeout(r, 20));
+    held = await condition();
   }
-  return condition();
+  return held;
 };
 
 /** The methods a fake kernel logged under FAKE_METHOD_LOG, in order. */
@@ -5415,6 +5422,102 @@ heading("The pool's refusal window spares a flavour's idle kernel, and is report
   await lone.client.close();
   signalOwnBrokers("SIGKILL", runtime);
   await new Promise((r) => setTimeout(r, 300));
+}
+
+// ---------------------------------------------------------------------------
+// The broker's status counted every slot in its pool as a kernel, and doctor
+// and wolfram_status print that count as running: a slot whose kernel had
+// stopped for idleness read as an idle kernel, so beside #113's refusing line a
+// session was told of a running kernel of its flavour that would not serve it
+// (#119). A slot whose kernel is still starting has its process, and is busy:
+// counted out, the report would say "0 running, 1 busy".
+heading("A broker reports the kernels it has running, not its pool's slots");
+{
+  const address = join(privateDir(join(home, "run-idle-count")), "broker.sock");
+  // Its kernel takes 3s to start, declared so the pool starts it so: long
+  // enough that a status seen while the call is outstanding is one the start
+  // was still running for, however loaded the machine.
+  const flavour = lib.kernelFlavour({
+    MCP_SERVER_NAME: "WolframLanguage",
+    FAKE_INIT_DELAY_MS: "3000",
+    WOLFRAM_MCP_KERNEL_ENV: "FAKE_INIT_DELAY_MS",
+  });
+  let broker = null;
+  let client = null;
+  try {
+    broker = await lib.startBroker({
+      address,
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 300,
+      startTimeoutMs: 10_000,
+      reserveSeats: 0,
+      allowInspect: false,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+    });
+    client = await lib.BrokerBackend.attachIfRunning({
+      address,
+      flavour,
+      spawnCommand: join(home, "definitely-not-a-binary"),
+      spawnArgs: [],
+      spawnEnv: {},
+      log: () => {},
+    });
+    if (!client) throw new Error("could not attach to the broker");
+    const askedAt = Date.now();
+    let settledAt = null;
+    const call = client
+      .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, { timeoutMs: 30_000 })
+      .finally(() => (settledAt = Date.now()));
+    let starting = null;
+    await until(async () => (starting = await client.status(2_000)).busy > 0, 5_000);
+    const startingMs = Date.now() - askedAt;
+    await call;
+    // Settled at least the start's 3s after it was asked: the start ran.
+    const callMs = settledAt - askedAt;
+    check(
+      "a kernel still starting is counted as running",
+      starting.kernels === 1 && starting.busy === 1 && startingMs < callMs && callMs >= 3_000,
+      `${starting.kernels} running, ${starting.busy} busy, at ${startingMs}ms of a call that took ${callMs}ms behind a 3s start`,
+    );
+    let stopped = null;
+    await until(async () => (stopped = await client.status(2_000)).kernels === 0, 5_000);
+    check(
+      "and one stopped for idleness is not, though its slot is still in the pool",
+      stopped.kernels === 0 && stopped.busy === 0,
+      `${stopped.kernels} running, ${stopped.busy} busy, asked for up to 5s after a call to a kernel idle at 300ms`,
+    );
+  } finally {
+    await client?.stop();
+    await broker?.stop?.();
+  }
+
+  // What a shared session sees of it.
+  const runtime = privateDir(join(home, "run-idle-status"));
+  const s = await connect({
+    WOLFRAM_MCP_SHARE: "1",
+    XDG_RUNTIME_DIR: runtime,
+    WOLFRAM_MCP_IDLE_MINUTES: "0.02",
+  });
+  try {
+    await s.client.callTool(
+      { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } },
+      undefined,
+      { timeout: 30_000 },
+    );
+    let line = "";
+    await until(async () => / 0 kernel\(s\) running/.test((line = await sharingLine(s.client))), 10_000);
+    check(
+      "and a shared session's wolfram_status says so",
+      / 0 kernel\(s\) running, 0 busy/.test(line),
+      `${line.slice(0, 140) || "(no sharing line)"}, asked for up to 10s after a call to a kernel idle at 1.2s`,
+    );
+  } finally {
+    await s.client.close();
+    signalOwnBrokers("SIGKILL", runtime);
+    await new Promise((r) => setTimeout(r, 300));
+  }
 }
 
 // ---------------------------------------------------------------------------
