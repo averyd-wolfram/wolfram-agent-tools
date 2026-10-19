@@ -4198,16 +4198,27 @@ heading("A prompt list that fails after a kernel start costs only the prompts, o
     // Prompts never read are not prompts seen. Recorded as seen, with none, the
     // next session offered prompts and listed none, from its cache, until some
     // later kernel start; before the broker sent its tools, the shared path's
-    // next session came up cold and offered none.
-    const next = await connect(env("next"));
-    const offered = next.client.getServerCapabilities()?.prompts;
-    check(
-      `and the next session offers no prompts it never saw (${path})`,
-      offered === undefined,
-      offered ? `offered prompts, listing: ${names((await next.client.listPrompts()).prompts) || "none"}` : "",
-    );
-    await next.client.close();
-    await new Promise((r) => setTimeout(r, 300));
+    // next session came up cold and offered none. The next session's own kernel
+    // fails the read too, and then a third session looks: the cache that first
+    // failure wrote holds an empty list, and taking that for prompts seen let
+    // the second failure record them as offered.
+    for (const stage of ["next", "third"]) {
+      const s = await connect(env(stage));
+      const offered = s.client.getServerCapabilities()?.prompts;
+      check(
+        `and the ${stage} session offers no prompts it never saw (${path})`,
+        offered === undefined,
+        offered ? `offered prompts, listing: ${names((await s.client.listPrompts()).prompts) || "none"}` : "",
+      );
+      if (stage === "next") {
+        const before = lib.readCache(suiteKey)?.cachedAt;
+        rmSync(join(home, "fake-state"), { force: true });
+        await evaluate(s);
+        await until(() => lib.readCache(suiteKey)?.cachedAt !== before, 5_000);
+      }
+      await s.client.close();
+      await new Promise((r) => setTimeout(r, 300));
+    }
 
     // Warm with two prompts, then a kernel that lists one tool more and fails
     // its prompts: the new tool proves the refresh ran.
@@ -4229,7 +4240,7 @@ heading("A prompt list that fails after a kernel start costs only the prompts, o
     );
     await warm.client.close();
     // Not left to their 60s grace, holding kernels into the sections after.
-    for (const stage of ["cold", "next", "warm"]) signalOwnBrokers("SIGKILL", runtime(stage));
+    for (const stage of ["cold", "next", "third", "warm"]) signalOwnBrokers("SIGKILL", runtime(stage));
     await new Promise((r) => setTimeout(r, 300));
   }
 }

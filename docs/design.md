@@ -531,6 +531,7 @@ guards the whole design — if dispatch ever becomes concurrent, all of this nee
 - The broker erased the protocol-vs-`isError` distinction `proxy.ts` maintains, so the same
   call was an MCP error when private and an `isError` result when shared. `BROKER_PROTOCOL`
   went to 5 for the frame to carry the code, and to 6 for it to carry the error's `data` (#62).
+  It went to 7 for `kernelReady` to carry why a new kernel's prompts could not be read (#122).
 - A doubled `MCP error -32602: MCP error -32602:` prefix on every relayed protocol error — on
   `tools/call` first, and on every other request a kernel answers since #62.
 - `--help` and the "no usable Wolfram" diagnostic told users to run an unpublished
