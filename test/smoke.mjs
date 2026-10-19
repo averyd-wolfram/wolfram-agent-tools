@@ -4214,7 +4214,12 @@ heading("A prompt list that fails after a kernel start costs only the prompts, o
         const before = lib.readCache(suiteKey)?.cachedAt;
         rmSync(join(home, "fake-state"), { force: true });
         await evaluate(s);
-        await until(() => lib.readCache(suiteKey)?.cachedAt !== before, 5_000);
+        // Checked, since without this refresh the third session's check
+        // would pass having tested nothing.
+        check(
+          `and the next session's own kernel, failing the read too, refreshes the cache (${path})`,
+          await until(() => lib.readCache(suiteKey)?.cachedAt !== before, 5_000),
+        );
       }
       await s.client.close();
       await new Promise((r) => setTimeout(r, 300));
