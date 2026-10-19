@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.8](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.7...v0.1.8) (2026-10-19)
+
+
+### Bug Fixes
+
+* broadcast a new kernel's tools though its prompt list fails, rather than lose them with it ([#126](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/126)) ([b784ae2](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/b784ae24f79c173de86f1cfe83154b7893431ba2))
+
 ## [0.1.7](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.6...v0.1.7) (2026-10-18)
 
 
