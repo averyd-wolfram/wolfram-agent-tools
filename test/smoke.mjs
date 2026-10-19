@@ -291,6 +291,80 @@ const wipeCache = () => {
   rmSync(join(home, "fake-state"), { force: true });
 };
 
+/**
+ * Listen at `address`, or reject with why. A stub's listen with no `error`
+ * handler made a refused listen an unhandled event, which ended the whole run:
+ * every later section unrun, socket-free ones included, and no summary
+ * printed (#107). Measured in a Linux coding-agent sandbox (#60), where
+ * listening on a Unix socket is refused with EPERM.
+ */
+const listening = (server, address) =>
+  new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(address, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+
+/**
+ * Why this host cannot serve a broker, or null when it can: listen on a Unix
+ * socket, connect to it, and have a request answered (#107). Where it cannot, a
+ * session's own broker cannot run either, and going private is the designed
+ * outcome (*Sharing is an optimisation, never a dependency*), so a section
+ * about sharing would test nothing there. macOS shows that partition under
+ * `sandbox-exec -p '(version 1)(allow default)(deny network-bind (local unix))'`,
+ * which refuses the listen as #60's sandbox did.
+ */
+const socketFaultAt = async (address) => {
+  const server = createServer((socket) => {
+    socket.on("error", () => socket.destroy());
+    socket.once("data", () => socket.end("pong\n"));
+  });
+  try {
+    await listening(server, address);
+  } catch (err) {
+    return `listen: ${err.message}`;
+  }
+  try {
+    return await new Promise((resolve) => {
+      let heard = "";
+      const client = connectSocket(address, () => client.write("ping\n"));
+      const timer = setTimeout(() => resolve("no answer within 5s"), 5_000);
+      const settle = (fault) => {
+        clearTimeout(timer);
+        client.destroy();
+        resolve(fault);
+      };
+      client.setEncoding("utf8");
+      client.on("data", (chunk) => (heard += chunk));
+      client.on("error", (err) => settle(`connect: ${err.message}`));
+      client.on("end", () => settle(heard === "pong\n" ? null : `answered ${JSON.stringify(heard)}`));
+    });
+  } finally {
+    server.close();
+  }
+};
+const socketsRefused = await socketFaultAt(join(home, "preflight.sock"));
+if (socketsRefused) {
+  console.log(`\nThis host refuses Unix sockets (${socketsRefused}), so what needs them is not run.`);
+}
+
+// What could not run here, by section: counted apart from passes and failures,
+// so a run that left any of it out is never reported as a pass.
+const unavailable = [];
+/**
+ * Whether this section, or the `part` of it named, can run here: false where
+ * it needs Unix sockets and the preflight found them refused. Then it says so,
+ * and is counted as not run.
+ */
+const socketsHere = (part = "") => {
+  if (!socketsRefused) return true;
+  unavailable.push(part ? `${lastHeading} (${part})` : lastHeading);
+  console.log(`  SKIP  ${part || "this section"}: not run, since this host refuses Unix sockets`);
+  return false;
+};
+
 // ---------------------------------------------------------------------------
 heading("Unit — kernel discovery");
 {
@@ -1074,7 +1148,7 @@ heading("A session's own directories stay that session's");
 // entitlement, ignored the installation's cached licence, and started at one
 // kernel — a broker serving the installation's licence that did not believe it.
 heading("An unfilled WOLFRAMINIT is no entitlement to the broker either");
-{
+if (socketsHere()) {
   wipeCache();
   lib.recordFacts(fakeKernel, {
     version: "15.1.0",
@@ -1133,7 +1207,7 @@ heading("An unfilled WOLFRAMINIT is no entitlement to the broker either");
 // broker starts, the session lists its tools, and one kernel does all of it.
 // Before D20 this was two, the probe and then the pool's kernel.
 heading("A cold start uses one kernel");
-{
+if (socketsHere()) {
   wipeCache();
   const runtime = join(home, "cold-one");
   privateDir(runtime);
@@ -1183,12 +1257,16 @@ heading("Regression — reported base directories reach every later kernel");
     return session("ask");
   };
 
-  const shared = await askBase("shared", { WOLFRAM_MCP_SHARE: "1" });
-  check(
-    "a shared kernel is told where the installation lives",
-    shared.includes("base=/fake/base"),
-    shared.slice(0, 70),
-  );
+  // Shared ones only where a broker can run: elsewhere they would go private,
+  // and pass for the private kernel's sake.
+  if (socketsHere("a shared kernel")) {
+    const shared = await askBase("shared", { WOLFRAM_MCP_SHARE: "1" });
+    check(
+      "a shared kernel is told where the installation lives",
+      shared.includes("base=/fake/base"),
+      shared.slice(0, 70),
+    );
+  }
 
   const private_ = await askBase("private", { WOLFRAM_MCP_SHARE: "0" });
   check(
@@ -1199,12 +1277,14 @@ heading("Regression — reported base directories reach every later kernel");
 
   // The second worked example in docs/environment.md. Saying what the licence
   // permits must not silently switch off base-directory forwarding.
-  const pinned = await askBase("pinned", { WOLFRAM_MCP_SHARE: "1", WOLFRAM_MCP_LICENSE_LIMIT: "4" });
-  check(
-    "and so is one whose licence limit was configured by hand",
-    pinned.includes("base=/fake/base"),
-    pinned.slice(0, 70),
-  );
+  if (socketsHere("a shared kernel whose licence limit was set")) {
+    const pinned = await askBase("pinned", { WOLFRAM_MCP_SHARE: "1", WOLFRAM_MCP_LICENSE_LIMIT: "4" });
+    check(
+      "and so is one whose licence limit was configured by hand",
+      pinned.includes("base=/fake/base"),
+      pinned.slice(0, 70),
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1523,7 +1603,7 @@ heading("End to end — no kernel at all");
 
 // ---------------------------------------------------------------------------
 heading("Sharing — several sessions, one kernel");
-{
+if (socketsHere()) {
   // Kernels are licence-limited: a typical licence permits 2 or 4, so one
   // session per kernel locks the user out of their own Mathematica. Several
   // server processes must therefore cost one kernel, not one each.
@@ -1580,7 +1660,7 @@ heading("Sharing — several sessions, one kernel");
 
 // ---------------------------------------------------------------------------
 heading("Sharing — the pool grows only up to its budget");
-{
+if (socketsHere()) {
   wipeCache();
   const runtime = join(home, "run-pool");
   privateDir(runtime);
@@ -1652,7 +1732,7 @@ heading("Sharing — falls back rather than failing");
 // holding it was never examined, though the path is derived from public facts
 // and `brokerAddress` checked only its *length*.
 heading("The broker's socket is private, and so is the directory holding it");
-{
+if (socketsHere()) {
   wipeCache();
   const runtime = join(home, "run-boundary");
   privateDir(runtime);
@@ -1744,7 +1824,7 @@ heading("A directory others can write to is refused, not shared in");
 // sessions have no XDG_RUNTIME_DIR and /tmp as their temp directory, the same
 // shape.
 heading("Sharing has a private home without XDG_RUNTIME_DIR, or one you choose");
-{
+if (socketsHere()) {
   const ownRun = join(process.env.XDG_CACHE_HOME ?? join(home, ".cache"), "wolfram-mcp-server", "run");
   const sockets = (dir) => (existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".sock")) : []);
   const evaluate = (session) =>
@@ -1807,7 +1887,7 @@ heading("Sharing has a private home without XDG_RUNTIME_DIR, or one you choose")
 // file to place an event in, or to match it to the session that caused it —
 // which is the half of plan.md §5.1 that never landed.
 heading("Every line the broker writes says when it happened");
-{
+if (socketsHere()) {
   wipeCache();
   const runtime = join(home, "run-stamped");
   privateDir(runtime);
@@ -1843,7 +1923,7 @@ heading("Every line the broker writes says when it happened");
 // so "started here" has to be the broker's own pid agreeing with the pid that
 // was spawned, not a flag set on whichever connection came back first.
 heading("A spawn that lost the bind race is not mistaken for the winner");
-{
+if (socketsHere()) {
   const runtime = join(home, "run-race");
   privateDir(runtime);
   const address = join(runtime, "raced.sock");
@@ -1909,7 +1989,7 @@ heading("A spawn that lost the bind race is not mistaken for the winner");
 // The four checks below are the ones an instant kernel cannot express. Each was
 // reproduced by measurement before it was written down; see docs/plan.md §0.
 heading("Regression — one call starts one kernel, not a licence budget");
-{
+if (socketsHere()) {
   wipeCache();
   const runtime = join(home, "run-onecall");
   privateDir(runtime);
@@ -1965,7 +2045,7 @@ heading("Regression — an empty upstream list is never cached");
 
 // ---------------------------------------------------------------------------
 heading("Regression — a broker that dies does not brick the session");
-{
+if (socketsHere()) {
   wipeCache();
   const runtime = join(home, "run-brokerdies");
   privateDir(runtime);
@@ -2005,7 +2085,7 @@ heading("Regression — a broker that dies does not brick the session");
 // reproduction, and forever with none (#75). A broker killed outright sends
 // nothing first, and its call failed at once.
 heading("A call in flight when its broker stops fails at once, not at its ceiling");
-{
+if (socketsHere()) {
   wipeCache();
   const runtime = privateDir(join(home, "run-stops-mid-call"));
   const s = await connect({
@@ -2169,7 +2249,7 @@ heading("A session that stops closes a connection still draining, at once");
 // out, by the ping a request that runs out sends, rather than holding every
 // call left on it to its own ceiling.
 heading("A connection left to drain closes once answered, and still gives up a broker that stops answering");
-{
+if (socketsHere()) {
   const stubBroker = (dir, { answerAfterMs = 0, freeze = false }) => {
     const seen = { answeredAt: null, closedAt: null, pingsWhileLeaving: 0 };
     const server = createServer((socket) => {
@@ -2208,7 +2288,7 @@ heading("A connection left to drain closes once answered, and still gives up a b
       });
     });
     const address = join(privateDir(join(home, dir)), "broker.sock");
-    return { server, address, seen, listening: new Promise((resolve) => server.listen(address, resolve)) };
+    return { server, address, seen, listening: listening(server, address) };
   };
   const attach = (address, log = () => {}) =>
     lib.BrokerBackend.attachIfRunning({
@@ -2351,7 +2431,7 @@ heading("A connection left to drain closes once answered, and still gives up a b
 // ping, which it serves ahead of its pool. (That the queued call fails at all,
 // where a private session would wait for it, is #80.)
 heading("A request that runs out on a busy broker costs the session no other call");
-{
+if (socketsHere()) {
   wipeCache();
   const runtime = privateDir(join(home, "run-one-runs-out"));
   const s = await connect({
@@ -2407,7 +2487,7 @@ heading("A request that runs out on a busy broker costs the session no other cal
 
 // ---------------------------------------------------------------------------
 heading("Regression — several sessions recovering at once produce one broker");
-{
+if (socketsHere()) {
   wipeCache();
   const runtime = join(home, "run-race");
   privateDir(runtime);
@@ -2481,7 +2561,7 @@ heading("Regression — several sessions recovering at once produce one broker")
 // is there by then, the other broker's socket included. That broker was
 // orphaned in turn, and the next session started a third.
 heading("A broker no longer at its address hands its sessions over and leaves");
-{
+if (socketsHere()) {
   wipeCache();
   const runtime = join(home, "run-orphan");
   privateDir(runtime);
@@ -2586,7 +2666,7 @@ heading("A broker no longer at its address hands its sessions over and leaves");
 // such an address, so no broker ever listened at one (#100). The limit is
 // sun_path's, its NUL included, and not whatever the Node running this allows.
 heading("An address too long for a socket path is refused, and one that fits is bound where it says");
-{
+if (socketsHere()) {
   const limit = process.platform === "linux" ? 108 : 104;
   // The longest address accepted, under a name shorter than the staging name a
   // broker binds beside its address first, so that only the address fits.
@@ -2744,7 +2824,7 @@ heading("A session whose runtime directory is too deep for a socket path goes pr
 // deep but private TMPDIR — a sandbox's, say — spent a seat that the cache's
 // directory would have saved.
 heading("A temporary directory too deep for a socket path is passed over for the cache's");
-{
+if (socketsHere()) {
   wipeCache();
   const deepTmp = privateDir(join(home, "d".repeat(Math.max(1, 110 - home.length))));
   const run = join(home, "cache", "wolfram-mcp-server", "run");
@@ -2786,7 +2866,7 @@ heading("A temporary directory too deep for a socket path is passed over for the
 // name between its bind and its link, so the first linked the second's socket
 // to its own address.
 heading("Two brokers claiming at once in one process each take their own address");
-{
+if (socketsHere()) {
   const dir = privateDir(join(home, "run-two-in-one"));
   const logs = [[], []];
   const start = (i) =>
@@ -2849,7 +2929,7 @@ heading("Two brokers claiming at once in one process each take their own address
 // Under the address watch alone, with the gap widened, that left two brokers 1
 // round in 10. onBound is that moment, and the check plays the other broker in it.
 heading("A socket put at the address the moment a broker binds is never taken for its own");
-{
+if (socketsHere()) {
   const dir = privateDir(join(home, "run-replaced-at-bind"));
   const address = join(dir, "broker.sock");
   const logs = [];
@@ -2914,7 +2994,7 @@ heading("A socket put at the address the moment a broker binds is never taken fo
 // one's bind and its link. This process plays the other: a live socket under
 // every name a broker here could have picked.
 heading("A broker's staging name never takes another process's socket");
-{
+if (socketsHere()) {
   const dir = privateDir(join(home, "run-same-pid"));
   const address = join(dir, "broker.sock");
   const ino = (path) => {
@@ -2967,7 +3047,7 @@ heading("A broker's staging name never takes another process's socket");
 // in full, until such addresses were refused (#100). A child process, because
 // what is measured is its exit.
 heading("A broker that stops after losing its address leaves its process free to exit");
-{
+if (socketsHere()) {
   const dir = privateDir(join(home, "run-lost-address"));
   const address = join(dir, `wm-${"1".repeat(12)}.sock`);
   const script = `
@@ -3031,7 +3111,7 @@ heading("A broker that stops after losing its address leaves its process free to
 // next call then queued behind work nobody was waiting for.
 for (const sharing of ["0", "1"]) {
   heading(`Cancellation reaches the kernel — ${sharing === "1" ? "shared" : "private"}`);
-  {
+  if (sharing !== "1" || socketsHere()) {
     wipeCache();
     const runtime = join(home, `run-cancel-${sharing}`);
     privateDir(runtime);
@@ -3107,6 +3187,7 @@ heading("Cancelling a prompt or a resource read reaches the kernel, on either pa
     { what: "resource read", method: "resources/read", send: (c, options) => c.readResource({ uri: "ui://fake/view" }, options) },
   ];
   for (const sharing of ["0", "1"]) {
+    if (sharing === "1" && !socketsHere("the shared path")) continue;
     for (const op of ops) {
       const label = `${sharing === "1" ? "shared" : "private"} ${op.what}`;
       const tag = `${sharing}-${op.what.replace(/ /g, "-")}`;
@@ -3158,6 +3239,7 @@ heading("A request cancelled while it waits is dropped, and the kernel kept, on 
   wipeCache();
   await warmCache();
   for (const sharing of ["0", "1"]) {
+    if (sharing === "1" && !socketsHere("the shared path")) continue;
     const label = sharing === "1" ? "shared" : "private";
     const runtime = privateDir(join(home, `run-queued-cancel-${sharing}`));
     const methods = join(home, `methods-queued-cancel-${sharing}.log`);
@@ -3203,7 +3285,7 @@ heading("A request cancelled while it waits is dropped, and the kernel kept, on 
 // took to resolve. Sent in one write with its request, the cancel is read in the
 // same chunk, before any await, and must still stop it.
 heading("A cancel read with its own request still reaches it, at the broker");
-{
+if (socketsHere()) {
   const methods = join(home, "methods-same-chunk.log");
   const knobs = { FAKE_METHOD_LOG: methods, FAKE_PROMPT_DELAY_MS: "3000" };
   const saved = Object.fromEntries(Object.keys(knobs).map((name) => [name, process.env[name]]));
@@ -3393,7 +3475,7 @@ heading("A cancelled request makes no room for itself, in the pool or the sessio
 // forwarded, and upstream progress had nowhere to go.
 for (const sharing of ["0", "1"]) {
   heading(`Progress reaches the caller — ${sharing === "1" ? "shared" : "private"}`);
-  {
+  if (sharing !== "1" || socketsHere()) {
     wipeCache();
     const runtime = join(home, `run-progress-${sharing}`);
     privateDir(runtime);
@@ -3440,8 +3522,21 @@ heading("Regression — an unspawnable broker must not crash the server");
 }
 
 // ---------------------------------------------------------------------------
-heading("Unit — when a broker may serve this session");
+heading("Unit — the socket preflight gives a reason where it cannot listen, rather than throwing");
 {
+  // What decides whether the sections that need sockets run: thrown rather
+  // than returned, a refused listen would end the run before any of them.
+  const fault = await socketFaultAt(join(home, "no-such-directory", "preflight.sock"));
+  check(
+    "a socket that cannot be listened on is a reason, not an exception",
+    /^listen: .*(ENOENT|EPERM|EACCES)/.test(fault ?? ""),
+    fault ?? "no fault found",
+  );
+}
+
+// ---------------------------------------------------------------------------
+heading("Unit — when a broker may serve this session");
+if (socketsHere()) {
   // Stub brokers, because a socket cannot tell these cases apart: all of them
   // accept the connection, and only what comes back separates them.
   const serve = async (name, onFrame) => {
@@ -3456,9 +3551,18 @@ heading("Unit — when a broker may serve this session");
       });
       socket.on("error", () => socket.destroy());
     });
-    await new Promise((resolve) => server.listen(address, resolve));
+    await listening(server, address);
     return { address, server };
   };
+  // A stub that cannot listen tells its section, rather than ending the run
+  // with an unhandled `error` event, every later section unrun (#107). A
+  // directory that does not exist refuses the listen on any host, with a code
+  // that varies: EACCES on macOS.
+  const refused = await serve("no-such-directory/broker", () => null).then(
+    () => "listened",
+    (err) => err.code,
+  );
+  check("a stub broker that cannot listen fails its section, not the run", /^E[A-Z]+$/.test(refused), refused);
   const ours = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" });
   const noted = [];
   const attach = (address) =>
@@ -3587,7 +3691,7 @@ heading("Unit — when a broker may serve this session");
 
 // ---------------------------------------------------------------------------
 heading("Regression — a kernel that timed out is not handed to the next caller");
-{
+if (socketsHere()) {
   wipeCache();
   const runtime = join(home, "run-wedged-kernel");
   privateDir(runtime);
@@ -3644,6 +3748,7 @@ heading("An unknown tool is an MCP error on both paths, not a failed evaluation"
 {
   const seen = {};
   for (const sharing of ["0", "1"]) {
+    if (sharing === "1" && !socketsHere("the shared path")) continue;
     wipeCache();
     const runtime = join(home, `run-errclass-${sharing}`);
     privateDir(runtime);
@@ -3667,24 +3772,25 @@ heading("An unknown tool is an MCP error on both paths, not a failed evaluation"
     await new Promise((r) => setTimeout(r, 300));
   }
 
+  // Each path that ran: the shared one is not run where sockets are refused.
+  const ran = Object.values(seen);
   check("a private kernel reports it as an MCP error", seen["0"].kind === "mcp-error", seen["0"].kind);
-  check("and so does a shared one", seen["1"].kind === "mcp-error", seen["1"].kind);
+  if (seen["1"]) check("and so does a shared one", seen["1"].kind === "mcp-error", seen["1"].kind);
   check(
     "with the code the kernel gave, not InternalError",
-    seen["0"].code === -32602 && seen["1"].code === -32602,
-    `private=${seen["0"].code} shared=${seen["1"].code}`,
+    ran.every((r) => r.code === -32602),
+    `private=${seen["0"].code} shared=${seen["1"]?.code ?? "not run"}`,
   );
   check(
     "carrying the kernel's own words",
-    /Unknown tool: NoSuchTool/.test(seen["1"].text ?? ""),
-    JSON.stringify(seen["1"].text ?? "").slice(0, 80),
+    ran.every((r) => /Unknown tool: NoSuchTool/.test(r.text ?? "")),
+    JSON.stringify((seen["1"] ?? seen["0"]).text ?? "").slice(0, 80),
   );
   // The SDK prefixes "MCP error <code>: " when it constructs the error and again
   // when it sends one it was given, so a relayed error used to arrive doubled.
   check(
     "and saying it once, not twice",
-    !/MCP error -32602: MCP error/.test(seen["0"].text ?? "") &&
-      !/MCP error -32602: MCP error/.test(seen["1"].text ?? ""),
+    ran.every((r) => !/MCP error -32602: MCP error/.test(r.text ?? "")),
     JSON.stringify(seen["0"].text ?? "").slice(0, 80),
   );
 }
@@ -3705,6 +3811,7 @@ heading("A kernel's error on any request reaches the client once, with its code 
   const said = (request) =>
     request.then(() => ({ text: "answered" }), (err) => ({ code: err.code, text: err.message, data: err.data }));
   for (const sharing of ["0", "1"]) {
+    if (sharing === "1" && !socketsHere("the shared path")) continue;
     const label = sharing === "1" ? "shared" : "private";
     // A runtime directory per session, so a broker still exiting cannot serve
     // the next session with the last one's fake environment.
@@ -3764,7 +3871,7 @@ heading("A kernel's error on any request reaches the client once, with its code 
 // the proof of life, and nothing has to know how long a tool ought to take.
 for (const sharing of ["1", "0"]) {
   heading(`A call outliving the ceiling keeps its kernel — ${sharing === "1" ? "shared" : "private"}`);
-  {
+  if (sharing !== "1" || socketsHere()) {
     wipeCache();
     const runtime = join(home, `run-outlive-${sharing}`);
     privateDir(runtime);
@@ -3847,6 +3954,7 @@ heading("A tool whose output schema cannot be compiled costs only itself, on eit
 {
   const schema = { $id: "Wolfram Tool:out", type: "object", properties: { answer: { type: "number" } } };
   for (const sharing of ["0", "1"]) {
+    if (sharing === "1" && !socketsHere("the shared path")) continue;
     const path = sharing === "1" ? "shared" : "private";
     wipeCache();
     const runtime = join(home, `run-outschema-${sharing}`);
@@ -3924,6 +4032,7 @@ heading("A tool whose output schema cannot be compiled costs only itself, on eit
   // relayed to it.
   const strict = { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] };
   for (const sharing of ["0", "1"]) {
+    if (sharing === "1" && !socketsHere("the shared path")) continue;
     const path = sharing === "1" ? "shared" : "private";
     wipeCache();
     const runtime = join(home, `run-outschema-strict-${sharing}`);
@@ -3958,6 +4067,7 @@ heading("A tool whose output schema cannot be compiled costs only itself, on eit
   // so the relay passes it on as the kernel sent it, for the client to judge.
   const nonObject = { type: "array", items: { type: "number" } };
   for (const sharing of ["0", "1"]) {
+    if (sharing === "1" && !socketsHere("the shared path")) continue;
     const path = sharing === "1" ? "shared" : "private";
     wipeCache();
     const runtime = join(home, `run-arrayschema-${sharing}`);
@@ -4005,6 +4115,7 @@ heading("A tool whose output schema cannot be compiled costs only itself, on eit
     null,
   ];
   for (const sharing of ["0", "1"]) {
+    if (sharing === "1" && !socketsHere("the shared path")) continue;
     const path = sharing === "1" ? "shared" : "private";
     wipeCache();
     const runtime = join(home, `run-unrelayable-${sharing}`);
@@ -4074,6 +4185,7 @@ heading("A prompt or resource that cannot be relayed costs only itself, on eithe
       timeout: 20_000,
     });
   for (const sharing of ["0", "1"]) {
+    if (sharing === "1" && !socketsHere("the shared path")) continue;
     const path = sharing === "1" ? "shared" : "private";
     // A runtime directory per session, so a broker still exiting cannot serve
     // the next session with the last one's fake environment.
@@ -4164,6 +4276,7 @@ heading("A prompt list that fails after a kernel start costs only the prompts, o
   };
   const said = (s) => s.stderr().split("\n").find((l) => /prompts\/list failed/.test(l)) ?? "(nothing said)";
   for (const sharing of ["0", "1"]) {
+    if (sharing === "1" && !socketsHere("the shared path")) continue;
     const path = sharing === "1" ? "shared" : "private";
     // A runtime directory per session, so a broker still exiting cannot serve
     // the next session with the last one's fake environment.
@@ -4310,7 +4423,8 @@ heading("A prompt given up on is reclaimed the moment the seat is needed, on eit
   wipeCache();
   await warmCache();
 
-  const results = await Promise.all(["private", "shared"].map(async (path) => {
+  const paths = ["private", ...(socketsHere("the shared path") ? ["shared"] : [])];
+  const results = await Promise.all(paths.map(async (path) => {
     const sectionMarker = join(home, `starts-prompt-${path}.log`);
     const runtime = privateDir(join(home, `run-prompt-${path}`));
     const s = await connect({
@@ -4413,7 +4527,7 @@ heading("A request the SDK gave up on leaves its kernel to be reclaimed, not reu
 // without it stayed at 1.
 for (const sharing of ["1", "0"]) {
   heading(`A failed call must not destroy a healthy kernel — ${sharing === "1" ? "shared" : "private"}`);
-  {
+  if (sharing !== "1" || socketsHere()) {
     wipeCache();
     const runtime = join(home, `run-healthy-${sharing}`);
     privateDir(runtime);
@@ -4486,7 +4600,7 @@ for (const sharing of ["1", "0"]) {
 
 // ---------------------------------------------------------------------------
 heading("wolfram_status says whether this session's kernels are shared");
-{
+if (socketsHere()) {
   // It printed only the setting, "sharing on", so a Claude Desktop session could
   // not tell from it whether two sessions shared a kernel; doctor could, by
   // asking the broker. Asked of a running broker only — never starting one,
@@ -4545,7 +4659,7 @@ heading("wolfram_status says whether this session's kernels are shared");
       }
     });
   });
-  await new Promise((resolve) => slow.listen(join(runtime, sock ?? "missing.sock"), resolve));
+  await listening(slow, join(runtime, sock ?? "missing.sock"));
   const late = await connect({ WOLFRAM_MCP_SHARE: "1", WOLFRAM_MCP_INSPECT: "1", XDG_RUNTIME_DIR: runtime });
   const lateLine = await sharingLine(late.client);
   await new Promise((r) => setTimeout(r, 2_500));
@@ -4582,7 +4696,7 @@ heading("wolfram_status says whether this session's kernels are shared");
 
 // ---------------------------------------------------------------------------
 heading("A cold broker serves its first session itself");
-{
+if (socketsHere()) {
   // Cold, a broker once ran a licence probe kernel for up to two minutes while
   // the attaching proxy gave up after five seconds, so the first session of a
   // cold start fell back to a private kernel and spent a second seat. There is
@@ -4613,7 +4727,7 @@ heading("A cold broker serves its first session itself");
 
 // ---------------------------------------------------------------------------
 heading("Regression — a wedged broker cannot outlive the call timeout");
-{
+if (socketsHere()) {
   wipeCache();
   const runtime = join(home, "run-wedged");
   privateDir(runtime);
@@ -4690,7 +4804,7 @@ heading("Regression — a wedged broker cannot outlive the call timeout");
 // Measured: still waiting 3s after the broker was given up, with over 80s of
 // its ceiling to go (Codex, on #79).
 heading("Once a broker stops answering, every call still on it fails, not only the one that ran out");
-{
+if (socketsHere()) {
   wipeCache();
   const runtime = privateDir(join(home, "run-stops-answering"));
   const s = await connect({
@@ -4734,7 +4848,7 @@ heading("Once a broker stops answering, every call still on it fails, not only t
 
 // ---------------------------------------------------------------------------
 heading("Regression — a frozen broker is not mistaken for a live one at attach");
-{
+if (socketsHere()) {
   wipeCache();
   const runtime = join(home, "run-deaf-attach");
   privateDir(runtime);
@@ -4842,7 +4956,7 @@ heading("Regression — a project on another server name must not cost this one 
 
 // ---------------------------------------------------------------------------
 heading("Two projects, one broker, a kernel each — and never each other's");
-{
+if (socketsHere()) {
   wipeCache();
   const runtime = join(home, "run-flavour");
   privateDir(runtime);
@@ -4910,7 +5024,7 @@ heading("Two projects, one broker, a kernel each — and never each other's");
 
 // ---------------------------------------------------------------------------
 heading("One seat, two environments — the pool makes room instead of overrunning");
-{
+if (socketsHere()) {
   wipeCache();
   const runtime = join(home, "run-swap");
   privateDir(runtime);
@@ -4968,7 +5082,7 @@ heading("One seat, two environments — the pool makes room instead of overrunni
 
 // ---------------------------------------------------------------------------
 heading("Regression — two server names share one broker, and one licence budget");
-{
+if (socketsHere()) {
   wipeCache();
   const runtime = join(home, "run-two-names");
   privateDir(runtime);
@@ -5026,7 +5140,7 @@ heading("Regression — two server names share one broker, and one licence budge
 
 // ---------------------------------------------------------------------------
 heading("A kernel is told its own environment, and nobody else's");
-{
+if (socketsHere()) {
   wipeCache();
   const runtime = join(home, "run-scope");
   privateDir(runtime);
@@ -5234,36 +5348,38 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
   // The same on the shared path, the default: the kernel starts in the broker's
   // pool and its failure crosses the socket as text, so nothing there may turn
   // it into a back-off either.
-  const sharedRuntime = join(home, "run-unresolved");
-  privateDir(sharedRuntime);
-  const sharedMarker = join(home, "marker-shared-unresolved");
-  const sharedAt = Date.now();
-  const sharedBad = await connect({
-    MCP_SERVER_NAME: "WolframVerifier/Verifier",
-    FAKE_MODE: "no-paclet-extension",
-    WOLFRAM_MCP_START_TIMEOUT_SECONDS: "20",
-    WOLFRAM_MCP_SHARE: "1",
-    XDG_RUNTIME_DIR: sharedRuntime,
-    WOLFRAM_MCP_LICENSE_LIMIT: "2",
-    FAKE_MARKER: sharedMarker,
-  });
-  const sharedFirst = await sharedBad.client.callTool(
-    { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
-  const sharedElapsed = Date.now() - sharedAt;
-  const sharedSecond = await sharedBad.client.callTool(
-    { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
-  const sharedSecondText = sharedSecond?.content?.[0]?.text ?? "";
-  // A session's preparation only attaches to the broker, so the start fails
-  // inside the broker's pool, where nothing remembered it: every request grew a
-  // kernel to fail the same way (issue #19). The pool remembers it per flavour.
-  check(
-    "through a shared broker too, it fails in seconds, and the next call starts no kernel",
-    sharedFirst.isError === true && sharedElapsed < 8000 &&
-      /No AgentTools extension found/.test(sharedSecondText) && /tried again in \d+s/.test(sharedSecondText) &&
-      starts(sharedMarker) === 1,
-    `${sharedElapsed}ms, ${starts(sharedMarker)} start(s); then: ${sharedSecondText.replace(/\s+/g, " ").slice(0, 70)}`,
-  );
-  await sharedBad.client.close();
+  if (socketsHere("the shared path")) {
+    const sharedRuntime = join(home, "run-unresolved");
+    privateDir(sharedRuntime);
+    const sharedMarker = join(home, "marker-shared-unresolved");
+    const sharedAt = Date.now();
+    const sharedBad = await connect({
+      MCP_SERVER_NAME: "WolframVerifier/Verifier",
+      FAKE_MODE: "no-paclet-extension",
+      WOLFRAM_MCP_START_TIMEOUT_SECONDS: "20",
+      WOLFRAM_MCP_SHARE: "1",
+      XDG_RUNTIME_DIR: sharedRuntime,
+      WOLFRAM_MCP_LICENSE_LIMIT: "2",
+      FAKE_MARKER: sharedMarker,
+    });
+    const sharedFirst = await sharedBad.client.callTool(
+      { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
+    const sharedElapsed = Date.now() - sharedAt;
+    const sharedSecond = await sharedBad.client.callTool(
+      { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
+    const sharedSecondText = sharedSecond?.content?.[0]?.text ?? "";
+    // A session's preparation only attaches to the broker, so the start fails
+    // inside the broker's pool, where nothing remembered it: every request grew a
+    // kernel to fail the same way (issue #19). The pool remembers it per flavour.
+    check(
+      "through a shared broker too, it fails in seconds, and the next call starts no kernel",
+      sharedFirst.isError === true && sharedElapsed < 8000 &&
+        /No AgentTools extension found/.test(sharedSecondText) && /tried again in \d+s/.test(sharedSecondText) &&
+        starts(sharedMarker) === 1,
+      `${sharedElapsed}ms, ${starts(sharedMarker)} start(s); then: ${sharedSecondText.replace(/\s+/g, " ").slice(0, 70)}`,
+    );
+    await sharedBad.client.close();
+  }
 
   // And when the not-found lands just as the start deadline runs out, the
   // deadline's timeout wraps it — and used to drop it, so the back-off saw a
@@ -5506,7 +5622,7 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
 // And nothing said so: the broker's status left the window out, so
 // wolfram_status could not report it as it reports a private back-off (#101).
 heading("The pool's refusal window spares a flavour's idle kernel, and is reported");
-{
+if (socketsHere()) {
   const savedMode = process.env.FAKE_MODE;
   const savedMarker = process.env.FAKE_MARKER;
   const poolOf = (idleMs) =>
@@ -5695,7 +5811,7 @@ heading("The pool's refusal window spares a flavour's idle kernel, and is report
 // (#119). A slot whose kernel is still starting has its process, and is busy:
 // counted out, the report would say "0 running, 1 busy".
 heading("A broker reports the kernels it has running, not its pool's slots");
-{
+if (socketsHere()) {
   const address = join(privateDir(join(home, "run-idle-count")), "broker.sock");
   // Its kernel takes 3s to start, declared so the pool starts it so: long
   // enough that a status seen while the call is outstanding is one the start
@@ -5827,29 +5943,31 @@ heading("Findings the August audit recorded and nothing tracked");
   // same configuration meant "wait as long as it takes" privately and "give up
   // after two seconds" when shared. The delay is what makes this fail: with an
   // instant kernel both paths look identical.
-  wipeCache();
-  const runtime = join(home, "run-zero-timeout");
-  privateDir(runtime);
-  const unlimited = await connect({
-    WOLFRAM_MCP_SHARE: "1",
-    XDG_RUNTIME_DIR: runtime,
-    WOLFRAM_MCP_LICENSE_LIMIT: "4",
-    WOLFRAM_MCP_IDLE_MINUTES: "5",
-    WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "0",
-    FAKE_CALL_DELAY_MS: "3000",
-  });
-  const startedAt = Date.now();
-  const slow = await unlimited.client.callTool(
-    { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
-  const elapsed = Date.now() - startedAt;
-  check(
-    "a call ceiling of zero waits on the shared path, as it does on a private kernel",
-    slow.isError !== true && answeredByFake(slow) && elapsed > 2500,
-    `${slow.isError ? "isError" : "ok"} after ${elapsed}ms`,
-  );
-  signalOwnBrokers("SIGKILL", runtime);
-  await unlimited.client.close();
-  await new Promise((r) => setTimeout(r, 300));
+  if (socketsHere("S8, on the shared path")) {
+    wipeCache();
+    const runtime = join(home, "run-zero-timeout");
+    privateDir(runtime);
+    const unlimited = await connect({
+      WOLFRAM_MCP_SHARE: "1",
+      XDG_RUNTIME_DIR: runtime,
+      WOLFRAM_MCP_LICENSE_LIMIT: "4",
+      WOLFRAM_MCP_IDLE_MINUTES: "5",
+      WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "0",
+      FAKE_CALL_DELAY_MS: "3000",
+    });
+    const startedAt = Date.now();
+    const slow = await unlimited.client.callTool(
+      { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
+    const elapsed = Date.now() - startedAt;
+    check(
+      "a call ceiling of zero waits on the shared path, as it does on a private kernel",
+      slow.isError !== true && answeredByFake(slow) && elapsed > 2500,
+      `${slow.isError ? "isError" : "ok"} after ${elapsed}ms`,
+    );
+    signalOwnBrokers("SIGKILL", runtime);
+    await unlimited.client.close();
+    await new Promise((r) => setTimeout(r, 300));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -6539,26 +6657,28 @@ heading("A time too long for a timer is held to the longest one can hold");
 
   // Sharing is the default, and the broker reads the same settings for its own
   // kernels: its start and idle timers, and its wait on each call.
-  wipeCache();
-  const runtime = join(home, "run-huge-times");
-  privateDir(runtime);
-  const sharedBefore = startCount();
-  const shared = await connect({ ...huge, WOLFRAM_MCP_SHARE: "1", XDG_RUNTIME_DIR: runtime, FAKE_CALL_DELAY_MS: "200" });
-  const calls = [];
-  for (const args of [{ code: "1+1" }, { code: "2+2", timeConstraint: 3_000_000 }]) {
-    calls.push(
-      await shared.client.callTool({ name: "WolframLanguageEvaluator", arguments: args }, undefined, { timeout: 30_000 }),
+  if (socketsHere("the broker's own timers")) {
+    wipeCache();
+    const runtime = join(home, "run-huge-times");
+    privateDir(runtime);
+    const sharedBefore = startCount();
+    const shared = await connect({ ...huge, WOLFRAM_MCP_SHARE: "1", XDG_RUNTIME_DIR: runtime, FAKE_CALL_DELAY_MS: "200" });
+    const calls = [];
+    for (const args of [{ code: "1+1" }, { code: "2+2", timeConstraint: 3_000_000 }]) {
+      calls.push(
+        await shared.client.callTool({ name: "WolframLanguageEvaluator", arguments: args }, undefined, { timeout: 30_000 }),
+      );
+    }
+    await new Promise((r) => setTimeout(r, 300));
+    check(
+      "and through the broker, both calls are answered by the one kernel it started",
+      calls.every((result) => !result.isError) && startCount() - sharedBefore === 1,
+      `${calls.map(answer).join(" | ")}; ${startCount() - sharedBefore} start(s)`,
     );
+    await shared.client.close();
+    signalOwnBrokers("SIGTERM", runtime);
+    await new Promise((r) => setTimeout(r, 300));
   }
-  await new Promise((r) => setTimeout(r, 300));
-  check(
-    "and through the broker, both calls are answered by the one kernel it started",
-    calls.every((result) => !result.isError) && startCount() - sharedBefore === 1,
-    `${calls.map(answer).join(" | ")}; ${startCount() - sharedBefore} start(s)`,
-  );
-  await shared.client.close();
-  signalOwnBrokers("SIGTERM", runtime);
-  await new Promise((r) => setTimeout(r, 300));
 }
 
 // ---------------------------------------------------------------------------
@@ -6611,8 +6731,9 @@ heading("A call, a prompt or a resource read longer than a minute is answered, o
       text: (r) => r.contents?.[0]?.text ?? "",
     },
   ];
+  const paths = ["private", ...(socketsHere("the shared path") ? ["shared"] : [])];
   const sessions = await Promise.all(
-    ["private", "shared"].flatMap((path) =>
+    paths.flatMap((path) =>
       ops.map(async (op) => ({ path, op, s: await connect(path === "shared" ? shared : slow) })),
     ),
   );
@@ -6759,87 +6880,89 @@ heading("A time an option or the broker's socket hands a timer is held there too
       .within("waiting", new Promise((r) => setTimeout(() => r("done"), 100)))
       .catch((err) => err.message);
     check("a preparation given a huge budget waits for its work", prepared === "done", String(prepared));
-    // A shared call: the ceiling the client waits, and the deadline the broker
-    // reads off the socket, both from the call's own timeoutMs.
-    Object.assign(process.env, knobs);
-    const address = join(privateDir(join(home, "run-huge-options")), "broker.sock");
-    let broker = null;
-    let client = null;
-    try {
-      broker = await lib.startBroker({
-        address,
-        bin: fakeKernel,
-        serverName: "WolframLanguage",
-        idleMs: 60_000,
-        startTimeoutMs: 10_000,
-        reserveSeats: 0,
-        allowInspect: false,
-        clientInfo,
-        log: () => {},
+    if (socketsHere("the broker's socket")) {
+      // A shared call: the ceiling the client waits, and the deadline the broker
+      // reads off the socket, both from the call's own timeoutMs.
+      Object.assign(process.env, knobs);
+      const address = join(privateDir(join(home, "run-huge-options")), "broker.sock");
+      let broker = null;
+      let client = null;
+      try {
+        broker = await lib.startBroker({
+          address,
+          bin: fakeKernel,
+          serverName: "WolframLanguage",
+          idleMs: 60_000,
+          startTimeoutMs: 10_000,
+          reserveSeats: 0,
+          allowInspect: false,
+          clientInfo,
+          log: () => {},
+        });
+        client = await lib.BrokerBackend.attachIfRunning({
+          address,
+          flavour: lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" }),
+          spawnCommand: join(home, "definitely-not-a-binary"),
+          spawnArgs: [],
+          spawnEnv: {},
+          log: () => {},
+        });
+        const shared = client
+          ? await client
+              .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, { timeoutMs: huge })
+              .then(answeredByFake, (err) => err.message)
+          : "could not attach";
+        check("a shared call given a huge ceiling is answered, not given up on at once", shared === true, String(shared));
+      } finally {
+        await client?.stop();
+        await broker?.stop?.();
+      }
+      // NaN on the shared path: JSON has no NaN, so a NaN written into the frame
+      // arrived as null, which the broker read as unset and replaced with its own
+      // five-minute default, where a private kernel waits the 24 days. A stub
+      // broker records the frame it is sent.
+      const stubAddress = join(privateDir(join(home, "run-nan-frame")), "broker.sock");
+      const frames = [];
+      const stub = createServer((socket) => {
+        socket.setEncoding("utf8");
+        socket.on("error", () => socket.destroy());
+        let buffered = "";
+        socket.on("data", (chunk) => {
+          buffered += chunk;
+          for (let at; (at = buffered.indexOf("\n")) !== -1; buffered = buffered.slice(at + 1)) {
+            const frame = JSON.parse(buffered.slice(0, at));
+            frames.push(frame);
+            const reply =
+              frame.op === "hello"
+                ? { id: frame.id, ok: true, result: { flavours: true, flavour: frame.params?.digest } }
+                : { id: frame.id, ok: true, result: { content: [{ type: "text", text: "evaluated" }] } };
+            if (socket.writable) socket.write(`${JSON.stringify(reply)}\n`);
+          }
+        });
       });
-      client = await lib.BrokerBackend.attachIfRunning({
-        address,
-        flavour: lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" }),
-        spawnCommand: join(home, "definitely-not-a-binary"),
-        spawnArgs: [],
-        spawnEnv: {},
-        log: () => {},
-      });
-      const shared = client
-        ? await client
-            .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, { timeoutMs: huge })
-            .then(answeredByFake, (err) => err.message)
-        : "could not attach";
-      check("a shared call given a huge ceiling is answered, not given up on at once", shared === true, String(shared));
-    } finally {
-      await client?.stop();
-      await broker?.stop?.();
+      await listening(stub, stubAddress);
+      let stubClient = null;
+      try {
+        stubClient = await lib.BrokerBackend.attachIfRunning({
+          address: stubAddress,
+          flavour: lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" }),
+          spawnCommand: join(home, "definitely-not-a-binary"),
+          spawnArgs: [],
+          spawnEnv: {},
+          log: () => {},
+        });
+        await stubClient?.callTool({ name: "WolframLanguageEvaluator", arguments: {} }, { timeoutMs: Number.NaN });
+      } finally {
+        await stubClient?.stop();
+        stub.close();
+      }
+      const sent = frames.find((frame) => frame.op === "callTool");
+      check(
+        "a NaN timeout reaches the broker as the deadline a private kernel holds, not as null",
+        sent?.timeoutMs === lib.MAX_TIME_MS,
+        `timeoutMs=${JSON.stringify(sent?.timeoutMs)}`,
+      );
     }
-    // NaN on the shared path: JSON has no NaN, so a NaN written into the frame
-    // arrived as null, which the broker read as unset and replaced with its own
-    // five-minute default, where a private kernel waits the 24 days. A stub
-    // broker records the frame it is sent.
-    const stubAddress = join(privateDir(join(home, "run-nan-frame")), "broker.sock");
-    const frames = [];
-    const stub = createServer((socket) => {
-      socket.setEncoding("utf8");
-      socket.on("error", () => socket.destroy());
-      let buffered = "";
-      socket.on("data", (chunk) => {
-        buffered += chunk;
-        for (let at; (at = buffered.indexOf("\n")) !== -1; buffered = buffered.slice(at + 1)) {
-          const frame = JSON.parse(buffered.slice(0, at));
-          frames.push(frame);
-          const reply =
-            frame.op === "hello"
-              ? { id: frame.id, ok: true, result: { flavours: true, flavour: frame.params?.digest } }
-              : { id: frame.id, ok: true, result: { content: [{ type: "text", text: "evaluated" }] } };
-          if (socket.writable) socket.write(`${JSON.stringify(reply)}\n`);
-        }
-      });
-    });
-    await new Promise((resolve) => stub.listen(stubAddress, resolve));
-    let stubClient = null;
-    try {
-      stubClient = await lib.BrokerBackend.attachIfRunning({
-        address: stubAddress,
-        flavour: lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" }),
-        spawnCommand: join(home, "definitely-not-a-binary"),
-        spawnArgs: [],
-        spawnEnv: {},
-        log: () => {},
-      });
-      await stubClient?.callTool({ name: "WolframLanguageEvaluator", arguments: {} }, { timeoutMs: Number.NaN });
-    } finally {
-      await stubClient?.stop();
-      stub.close();
-    }
-    const sent = frames.find((frame) => frame.op === "callTool");
-    check(
-      "a NaN timeout reaches the broker as the deadline a private kernel holds, not as null",
-      sent?.timeoutMs === lib.MAX_TIME_MS,
-      `timeoutMs=${JSON.stringify(sent?.timeoutMs)}`,
-    );
     check("and no timer overflowed", overflowed.length === 0, overflowed.join(" | ").slice(0, 160));
   } finally {
     process.off("warning", onWarning);
@@ -6921,7 +7044,7 @@ heading("Preparation has one deadline, and names the stage it ran out in");
   // A kernel the broker starts for a call is started when a slot is granted,
   // which from here cannot be told from waiting for the slot — so it is the
   // broker's start timeout, the same setting, that bounds its handshake.
-  {
+  if (socketsHere("a handshake in the broker")) {
     wipeCache();
     const runtime = privateDir(join(home, "run-deadline-broker-handshake"));
     const { s, result, elapsed, text } = await firstCall({
@@ -6943,7 +7066,7 @@ heading("Preparation has one deadline, and names the stage it ran out in");
   // queueing, under the call's own ceiling. Readiness used to be asked through
   // the pool, so this session timed out its preparation behind the busy slot
   // and was backed off for ten minutes from a healthy broker.
-  {
+  if (socketsHere("a wait for a busy broker's slot")) {
     wipeCache();
     const runtime = privateDir(join(home, "run-deadline-busy"));
     const shared = {
@@ -8158,7 +8281,7 @@ heading("The bundle is the deliverable, and the suite drives the bundle");
   // repo's own .mcp.json server, of the same version — served the installed
   // release's sessions on the same machine with the working tree's code. Each
   // build's code is now part of the key.
-  {
+  if (socketsHere("the brokers a bundle and a clone meet")) {
     const runtime = privateDir(join(home, "run-build-identity"));
     const socketOf = (program) =>
       /socket\s+(\S+)/.exec(
@@ -8894,32 +9017,34 @@ heading("doctor runs, and says what is wrong when something is");
   // force — S4's remnant, plan.md §5.3, and the same mistake as the frozen
   // wolfram_status cache line. Both wordings are checked, because the bug is not
   // that one of them is wrong: it is that they used to be the same sentence.
-  const shareRuntime = join(home, "rt-doc");
-  privateDir(shareRuntime);
-  wipeCache();
-  const spawnedIt = doctor({ WOLFRAM_MCP_SHARE: "1", XDG_RUNTIME_DIR: shareRuntime });
-  const spawnedSaid = `${spawnedIt.stdout}${spawnedIt.stderr}`;
-  check(
-    "doctor that started the broker says the reserve it reports is in force",
-    /this run started the broker, so its settings are these/.test(spawnedSaid),
-    spawnedSaid.split("\n").filter((l) => /reserve/.test(l)).join(" | ").slice(0, 100),
-  );
+  if (socketsHere("doctor with a broker")) {
+    const shareRuntime = join(home, "rt-doc");
+    privateDir(shareRuntime);
+    wipeCache();
+    const spawnedIt = doctor({ WOLFRAM_MCP_SHARE: "1", XDG_RUNTIME_DIR: shareRuntime });
+    const spawnedSaid = `${spawnedIt.stdout}${spawnedIt.stderr}`;
+    check(
+      "doctor that started the broker says the reserve it reports is in force",
+      /this run started the broker, so its settings are these/.test(spawnedSaid),
+      spawnedSaid.split("\n").filter((l) => /reserve/.test(l)).join(" | ").slice(0, 100),
+    );
 
-  const attached = doctor({ WOLFRAM_MCP_SHARE: "1", XDG_RUNTIME_DIR: shareRuntime });
-  const attachedSaid = `${attached.stdout}${attached.stderr}`;
-  // Attaching to a running broker is the normal case; doctor marked it with
-  // its warning "!". The marker is for
-  // things to act on.
-  check(
-    "attaching to a running broker is reported plainly, not as a warning",
-    /attached to the broker/.test(attachedSaid) && !/!\s*attached to the broker/.test(attachedSaid),
-    attachedSaid.split("\n").find((l) => /attached to the broker/.test(l))?.trim().slice(0, 100),
-  );
-  check(
-    "and one that attached says the running broker keeps its own",
-    /the running broker[\s\S]{0,40}keeps its own/.test(attachedSaid),
-    attachedSaid.split("\n").filter((l) => /reserve/.test(l)).join(" | ").slice(0, 100),
-  );
+    const attached = doctor({ WOLFRAM_MCP_SHARE: "1", XDG_RUNTIME_DIR: shareRuntime });
+    const attachedSaid = `${attached.stdout}${attached.stderr}`;
+    // Attaching to a running broker is the normal case; doctor marked it with
+    // its warning "!". The marker is for
+    // things to act on.
+    check(
+      "attaching to a running broker is reported plainly, not as a warning",
+      /attached to the broker/.test(attachedSaid) && !/!\s*attached to the broker/.test(attachedSaid),
+      attachedSaid.split("\n").find((l) => /attached to the broker/.test(l))?.trim().slice(0, 100),
+    );
+    check(
+      "and one that attached says the running broker keeps its own",
+      /the running broker[\s\S]{0,40}keeps its own/.test(attachedSaid),
+      attachedSaid.split("\n").filter((l) => /reserve/.test(l)).join(" | ").slice(0, 100),
+    );
+  }
 
   // A kernel that starts and then never speaks — the shape of a missing paclet.
   // The start timeout is cut to 3s so this costs three seconds, not two minutes.
@@ -8949,10 +9074,17 @@ heading("doctor runs, and says what is wrong when something is");
 }
 
 rmSync(home, { recursive: true, force: true });
+// Not run is neither passed nor failed, so it is said apart from both.
+const notRun = unavailable.length
+  ? `${unavailable.length} part(s) of the suite were not run, since this host refuses Unix sockets ` +
+    `(${socketsRefused}), so this is not a pass:\n${unavailable.map((part) => `  ${part}`).join("\n")}\n`
+  : "";
 console.log(
-  failures === 0
+  failures === 0 && !notRun
     ? `\n${checks} checks across ${sections} sections, all passed.\n`
-    : `\n${failures} of ${checks} checks failed.\n`,
+    : failures === 0
+      ? `\n${checks} checks across ${sections} sections passed, but ${notRun}`
+      : `\n${failures} of ${checks} checks failed.\n${notRun}`,
 );
 finished = true;
-process.exit(failures === 0 ? 0 : 1);
+process.exit(failures === 0 && !notRun ? 0 : 1);
