@@ -300,9 +300,9 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
       // Read apart from the tools, so a failure costs the prompts alone. Read
       // together, any failure of prompts/list lost the whole broadcast, and a
       // cold machine's cache stayed cold until the next kernel start (#122).
-      // Null with prompts declared says they were not read, and a proxy keeps
-      // the prompts it has, as the private path's refresh does.
+      // The failure goes with the tools, so a proxy keeps the prompts it has.
       let prompts: Prompt[] | null = null;
+      let promptsError: string | undefined;
       if (capabilities.prompts) {
         try {
           prompts = await drainPages<Prompt>(async (cursor) => {
@@ -310,10 +310,20 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
             return { items: page.prompts ?? [], nextCursor: page.nextCursor };
           });
         } catch (err) {
-          log(`could not read the new kernel's prompts; sessions keep theirs: ${errorText(err)}`);
+          promptsError = errorText(err);
+          log(`could not read the new kernel's prompts; sessions keep theirs: ${promptsError}`);
         }
       }
-      broadcast({ event: "kernelReady", capabilities, tools, prompts }, flavour);
+      broadcast(
+        {
+          event: "kernelReady",
+          capabilities,
+          tools,
+          prompts,
+          ...(promptsError === undefined ? {} : { promptsError }),
+        },
+        flavour,
+      );
     } catch (err) {
       // A proxy that hears nothing keeps its cached list, which is the same
       // position it was in before the kernel started.

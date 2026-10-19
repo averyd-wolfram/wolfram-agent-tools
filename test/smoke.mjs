@@ -4184,12 +4184,29 @@ heading("A prompt list that fails after a kernel start costs only the prompts, o
       coldCached,
       `cached tools: ${cached().tools || "none"}`,
     );
+    // The kernel's own words, on both paths. Shared, they were the broker's to
+    // log, and its log is discarded unless WOLFRAM_MCP_LOG names a file.
     check(
-      `and the session says the prompt list failed, and kept what it had (${path})`,
-      /upstream prompts\/list failed, keeping the cached list: \S/.test(said(cold)),
+      `and the session says the prompt list failed, in the kernel's words (${path})`,
+      /upstream prompts\/list failed, keeping the cached list: MCP error -32603: transient upstream hiccup/.test(
+        said(cold),
+      ),
       said(cold).slice(0, 160),
     );
     await cold.client.close();
+    await new Promise((r) => setTimeout(r, 300));
+    // Prompts never read are not prompts seen. Recorded as seen, with none, the
+    // next session offered prompts and listed none, from its cache, until some
+    // later kernel start; before the broker sent its tools, the shared path's
+    // next session came up cold and offered none.
+    const next = await connect(env("next"));
+    const offered = next.client.getServerCapabilities()?.prompts;
+    check(
+      `and the next session offers no prompts it never saw (${path})`,
+      offered === undefined,
+      offered ? `offered prompts, listing: ${names((await next.client.listPrompts()).prompts) || "none"}` : "",
+    );
+    await next.client.close();
     await new Promise((r) => setTimeout(r, 300));
 
     // Warm with two prompts, then a kernel that lists one tool more and fails
@@ -4212,7 +4229,7 @@ heading("A prompt list that fails after a kernel start costs only the prompts, o
     );
     await warm.client.close();
     // Not left to their 60s grace, holding kernels into the sections after.
-    for (const stage of ["cold", "warm"]) signalOwnBrokers("SIGKILL", runtime(stage));
+    for (const stage of ["cold", "next", "warm"]) signalOwnBrokers("SIGKILL", runtime(stage));
     await new Promise((r) => setTimeout(r, 300));
   }
 }

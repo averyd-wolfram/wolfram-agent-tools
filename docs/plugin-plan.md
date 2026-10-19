@@ -800,7 +800,9 @@ are *traced* in this tree on 2026-10-05 unless marked otherwise.
    `ResourceSchema` (#118): one malformed prompt had left the cache with none, and on the shared
    path failed the broker's whole `kernelReady`, its tools with it. A `prompts/list` that fails
    for any other reason now costs only the prompts there too (#122): the broker still sends the
-   tools, and a session keeps the prompts it had, as the private path's refresh always did.
+   tools with the kernel's words, and a session keeps the prompts it had and says why, as the
+   private path's refresh always did. With none cached, neither path records prompts it never
+   read, so the next session does not offer an empty list.
    *Traced:* AgentTools 2.2.7 emits neither — a tool's entry is built from five fixed keys
    (`createMCPToolData`, `Kernel/Server/Shared.wl`), and its results leave `structuredContent`
    out on purpose — so `test:custom` cannot pin this until a paclet lets a tool declare an

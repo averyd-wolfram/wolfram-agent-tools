@@ -524,9 +524,15 @@ export function createWolframServer(
     }
 
     let prompts = promptCache ?? [];
+    // Whether a kernel has been seen to offer prompts: this one listed them, or
+    // an earlier one did. A failed read with nothing cached is neither, and
+    // recorded as seen, it had the next session offer prompts and list none,
+    // from its cache, until a later kernel start (#122).
+    let promptsSeen = promptCache !== null;
     if (caps.prompts) {
       try {
         prompts = await drainPrompts(ops);
+        promptsSeen = true;
       } catch (err) {
         log(`upstream prompts/list failed, keeping the cached list: ${errorText(err)}`);
       }
@@ -545,7 +551,7 @@ export function createWolframServer(
 
     if (config.cacheEnabled) {
       const observed: UpstreamCapabilities = {
-        prompts: Boolean(caps.prompts),
+        prompts: Boolean(caps.prompts) && promptsSeen,
         resources: Boolean(caps.resources),
       };
       writeCache({ ...key, upstream: observed, tools, prompts });
