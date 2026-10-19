@@ -610,12 +610,18 @@ export class BrokerBackend implements KernelBackend {
         // Answer from what the broker sent. Calling back through #request here
         // would re-enter the pool while the slot that raised the event is still
         // held, which grew the pool to the whole licence budget on one call.
-        const { capabilities, tools, prompts } = frame;
+        const { capabilities, tools, prompts, promptsError } = frame;
         void this.#onKernelReady?.({
           capabilities: async () => capabilities,
           listTools: async (cursor) => (cursor ? this.listTools(cursor) : { tools }),
-          listPrompts: async (cursor) =>
-            cursor ? this.listPrompts(cursor) : { prompts: prompts ?? [] },
+          listPrompts: async (cursor) => {
+            if (cursor) return this.listPrompts(cursor);
+            // Refused, in the kernel's words, so the refresh keeps the list it
+            // has, as the private path's does when its own read fails. Answered
+            // as no prompts, it cached that empty list over a good one (#122).
+            if (promptsError !== undefined) throw new Error(promptsError);
+            return { prompts: prompts ?? [] };
+          },
         });
       }
       return;

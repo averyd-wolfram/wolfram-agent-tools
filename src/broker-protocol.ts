@@ -38,7 +38,7 @@ import { PKG } from "./version.js";
  * once. An old broker that cannot answer a new op is the lesser problem, and
  * `ping` is built to read that refusal as the proof of life it is.
  */
-export const BROKER_PROTOCOL = 6;
+export const BROKER_PROTOCOL = 7;
 
 /**
  * `sockaddr_un.sun_path`, its terminating NUL included: 108 bytes on Linux, 104
@@ -148,8 +148,17 @@ export type BrokerEvent =
       event: "kernelReady";
       capabilities: ServerCapabilities;
       tools: Tool[];
-      /** Null when the kernel does not advertise prompts at all. */
+      /** Null when the kernel does not advertise prompts, or they could not be read. */
       prompts: Prompt[] | null;
+      /**
+       * Why the prompts could not be read, in the kernel's words, so a proxy
+       * keeps the prompts it has and says why, as the private path's refresh
+       * does. Read as no prompts, the failure cached an empty list over a good
+       * one, and only the broker's log, discarded by default, said why (#122).
+       * A change of shape, so `BROKER_PROTOCOL` moved to 7 with it, as it did
+       * for `BrokerResponse.data`.
+       */
+      promptsError?: string;
     }
   | {
       /** The kernel's progress on one in-flight call, relabelled by the proxy. */

@@ -484,6 +484,14 @@ export function createWolframServer(
 
   let toolCache: Tool[] | null = usableCache?.tools ?? null;
   let promptCache: Prompt[] | null = usableCache?.prompts ?? null;
+  // Whether a kernel has been seen to offer prompts: one listed them, in this
+  // session or recorded in the cache. A failed read is neither, and recorded as
+  // seen, with none, it had the next session offer prompts and list none from
+  // its cache, until a later kernel start (#122). Not `promptCache !== null`:
+  // every cache entry holds a prompt list, an empty one included, so a second
+  // failed read took the first one's empty list for prompts seen. `upstream`,
+  // not the entry's own field, which `readCache` does not check is there.
+  let promptsSeen = Boolean(upstream.prompts);
   // When the list above was last taken from a kernel: the cache file's own
   // timestamp while it comes from disk, then `reload`'s clock. `usableCache` is
   // read once, here, so reporting *that* as the current state made every cold
@@ -527,6 +535,7 @@ export function createWolframServer(
     if (caps.prompts) {
       try {
         prompts = await drainPrompts(ops);
+        promptsSeen = true;
       } catch (err) {
         log(`upstream prompts/list failed, keeping the cached list: ${errorText(err)}`);
       }
@@ -545,7 +554,7 @@ export function createWolframServer(
 
     if (config.cacheEnabled) {
       const observed: UpstreamCapabilities = {
-        prompts: Boolean(caps.prompts),
+        prompts: Boolean(caps.prompts) && promptsSeen,
         resources: Boolean(caps.resources),
       };
       writeCache({ ...key, upstream: observed, tools, prompts });
