@@ -9,6 +9,9 @@
  * FAKE_MODE
  *   normal          banner noise, then well-behaved MCP            (default)
  *   fail-list-once  tools/list and resources/list error in the first process only
+ *   fail-prompts-once  prompts/list errors in the first process only. Its own
+ *                   mode, because a refresh reads the tools first and stops
+ *                   when they fail, so fail-list-once never reaches the prompts
  *   mute            spawns, never speaks (activation deadlock)
  *   extra-tool      serves an additional tool, to exercise refresh
  *   no-agenttools   prints the paclet-missing message, never speaks
@@ -437,6 +440,10 @@ function run() {
       return;
     }
     if (msg.method === "prompts/list") {
+      if (mode === "fail-prompts-once" && firstProcess) {
+        fail(msg, -32603, "transient upstream hiccup");
+        return;
+      }
       send({
         jsonrpc: "2.0",
         id: msg.id,

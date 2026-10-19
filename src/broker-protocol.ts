@@ -148,7 +148,12 @@ export type BrokerEvent =
       event: "kernelReady";
       capabilities: ServerCapabilities;
       tools: Tool[];
-      /** Null when the kernel does not advertise prompts at all. */
+      /**
+       * Null when they were not read: the kernel does not advertise prompts,
+       * or reading them failed. `capabilities` says which, and in the second
+       * case a proxy keeps the prompts it has. Saying it with the existing
+       * null, rather than a new field, leaves the frame's shape as it was.
+       */
       prompts: Prompt[] | null;
     }
   | {

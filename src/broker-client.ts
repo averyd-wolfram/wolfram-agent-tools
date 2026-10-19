@@ -614,8 +614,21 @@ export class BrokerBackend implements KernelBackend {
         void this.#onKernelReady?.({
           capabilities: async () => capabilities,
           listTools: async (cursor) => (cursor ? this.listTools(cursor) : { tools }),
-          listPrompts: async (cursor) =>
-            cursor ? this.listPrompts(cursor) : { prompts: prompts ?? [] },
+          listPrompts: async (cursor) => {
+            if (cursor) return this.listPrompts(cursor);
+            if (prompts) return { prompts };
+            // Declared but not sent: the broker could not read them. Answered
+            // as no prompts, the refresh cached that empty list over a good
+            // one (#122). Refused, it keeps the list it has, as the private
+            // path's does when its own read fails.
+            if (capabilities.prompts) {
+              throw new Error(
+                "the broker could not read the new kernel's prompts; its log, kept where " +
+                  "WOLFRAM_MCP_LOG names a file, says why",
+              );
+            }
+            return { prompts: [] };
+          },
         });
       }
       return;

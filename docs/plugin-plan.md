@@ -798,10 +798,13 @@ are *traced* in this tree on 2026-10-05 unless marked otherwise.
    be given and no client was measured taking, is left out with the reason logged, and the rest
    are listed. Prompts and resources are judged the same way, by the SDK's `PromptSchema` and
    `ResourceSchema` (#118): one malformed prompt had left the cache with none, and on the shared
-   path failed the broker's whole `kernelReady`, its tools with it. *Traced:* AgentTools 2.2.7
-   emits neither — a tool's entry is built from five fixed keys (`createMCPToolData`,
-   `Kernel/Server/Shared.wl`), and its results leave `structuredContent` out on purpose — so
-   `test:custom` cannot pin this until a paclet lets a tool declare an output schema.
+   path failed the broker's whole `kernelReady`, its tools with it. A `prompts/list` that fails
+   for any other reason now costs only the prompts there too (#122): the broker still sends the
+   tools, and a session keeps the prompts it had, as the private path's refresh always did.
+   *Traced:* AgentTools 2.2.7 emits neither — a tool's entry is built from five fixed keys
+   (`createMCPToolData`, `Kernel/Server/Shared.wl`), and its results leave `structuredContent`
+   out on purpose — so `test:custom` cannot pin this until a paclet lets a tool declare an
+   output schema.
 6. **A locked server name for packagers.** *Traced:* the server reads `MCP_SERVER_NAME` first,
    then `WOLFRAM_MCP_SERVER_NAME`, then `WOLFRAM_MCP_DEFAULT_SERVER`; the plugin sets only the
    last, so a user may override it. *Work:* document `MCP_SERVER_NAME` in a package's own

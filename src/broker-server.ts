@@ -297,17 +297,27 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
       const capabilities = client.getServerCapabilities() ?? {};
       // Whole lists, so a broadcast carries every page, not page one.
       const tools = await listAllTools(client);
-      const prompts = capabilities.prompts
-        ? await drainPages<Prompt>(async (cursor) => {
+      // Read apart from the tools, so a failure costs the prompts alone. Read
+      // together, any failure of prompts/list lost the whole broadcast, and a
+      // cold machine's cache stayed cold until the next kernel start (#122).
+      // Null with prompts declared says they were not read, and a proxy keeps
+      // the prompts it has, as the private path's refresh does.
+      let prompts: Prompt[] | null = null;
+      if (capabilities.prompts) {
+        try {
+          prompts = await drainPages<Prompt>(async (cursor) => {
             const page = await client.listPrompts(cursor ? { cursor } : undefined);
             return { items: page.prompts ?? [], nextCursor: page.nextCursor };
-          })
-        : null;
+          });
+        } catch (err) {
+          log(`could not read the new kernel's prompts; sessions keep theirs: ${errorText(err)}`);
+        }
+      }
       broadcast({ event: "kernelReady", capabilities, tools, prompts }, flavour);
     } catch (err) {
       // A proxy that hears nothing keeps its cached list, which is the same
       // position it was in before the kernel started.
-      log(`could not read the new kernel's lists: ${errorText(err)}`);
+      log(`could not read the new kernel's tools: ${errorText(err)}`);
     }
   }
 

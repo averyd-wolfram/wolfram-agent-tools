@@ -4145,6 +4145,79 @@ heading("A prompt or resource that cannot be relayed costs only itself, on eithe
 }
 
 // ---------------------------------------------------------------------------
+// The broker read a new kernel's tools and prompts in one try, so a prompts/list
+// that failed for any reason lost the whole kernelReady broadcast, its tools
+// with it (#122): a cold machine's cache stayed cold until the next kernel
+// start, while the private path's refresh kept the tools. The warm half is what
+// reading the failed list as "no prompts" would break: it cached an empty list
+// over a good one, and the next session listed no prompts at all.
+heading("A prompt list that fails after a kernel start costs only the prompts, on either path");
+{
+  const evaluate = (s) =>
+    s.client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, {
+      timeout: 20_000,
+    });
+  const names = (items) => (items ?? []).map((item) => item.name).join(", ");
+  const cached = () => {
+    const entry = lib.readCache(suiteKey);
+    return { tools: names(entry?.tools), prompts: names(entry?.prompts) };
+  };
+  const said = (s) => s.stderr().split("\n").find((l) => /prompts\/list failed/.test(l)) ?? "(nothing said)";
+  for (const sharing of ["0", "1"]) {
+    const path = sharing === "1" ? "shared" : "private";
+    // A runtime directory per session, so a broker still exiting cannot serve
+    // the next session with the last one's fake environment.
+    const runtime = (stage) => join(home, `run-prompts-fail-${stage}-${sharing}`);
+    const env = (stage) => ({
+      WOLFRAM_MCP_SHARE: sharing,
+      XDG_RUNTIME_DIR: privateDir(runtime(stage)),
+      WOLFRAM_MCP_LICENSE_LIMIT: "4",
+      FAKE_MODE: "fail-prompts-once",
+    });
+    // Cold: no prompts to keep, so the tools are all a refresh can cache.
+    wipeCache();
+    const cold = await connect(env("cold"));
+    await evaluate(cold);
+    const coldCached = await until(() => cached().tools === "WolframLanguageEvaluator", 5_000);
+    check(
+      `a kernel whose prompt list fails still has its tools cached (${path})`,
+      coldCached,
+      `cached tools: ${cached().tools || "none"}`,
+    );
+    check(
+      `and the session says the prompt list failed, and kept what it had (${path})`,
+      /upstream prompts\/list failed, keeping the cached list: \S/.test(said(cold)),
+      said(cold).slice(0, 160),
+    );
+    await cold.client.close();
+    await new Promise((r) => setTimeout(r, 300));
+
+    // Warm with two prompts, then a kernel that lists one tool more and fails
+    // its prompts: the new tool proves the refresh ran.
+    wipeCache();
+    await warmCache({ FAKE_EXTRA_PROMPTS: JSON.stringify([{ name: "Second", description: "A second prompt." }]) });
+    rmSync(join(home, "fake-state"), { force: true });
+    const warm = await connect({
+      ...env("warm"),
+      FAKE_EXTRA_TOOLS: JSON.stringify([
+        { name: "Added", description: "Listed by the second kernel.", inputSchema: { type: "object" } },
+      ]),
+    });
+    await evaluate(warm);
+    const refreshed = await until(() => cached().tools === "WolframLanguageEvaluator, Added", 5_000);
+    check(
+      `a warm cache takes the new kernel's tools and keeps its prompts (${path})`,
+      refreshed && cached().prompts === "Search, Second",
+      `cached tools: ${cached().tools || "none"}; prompts: ${cached().prompts || "none"}`,
+    );
+    await warm.client.close();
+    // Not left to their 60s grace, holding kernels into the sections after.
+    for (const stage of ["cold", "warm"]) signalOwnBrokers("SIGKILL", runtime(stage));
+    await new Promise((r) => setTimeout(r, 300));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // The flip side, and why no timer is needed to bound an abandoned call: a kernel
 // is taken back exactly when something else needs it. A private session has one
 // kernel, so the next call is that moment.
