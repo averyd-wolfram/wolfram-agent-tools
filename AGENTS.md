@@ -72,7 +72,8 @@ a real binary, and a full run must start no Wolfram kernel.
 
 The suite first checks that this host lets it listen on a Unix socket and be answered. Where
 it cannot, as in some agent sandboxes (#60), a broker cannot run, so every section or part
-that needs one says `SKIP` and is counted as not run, and the run is not a pass. A section that
+that needs one says `SKIP` and is counted as not run, and the run is not a pass; `npm test` still
+runs the other suites after it, and exits with its status once they pass. A section that
 needs sockets is gated with `socketsHere()`; macOS reproduces such a host with `sandbox-exec -p
 '(version 1)(allow default)(deny network-bind (local unix))' node test/smoke.mjs`, and a section
 added without its gate fails there.

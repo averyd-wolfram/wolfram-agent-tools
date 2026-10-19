@@ -43,7 +43,7 @@
     "format:check": "prettier --check src",
     "lint:wl": "node scripts/run-wls.mjs scripts/lint-wl.wls",
     "prepare": "npm run build && node scripts/install-hooks.mjs",
-    "test": "npm run build && npm run lint && npm run format:check && node test/smoke.mjs && node test/public-content.mjs && node test/pending-release.mjs && node test/release-branch.mjs && node test/run-wls.mjs",
+    "test": "npm run build && npm run lint && npm run format:check && { node test/smoke.mjs; smoke=$?; node test/public-content.mjs && node test/pending-release.mjs && node test/release-branch.mjs && node test/run-wls.mjs && exit $smoke; }",
     "check:public": "node scripts/public-content.mjs",
     "test:wl": "node scripts/run-wls.mjs scripts/run-contract.wls",
     "test:custom": "npm run build && node scripts/custom-server.mjs",

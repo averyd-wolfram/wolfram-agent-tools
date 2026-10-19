@@ -330,7 +330,7 @@ const socketFaultAt = async (address) => {
     return await new Promise((resolve) => {
       let heard = "";
       const client = connectSocket(address, () => client.write("ping\n"));
-      const timer = setTimeout(() => resolve("no answer within 5s"), 5_000);
+      const timer = setTimeout(() => settle("no answer within 5s"), 5_000);
       const settle = (fault) => {
         clearTimeout(timer);
         client.destroy();
@@ -347,7 +347,7 @@ const socketFaultAt = async (address) => {
 };
 const socketsRefused = await socketFaultAt(join(home, "preflight.sock"));
 if (socketsRefused) {
-  console.log(`\nThis host refuses Unix sockets (${socketsRefused}), so what needs them is not run.`);
+  console.log(`\nA Unix socket cannot be served here (${socketsRefused}), so what needs one is not run.`);
 }
 
 // What could not run here, by section: counted apart from passes and failures,
@@ -360,8 +360,11 @@ const unavailable = [];
  */
 const socketsHere = (part = "") => {
   if (!socketsRefused) return true;
-  unavailable.push(part ? `${lastHeading} (${part})` : lastHeading);
-  console.log(`  SKIP  ${part || "this section"}: not run, since this host refuses Unix sockets`);
+  // Once per part, though a section may ask in each of several loops.
+  const entry = part ? `${lastHeading} (${part})` : lastHeading;
+  if (unavailable.includes(entry)) return false;
+  unavailable.push(entry);
+  console.log(`  SKIP  ${part || "this section"}: not run, since a Unix socket cannot be served here`);
   return false;
 };
 
@@ -2957,6 +2960,9 @@ if (socketsHere()) {
         decoyConnections++;
         c.end();
       });
+      // Said in the log the checks below read, rather than an unhandled event
+      // that would end the run (#107).
+      decoy.on("error", (err) => logs.push(`the decoy could not listen: ${err.message}`));
       decoy.listen(address);
     },
   });
@@ -9076,7 +9082,7 @@ heading("doctor runs, and says what is wrong when something is");
 rmSync(home, { recursive: true, force: true });
 // Not run is neither passed nor failed, so it is said apart from both.
 const notRun = unavailable.length
-  ? `${unavailable.length} part(s) of the suite were not run, since this host refuses Unix sockets ` +
+  ? `${unavailable.length} part(s) of the suite were not run, since a Unix socket cannot be served here ` +
     `(${socketsRefused}), so this is not a pass:\n${unavailable.map((part) => `  ${part}`).join("\n")}\n`
   : "";
 console.log(
