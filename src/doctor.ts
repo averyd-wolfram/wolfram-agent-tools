@@ -90,7 +90,6 @@ export function sessionStatus(now: number = Date.now()): string {
     lines.push(
       `Cached from a kernel ${age(facts.probedAt)}, not checked this session: ` +
         `AgentTools ${facts.agentTools ?? "absent"}; ` +
-        `${facts.wolframID ? `signed in as ${facts.wolframID}` : "not signed in"}; ` +
         `licence ${
           typeof facts.maxLicenseProcesses === "number"
             ? `${facts.maxLicenseProcesses} seat${facts.maxLicenseProcesses === 1 ? "" : "s"}`
@@ -340,8 +339,7 @@ export async function runDoctor(): Promise<number> {
   // Facts only a running kernel knows, reported by the kernel this starts
   // rather than by a probe kernel of its own (plugin plan D20), so doctor too
   // costs one seat. The paclet version is the direct answer to "why does every
-  // call time out"; the account is the one degraded state that looks
-  // completely healthy.
+  // call time out".
   let reported: KernelFacts | null = null;
   const session = new KernelSession({
     bin: install.bin,
@@ -403,12 +401,6 @@ export async function runDoctor(): Promise<number> {
   } else {
     if (cachedFacts) out("  ! not reported by this kernel; cached from an earlier one");
     out(`  AgentTools       ${facts.agentTools ?? "absent — every tool call will fail"}`);
-    out(
-      `  Wolfram Account  ${
-        facts.wolframID ?? "not signed in — cloud-backed tools will fail on their own"
-      }`,
-    );
-    out(`  cloud connected  ${facts.cloudConnected ? "yes" : "no"}`);
     out(
       `  licence          ${facts.maxLicenseProcesses} seat(s)${
         facts.licenseType ? ` (${facts.licenseType})` : ""

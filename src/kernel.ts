@@ -468,9 +468,8 @@ const NOT_ACTIVATED = /No valid password found/;
  *
  * A kernel reports what it was started with, and a session may set these
  * itself. Taken as the installation's own, one session's `WOLFRAM_USERBASE`
- * became every later kernel's in the pool, and its paclet version and account —
- * which come from that user base and cloud base — were cached for every
- * session's `wolfram_status`.
+ * became every later kernel's in the pool, and its paclet version — which comes
+ * from that user base — was cached for every session's `wolfram_status`.
  */
 export const SHAPING_VARS = [
   "WOLFRAM_BASE",

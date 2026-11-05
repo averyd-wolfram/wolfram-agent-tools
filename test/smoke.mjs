@@ -920,14 +920,14 @@ heading("A kernel reports its installation as it starts");
   check("a kernel's facts arrive as it starts", facts?.version === "15.1.0", `version=${facts?.version}`);
   check("the licence seat count is a number", facts?.maxLicenseProcesses === 4, `${facts?.maxLicenseProcesses}`);
   check("the paclet version comes back", facts?.agentTools === "2.2.7", `${facts?.agentTools}`);
-  // The state that looks healthy: server starts, doctor says ok, the evaluator
-  // works, and anything cloud-backed fails on its own terms.
-  check("an unsigned-in kernel is detected", facts?.wolframID === null, `${facts?.wolframID}`);
-  const signedIn = await report({ FAKE_WOLFRAM_ID: "someone@example.com" });
+  // The facts asked $CloudConnected, which signs a kernel in from the credential
+  // store, so a kernel that crashes on that access crashed on every start: the
+  // macOS 15.0 kernel under a HOME with no Library/Keychains does (#130).
+  const crashOnCredentials = await report({ FAKE_CREDENTIAL_CRASH: "1" }).catch((e) => e);
   check(
-    "and so is a signed-in one",
-    signedIn?.wolframID === "someone@example.com" && signedIn?.cloudConnected === true,
-    `${signedIn?.wolframID}`,
+    "a kernel that crashes on any credential access still starts, since its facts touch none",
+    crashOnCredentials?.agentTools === "2.2.7",
+    crashOnCredentials instanceof Error ? crashOnCredentials.message.slice(0, 120) : `${crashOnCredentials?.agentTools}`,
   );
   check(
     "the base directories become kernel environment",
@@ -1081,22 +1081,21 @@ heading("A session's own directories stay that session's");
     lib.readFacts(fakeKernel)?.userBase !== "/someone/else",
     `cached userBase=${lib.readFacts(fakeKernel)?.userBase}`,
   );
-  // Nor is anything else such a kernel says: the paclet version and the
-  // account come from its user base and cloud base too, and the cache is the
-  // installation's, read by every session's wolfram_status.
+  // Nor is anything else such a kernel says, its paclet version included: the
+  // cache is the installation's, read by every session's wolfram_status.
   wipeCache();
-  const savedAccount = process.env.FAKE_WOLFRAM_ID;
-  process.env.FAKE_WOLFRAM_ID = "someone-elses@example.com";
+  const savedAgentTools = process.env.FAKE_AGENTTOOLS;
+  process.env.FAKE_AGENTTOOLS = "9.9.9";
   try {
     await pool.run(lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage", WOLFRAM_CLOUDBASE: "https://private.example" }), eval1);
   } finally {
-    if (savedAccount === undefined) delete process.env.FAKE_WOLFRAM_ID;
-    else process.env.FAKE_WOLFRAM_ID = savedAccount;
+    if (savedAgentTools === undefined) delete process.env.FAKE_AGENTTOOLS;
+    else process.env.FAKE_AGENTTOOLS = savedAgentTools;
   }
   check(
-    "a kernel with its own cloud base leaves no account or paclet version in the installation's cache",
-    lib.readFacts(fakeKernel)?.wolframID !== "someone-elses@example.com",
-    `cached account=${lib.readFacts(fakeKernel)?.wolframID ?? "none"}`,
+    "a kernel with its own cloud base leaves no paclet version in the installation's cache",
+    lib.readFacts(fakeKernel)?.agentTools !== "9.9.9",
+    `cached AgentTools=${lib.readFacts(fakeKernel)?.agentTools ?? "none"}`,
   );
   await pool.stop();
 
@@ -1163,8 +1162,6 @@ if (socketsHere()) {
     licenseType: "Professional",
     networkLicense: false,
     agentTools: "2.2.7",
-    wolframID: null,
-    cloudConnected: false,
   }, [], () => {});
   const saved = process.env.WOLFRAMINIT;
   process.env.WOLFRAMINIT = "${user_config.entitlement}";
@@ -6281,7 +6278,7 @@ heading("Discovery spends no seat; doctor is the only route to wolframscript");
 
     // Facts exist only once a kernel has reported them; the hook says which
     // of its lines are cached, and how old, rather than presenting a
-    // month-old "signed in" as the present.
+    // month-old licence as the present.
     lib.recordFacts(realpathSync(join(install, "Executables", "wolfram")), {
       version: "15.1.0",
       systemID: "MacOSX-ARM64",
@@ -6292,8 +6289,6 @@ heading("Discovery spends no seat; doctor is the only route to wolframscript");
       licenseType: "Professional",
       networkLicense: false,
       agentTools: "2.2.7",
-      wolframID: null,
-      cloudConnected: false,
     }, [], () => {});
     const hook = spawnSync(process.execPath, [entry, "session-status"], {
       encoding: "utf8",
@@ -7621,7 +7616,9 @@ heading("wolfram_status answers when kernels cannot");
   check("it answers without starting a kernel", startCount() === before, `starts=${startCount() - before}`);
   check("it names the kernel in use", text.includes("fake-kernel.mjs"), text.slice(0, 60));
   check("it reports the paclet version", text.includes("2.2.7"), "");
-  check("it reports the account state", /not signed in/.test(text), "");
+  // A kernel's start cannot know the account without signing in, which it no
+  // longer does, so the "not signed in" this said to signed-in users is gone (#130).
+  check("it claims nothing about the account", !/signed in|account/i.test(text), text.match(/.*(signed in|account).*/i)?.[0]);
   check("it reports the licence", /licence/.test(text), "");
   check("and where the logs go", /logs/.test(text), "");
   // The line a reader consults to find out whether the next tools/list will
@@ -8896,8 +8893,6 @@ heading("CLI");
     licenseType: "Professional",
     networkLicense: false,
     agentTools: "2.2.7",
-    wolframID: null,
-    cloudConnected: false,
   }, [], () => {});
   check("facts are cached before clearing", lib.readFacts(fakeKernel) !== null);
   const cleared = run(["clear-cache"]);
@@ -8967,6 +8962,20 @@ heading("doctor runs, and says what is wrong when something is");
     withInitSaid.split("\n").find((l) => /environment/.test(l))?.trim(),
   );
   check("the licence it read", /4 seat\(s\)/.test(said), "");
+  // A kernel that crashes on any credential access crashed doctor's too, since
+  // the facts signed in (#130); now doctor diagnoses it like any other.
+  const crashOnCredentials = doctor({ FAKE_CREDENTIAL_CRASH: "1" });
+  const crashOnCredentialsSaid = `${crashOnCredentials.stdout}${crashOnCredentials.stderr}`;
+  check(
+    "doctor diagnoses a kernel that crashes on any credential access",
+    crashOnCredentials.status === 0 && /AgentTools\s+2\.2\.7/.test(crashOnCredentialsSaid),
+    `status=${crashOnCredentials.status}; ${crashOnCredentialsSaid.split("\n").find((l) => /SIGSEGV|AgentTools\s/.test(l))?.trim()}`,
+  );
+  check(
+    "and claims nothing about the account, which its kernel was not asked",
+    !/signed in|Wolfram Account|cloud connected/i.test(said),
+    said.match(/.*(signed in|Wolfram Account|cloud connected).*/i)?.[0],
+  );
   check(
     "and the tools the kernel really offered, not a cached list",
     said.includes("WolframLanguageEvaluator"),

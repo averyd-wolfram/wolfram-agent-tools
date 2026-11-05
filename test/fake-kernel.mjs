@@ -88,7 +88,11 @@
  *
  * FAKE_MAX_LICENSE    what it reports for $MaxLicenseProcesses
  * FAKE_BASE           what it reports for $BaseDirectory
- * FAKE_WOLFRAM_ID     the account it reports; unset means not signed in
+ * FAKE_CREDENTIAL_CRASH  be a kernel that segfaults on any access to the
+ *                     platform's credential store, as macOS 15.0's does under a
+ *                     HOME with no Library/Keychains (#130): die by SIGSEGV if the
+ *                     facts code signs in, reading $CloudConnected, or reads a
+ *                     SystemCredential
  * FAKE_AGENTTOOLS     the AgentTools version it reports (default 2.2.7), as a
  *                     paclet that updated itself between two starts would
  * FAKE_ANNOUNCE_TOOL  after the first call, gain a tool and say the list changed,
@@ -175,9 +179,16 @@ if (process.env.FAKE_STATE) {
 
 // What a real kernel writes once AgentTools has loaded, if its command line
 // asks: one line, framed by markers so a banner cannot corrupt it.
-const asksForFacts = process.argv.some((arg) => arg.includes("<<WMCPFACTS>>"));
+const factsCode = process.argv.find((arg) => arg.includes("<<WMCPFACTS>>"));
+const asksForFacts = factsCode !== undefined;
 function reportFacts(agentTools = process.env.FAKE_AGENTTOOLS ?? "2.2.7") {
   if (!asksForFacts) return;
+  // Read from the code it was given, as the real crash follows from what that
+  // code evaluates.
+  if (process.env.FAKE_CREDENTIAL_CRASH && /\$CloudConnected|SystemCredential/.test(factsCode)) {
+    process.kill(process.pid, "SIGSEGV");
+    return;
+  }
   const base = process.env.FAKE_BASE ?? "/fake/base";
   process.stdout.write(
     `<<WMCPFACTS>>${JSON.stringify({
@@ -192,8 +203,6 @@ function reportFacts(agentTools = process.env.FAKE_AGENTTOOLS ?? "2.2.7") {
       licenseType: "Professional",
       networkLicense: false,
       agentTools,
-      wolframID: process.env.FAKE_WOLFRAM_ID ?? "None",
-      cloudConnected: Boolean(process.env.FAKE_WOLFRAM_ID),
     })}<<END>>\n`,
   );
 }
