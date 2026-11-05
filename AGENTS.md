@@ -66,9 +66,17 @@ for what the fake cannot answer: paclet behaviour, licence text, `$BaseDirectory
 ## Writing and Running Tests
 
 `npm test` runs `test/smoke.mjs`, which drives the built server against `test/fake-kernel.mjs`
-over a real stdio transport, then `test/public-content.mjs`, `test/pending-release.mjs` and
-`test/release-branch.mjs`, which test those scripts on their own. It must stay hermetic: nothing new may reach `fromWolframScript` or
+over a real stdio transport, then `test/public-content.mjs`, `test/pending-release.mjs`,
+`test/release-branch.mjs` and `test/run-wls.mjs`, which test those scripts on their own. It must stay hermetic: nothing new may reach `fromWolframScript` or
 a real binary, and a full run must start no Wolfram kernel.
+
+The suite first checks that this host lets it listen on a Unix socket and be answered. Where
+it cannot, as in some agent sandboxes (#60), a broker cannot run, so every section or part
+that needs one says `SKIP` and is counted as not run, and the run is not a pass; `npm test` still
+runs the other suites after it, and exits with its status once they pass. A section that
+needs sockets is gated with `socketsHere()`; macOS reproduces such a host with `sandbox-exec -p
+'(version 1)(allow default)(deny network-bind (local unix))' node test/smoke.mjs`, and a section
+added without its gate fails there.
 
 Two rules for adding checks:
 
@@ -156,9 +164,12 @@ built-ins, which is the bug it exists for.
 - `test/`: `smoke.mjs` (the suite), `fake-kernel.mjs` (a stand-in kernel),
   `public-content.mjs` (the public-content check's own tests), `pending-release.mjs` (what a
   release run finishes), `release-branch.mjs` (where the `release` branch moves, and what it
-  holds), and `agenttools-contract.wlt` (what this package assumes about the paclet)
+  holds), `run-wls.mjs` (what `test:wl` and `lint:wl` count as a pass), and
+  `agenttools-contract.wlt` (what this package assumes about the paclet)
 - `scripts/`: `mcp-server.mjs` is the launcher `.mcp.json` invokes via `npm run mcp`;
-  `run-contract.wls` runs the `.wlt`; `custom-server.mjs` is `npm run test:custom`;
+  `run-contract.wls` runs the `.wlt`; `run-wls.mjs` runs it and `lint-wl.wls` through
+  `wolframscript`, failing unless the summary line each ends with says something ran;
+  `custom-server.mjs` is `npm run test:custom`;
   `on-edit.mjs` is the PostToolUse hook behind every Write and Edit — prettier, eslint and
   the whole-project type check on src/ TypeScript, at the moment of the mistake;
   `session-check.mjs` is the SessionStart hook — silent on a healthy machine, and says which
