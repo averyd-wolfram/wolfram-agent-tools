@@ -467,7 +467,7 @@ distinguishes observed, cached and unknown facts, and is complete without the ho
   failed shared handshake is an ordinary operation failure, so later calls start kernels again
   rather than meeting the back-off. Answering the handshake inside `ready` is not enough: a
   request that queued in a full pool of several flavours can still start a kernel later, when
-  `#drain` → `#swapOut` → `#grow` replaces another flavour's released kernel, after `ready`
+  `#drain` → `#act`'s swap → `#grow` replaces another flavour's released kernel, after `ready`
   has answered. The boundary is this session's first kernel start, whenever it happens, minus
   time spent queueing. The broker must also say where a failure came from — its own
   preparation (fall back to a private kernel) or a kernel of that flavour (a failed
