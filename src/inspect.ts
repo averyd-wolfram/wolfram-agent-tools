@@ -44,12 +44,15 @@ const CLOSE = "<<END>>";
  * after AgentTools has loaded, so `agentTools` is the version that will serve,
  * including one the paclet manager has just updated to.
  *
- * `$CloudConnected` is not asked on macOS when HOME has no Library/Keychains:
- * there the 15.0 kernel segfaults on any keychain access, so the question alone
- * crashed every kernel start under a temporary HOME — `claude plugin eval`, a CI
- * job, a sandbox — and the tools never appeared (#130). It reads HOME because the
- * keychain lookup follows it; an unset HOME is skipped as one with no folder.
- * Unasked, it is reported as null: unknown, not "no".
+ * Nothing here touches the Wolfram Account, on any platform. Asking
+ * `$CloudConnected` signs the kernel in: it reads the platform's credential store
+ * and connects to the cloud. So every start paid a network round trip for a
+ * diagnostic, and on macOS 15.0, whose kernel segfaults on any keychain access
+ * under a HOME with no Library/Keychains, every start under a temporary HOME —
+ * `claude plugin eval`, a CI job, a sandbox — crashed, and the tools never
+ * appeared (#130). `$WolframID`, read before that sign-in as it was, is None in
+ * any kernel that has not signed in, so it told signed-in users they were not.
+ * An account check that may crash a kernel is doctor's to make, on demand (#140).
  */
 export const FACTS_EXPRESSION = `WriteString["stdout","${OPEN}",ExportString[<|
   "version"->TextString[$VersionNumber]<>"."<>ToString[$ReleaseNumber],
@@ -60,9 +63,7 @@ export const FACTS_EXPRESSION = `WriteString["stdout","${OPEN}",ExportString[<|
   "maxLicenseProcesses"->If[$MaxLicenseProcesses===Infinity,"unlimited",ToString[$MaxLicenseProcesses]],
   "licenseType"->$LicenseType,
   "networkLicense"->TrueQ[$NetworkLicense],
-  "agentTools"->Replace[PacletObject["Wolfram/AgentTools"]["Version"],Except[_String]->None],
-  "wolframID"->ToString[$WolframID],
-  "cloudConnected"->With[{home=Environment["HOME"]},If[$OperatingSystem==="MacOSX"&&!(StringQ[home]&&DirectoryQ[FileNameJoin[{home,"Library","Keychains"}]]),Null,TrueQ[$CloudConnected]]]
+  "agentTools"->Replace[PacletObject["Wolfram/AgentTools"]["Version"],Except[_String]->None]
 |>,"JSON","Compact"->True],"${CLOSE}\\n"]`;
 
 export interface KernelFacts {
@@ -84,20 +85,6 @@ export interface KernelFacts {
   maxLicenseProcesses: number | "unlimited" | "unknown";
   licenseType: string | null;
   networkLicense: boolean;
-  /**
-   * The Wolfram Account this kernel is signed in as, or null.
-   *
-   * Nothing detected this before, and it is the one degraded state that looks
-   * healthy: the server starts, `doctor` says ok, `WolframLanguageEvaluator`
-   * works, and anything cloud-backed fails with whatever the kernel says about
-   * missing credentials — passed through as a successful tool call.
-   */
-  wolframID: string | null;
-  /**
-   * Whether the kernel has a live cloud connection, or null when it was not
-   * asked: see FACTS_EXPRESSION, which skips the question where asking crashes.
-   */
-  cloudConnected: boolean | null;
   /** Installed Wolfram/AgentTools version, or null when absent. */
   agentTools: string | null;
 }
@@ -219,15 +206,6 @@ export function parseFacts(stdout: string): KernelFacts | null {
       licenseType: typeof raw["licenseType"] === "string" ? raw["licenseType"] : null,
       networkLicense: raw["networkLicense"] === true,
       agentTools: typeof raw["agentTools"] === "string" ? raw["agentTools"] : null,
-      // An unsigned-in kernel answers with the symbol None, which arrives here
-      // as the string "None" rather than as an absent field.
-      wolframID:
-        typeof raw["wolframID"] === "string" &&
-        raw["wolframID"] !== "" &&
-        raw["wolframID"] !== "None"
-          ? raw["wolframID"]
-          : null,
-      cloudConnected: typeof raw["cloudConnected"] === "boolean" ? raw["cloudConnected"] : null,
     };
   } catch {
     return null;
@@ -253,8 +231,7 @@ export function recordFacts(bin: string, facts: KernelFacts, chosen: string[], l
   log(
     `reported ${facts.version}, licence ${facts.maxLicenseProcesses}` +
       `${facts.licenseType ? ` (${facts.licenseType})` : ""}` +
-      `, AgentTools ${facts.agentTools ?? "absent"}` +
-      `, account ${facts.wolframID ?? "not signed in"}`,
+      `, AgentTools ${facts.agentTools ?? "absent"}`,
   );
   writeFacts(bin, facts);
 }

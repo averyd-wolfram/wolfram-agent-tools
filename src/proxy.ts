@@ -170,7 +170,7 @@ const STATUS_TOOL = {
   title: "Wolfram Status",
   description:
     "Report what this server can see: the selected kernel, the Wolfram/AgentTools " +
-    "paclet, the Wolfram Account, the licence, and where its logs go. Starts no " +
+    "paclet, the licence, and where its logs go. Starts no " +
     "kernel, so it answers even when kernels cannot start.",
   inputSchema: { type: "object" as const, properties: {} },
   annotations: { readOnlyHint: true },
@@ -320,7 +320,7 @@ function describeStatus(
 
   // Each line says what kind of fact it is. These were learned by a kernel at
   // some point and cached; nothing here was asked of a kernel just now, and a
-  // reader deciding whether to trust "signed in" needs to know how old it is.
+  // reader deciding whether to trust one needs to know how old it is.
   if (!config.inspect) {
     lines.push("facts       not used (WOLFRAM_MCP_INSPECT=0)");
   } else if (!facts) {
@@ -330,7 +330,6 @@ function describeStatus(
       `facts       cached from a kernel ${elapsedText(Date.now() - facts.probedAt)} ago, ` +
         `refreshed by every kernel start`,
       `AgentTools  ${facts.agentTools ?? "absent — every tool call will fail to load it"}`,
-      `account     ${facts.wolframID ?? "not signed in — cloud-backed tools will fail on their own"}`,
       `licence     ${facts.maxLicenseProcesses} seat(s)${facts.licenseType ? ` (${facts.licenseType})` : ""}`,
     );
   }
