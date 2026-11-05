@@ -5628,7 +5628,9 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
 // And nothing said so: the broker's status left the window out, so
 // wolfram_status could not report it as it reports a private back-off (#101).
 heading("The pool's refusal window spares a flavour's idle kernel, and is reported");
-if (socketsHere()) {
+// Only the shared session needs a socket: the pool is driven directly, and the
+// private back-off runs with sharing off, so both still run where none can be served.
+{
   const savedMode = process.env.FAKE_MODE;
   const savedMarker = process.env.FAKE_MARKER;
   const poolOf = (idleMs) =>
@@ -5727,64 +5729,68 @@ if (socketsHere()) {
     else process.env.FAKE_MARKER = savedMarker;
   }
 
-  // The same window, as a shared session sees it: refused at once, and
-  // wolfram_status saying why and for how long.
-  wipeCache();
-  const runtime = privateDir(join(home, "run-refusing"));
-  const s = await connect({
-    WOLFRAM_MCP_SHARE: "1",
-    XDG_RUNTIME_DIR: runtime,
-    WOLFRAM_MCP_LICENSE_LIMIT: "4",
-    MCP_SERVER_NAME: "WolframVerifier/Verifier",
-    FAKE_MODE: "no-paclet-extension",
-    WOLFRAM_MCP_KERNEL_ENV: "FAKE_MODE",
-  });
-  const call = () =>
-    s.client
-      .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 })
-      .then((r) => r.content?.[0]?.text ?? "", (e) => e.message);
-  await call(); // the start that fails, and opens the window
-  const status = (await s.client.callTool({ name: "wolfram_status", arguments: {} })).content?.[0]?.text ?? "";
-  const refusing = status.split("\n").find((line) => line.startsWith("refusing")) ?? "(no refusing line)";
-  check(
-    "a shared session's wolfram_status says the broker is refusing its server, and for how long",
-    /tried again in \d/.test(refusing),
-    refusing.slice(0, 160),
-  );
-  // The kernel's words come with its last output, several lines of it, which
-  // ran flush left through the report from its second line on.
-  const report = status.split("\n");
-  const from = report.findIndex((line) => line.startsWith("refusing"));
-  // Up to the next label, which is always the tool list's: any line between
-  // that does not start under the label is the spill.
-  const to = report.findIndex((line, i) => i > from && line.startsWith("tool list"));
-  const spilled = report.slice(from + 1, to).filter((line) => line && !line.startsWith("            "));
-  check(
-    "and the kernel's words beneath it stay under the label",
-    from !== -1 && to > from + 1 && spilled.length === 0,
-    spilled.slice(0, 2).join(" | ").slice(0, 120) || `${to - from - 1} line(s) beneath`,
-  );
-  // Asked by a session of another flavour, the same broker says nothing of it:
-  // the failure carries that server's error, paths and all.
-  const socket = readdirSync(runtime).find((f) => f.endsWith(".sock"));
-  const other = socket
-    ? await lib.BrokerBackend.attachIfRunning({
-        address: join(runtime, socket),
-        flavour: lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" }),
-        spawnCommand: join(home, "definitely-not-a-binary"),
-        spawnArgs: [],
-        spawnEnv: {},
-        log: () => {},
-      })
-    : null;
-  const told = other ? JSON.stringify((await other.status(2_000)).refusing ?? null) : "could not attach";
-  await other?.stop();
-  check(
-    "and a session of another flavour is told nothing of it",
-    told === "null",
-    told.slice(0, 120),
-  );
-  await s.client.close();
+  if (socketsHere("a shared session")) {
+    // The same window, as a shared session sees it: refused at once, and
+    // wolfram_status saying why and for how long.
+    wipeCache();
+    const runtime = privateDir(join(home, "run-refusing"));
+    const s = await connect({
+      WOLFRAM_MCP_SHARE: "1",
+      XDG_RUNTIME_DIR: runtime,
+      WOLFRAM_MCP_LICENSE_LIMIT: "4",
+      MCP_SERVER_NAME: "WolframVerifier/Verifier",
+      FAKE_MODE: "no-paclet-extension",
+      WOLFRAM_MCP_KERNEL_ENV: "FAKE_MODE",
+    });
+    const call = () =>
+      s.client
+        .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 })
+        .then((r) => r.content?.[0]?.text ?? "", (e) => e.message);
+    await call(); // the start that fails, and opens the window
+    const status = (await s.client.callTool({ name: "wolfram_status", arguments: {} })).content?.[0]?.text ?? "";
+    const refusing = status.split("\n").find((line) => line.startsWith("refusing")) ?? "(no refusing line)";
+    check(
+      "a shared session's wolfram_status says the broker is refusing its server, and for how long",
+      /tried again in \d/.test(refusing),
+      refusing.slice(0, 160),
+    );
+    // The kernel's words come with its last output, several lines of it, which
+    // ran flush left through the report from its second line on.
+    const report = status.split("\n");
+    const from = report.findIndex((line) => line.startsWith("refusing"));
+    // Up to the next label, which is always the tool list's: any line between
+    // that does not start under the label is the spill.
+    const to = report.findIndex((line, i) => i > from && line.startsWith("tool list"));
+    const spilled = report.slice(from + 1, to).filter((line) => line && !line.startsWith("            "));
+    check(
+      "and the kernel's words beneath it stay under the label",
+      from !== -1 && to > from + 1 && spilled.length === 0,
+      spilled.slice(0, 2).join(" | ").slice(0, 120) || `${to - from - 1} line(s) beneath`,
+    );
+    // Asked by a session of another flavour, the same broker says nothing of it:
+    // the failure carries that server's error, paths and all.
+    const socket = readdirSync(runtime).find((f) => f.endsWith(".sock"));
+    const other = socket
+      ? await lib.BrokerBackend.attachIfRunning({
+          address: join(runtime, socket),
+          flavour: lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" }),
+          spawnCommand: join(home, "definitely-not-a-binary"),
+          spawnArgs: [],
+          spawnEnv: {},
+          log: () => {},
+        })
+      : null;
+    const told = other ? JSON.stringify((await other.status(2_000)).refusing ?? null) : "could not attach";
+    await other?.stop();
+    check(
+      "and a session of another flavour is told nothing of it",
+      told === "null",
+      told.slice(0, 120),
+    );
+    await s.client.close();
+    signalOwnBrokers("SIGKILL", runtime);
+    await new Promise((r) => setTimeout(r, 300));
+  }
   // The private back-off's reason carries the same kernel output, and its
   // line was indented on its first only.
   const lone = await connect({ WOLFRAM_MCP_SHARE: "0", FAKE_MODE: "no-such-server" });
@@ -5805,8 +5811,6 @@ if (socketsHere()) {
     loneSpilled.slice(0, 2).join(" | ").slice(0, 120) || `${loneTo - loneFrom - 1} line(s) beneath`,
   );
   await lone.client.close();
-  signalOwnBrokers("SIGKILL", runtime);
-  await new Promise((r) => setTimeout(r, 300));
 }
 
 // ---------------------------------------------------------------------------
