@@ -43,6 +43,13 @@ const CLOSE = "<<END>>";
  * own, and so a licence banner or a stray message cannot corrupt it. Evaluated
  * after AgentTools has loaded, so `agentTools` is the version that will serve,
  * including one the paclet manager has just updated to.
+ *
+ * `$CloudConnected` is not asked on macOS when HOME has no Library/Keychains:
+ * there the 15.0 kernel segfaults on any keychain access, so the question alone
+ * crashed every kernel start under a temporary HOME — `claude plugin eval`, a CI
+ * job, a sandbox — and the tools never appeared (#130). It reads HOME because the
+ * keychain lookup follows it; an unset HOME is skipped as one with no folder.
+ * Unasked, it is reported as null: unknown, not "no".
  */
 export const FACTS_EXPRESSION = `WriteString["stdout","${OPEN}",ExportString[<|
   "version"->TextString[$VersionNumber]<>"."<>ToString[$ReleaseNumber],
@@ -55,7 +62,7 @@ export const FACTS_EXPRESSION = `WriteString["stdout","${OPEN}",ExportString[<|
   "networkLicense"->TrueQ[$NetworkLicense],
   "agentTools"->Replace[PacletObject["Wolfram/AgentTools"]["Version"],Except[_String]->None],
   "wolframID"->ToString[$WolframID],
-  "cloudConnected"->TrueQ[$CloudConnected]
+  "cloudConnected"->With[{home=Environment["HOME"]},If[$OperatingSystem==="MacOSX"&&!(StringQ[home]&&DirectoryQ[FileNameJoin[{home,"Library","Keychains"}]]),Null,TrueQ[$CloudConnected]]]
 |>,"JSON","Compact"->True],"${CLOSE}\\n"]`;
 
 export interface KernelFacts {
@@ -86,8 +93,11 @@ export interface KernelFacts {
    * missing credentials — passed through as a successful tool call.
    */
   wolframID: string | null;
-  /** Whether the kernel has a live cloud connection. */
-  cloudConnected: boolean;
+  /**
+   * Whether the kernel has a live cloud connection, or null when it was not
+   * asked: see FACTS_EXPRESSION, which skips the question where asking crashes.
+   */
+  cloudConnected: boolean | null;
   /** Installed Wolfram/AgentTools version, or null when absent. */
   agentTools: string | null;
 }
@@ -217,7 +227,7 @@ export function parseFacts(stdout: string): KernelFacts | null {
         raw["wolframID"] !== "None"
           ? raw["wolframID"]
           : null,
-      cloudConnected: raw["cloudConnected"] === true,
+      cloudConnected: typeof raw["cloudConnected"] === "boolean" ? raw["cloudConnected"] : null,
     };
   } catch {
     return null;

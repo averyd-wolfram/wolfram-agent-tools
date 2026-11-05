@@ -986,6 +986,20 @@ heading("A kernel reports its installation as it starts");
     "and keeps the pool at one kernel",
     lib.deriveBudget({ maxProcesses: unreadable?.maxLicenseProcesses, type: null }, 1, undefined, 1) === 1,
   );
+  // The macOS 15.0 kernel segfaults on any keychain access under a HOME with no
+  // Library/Keychains, and the facts asked $CloudConnected on every start: so
+  // under a temporary HOME every kernel died and no tool appeared (#130).
+  const keychainless = await report({ FAKE_NO_KEYCHAIN: "1" }).catch((e) => e);
+  check(
+    "a macOS kernel whose HOME has no keychain folder still starts, its cloud state unknown rather than no",
+    keychainless?.cloudConnected === null && keychainless.agentTools === "2.2.7",
+    keychainless instanceof Error ? keychainless.message.slice(0, 120) : `cloudConnected=${keychainless?.cloudConnected}`,
+  );
+  check(
+    "and a kernel that answered the question is reported as it said",
+    lib.parseFacts('<<WMCPFACTS>>{"cloudConnected":false}<<END>>')?.cloudConnected === false &&
+      lib.parseFacts('<<WMCPFACTS>>{"cloudConnected":true}<<END>>')?.cloudConnected === true,
+  );
   await report();
 }
 
@@ -8967,6 +8981,15 @@ heading("doctor runs, and says what is wrong when something is");
     withInitSaid.split("\n").find((l) => /environment/.test(l))?.trim(),
   );
   check("the licence it read", /4 seat\(s\)/.test(said), "");
+  // Under a HOME where asking the cloud state would crash the kernel (#130), the
+  // answer is unknown, and "no" would claim one it never got.
+  const keychainless = doctor({ FAKE_NO_KEYCHAIN: "1" });
+  const keychainlessSaid = `${keychainless.stdout}${keychainless.stderr}`;
+  check(
+    "doctor diagnoses a macOS kernel whose HOME has no keychain folder, and says its cloud state is unknown",
+    keychainless.status === 0 && /cloud connected\s+unknown/.test(keychainlessSaid),
+    `status=${keychainless.status}; ${keychainlessSaid.split("\n").find((l) => /cloud connected|SIGSEGV/.test(l))?.trim()}`,
+  );
   check(
     "and the tools the kernel really offered, not a cached list",
     said.includes("WolframLanguageEvaluator"),

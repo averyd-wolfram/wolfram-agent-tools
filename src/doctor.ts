@@ -408,7 +408,15 @@ export async function runDoctor(): Promise<number> {
         facts.wolframID ?? "not signed in — cloud-backed tools will fail on their own"
       }`,
     );
-    out(`  cloud connected  ${facts.cloudConnected ? "yes" : "no"}`);
+    out(
+      `  cloud connected  ${
+        facts.cloudConnected === null
+          ? "unknown — not asked, since this macOS HOME has no Library/Keychains and asking crashes the kernel"
+          : facts.cloudConnected
+            ? "yes"
+            : "no"
+      }`,
+    );
     out(
       `  licence          ${facts.maxLicenseProcesses} seat(s)${
         facts.licenseType ? ` (${facts.licenseType})` : ""
