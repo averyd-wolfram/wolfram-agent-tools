@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.8](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.7...v0.1.8) (2026-11-05)
+
+
+### Bug Fixes
+
+* broadcast a new kernel's tools though its prompt list fails, rather than lose them with it ([#126](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/126)) ([b784ae2](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/b784ae24f79c173de86f1cfe83154b7893431ba2))
+* **deps:** Bump @hono/node-server from 2.1.1 to 2.1.6 ([#138](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/138)) ([b1fc427](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/b1fc427d1383b3ddca9858e1e2f52fa5937bd996))
+* **deps:** Bump fast-uri from 3.1.8 to 3.1.9 ([#134](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/134)) ([1b1fea1](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/1b1fea163fb64a551db2e573987fd028be18e2d8))
+
 ## [0.1.7](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.6...v0.1.7) (2026-10-18)
 
 
