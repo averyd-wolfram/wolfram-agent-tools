@@ -701,11 +701,16 @@ export class BrokerBackend implements KernelBackend {
       ...(expiresAt === undefined ? {} : { expiresAt }),
     };
     // From the arrival, as the broker counts it, so a request a busy broker
-    // answers at its ceiling is heard then, and not a whole ceiling later.
+    // answers at its ceiling is heard then, and not a whole ceiling later. A
+    // null expiry is no ceiling, whatever `timeoutMs` says, as the broker's
+    // kernel session reads it: timed here, it failed what a private kernel
+    // waited for.
     const ceiling =
-      expiresAt != null
-        ? Math.max(0, expiresAt - Date.now()) + REQUEST_GRACE_MS
-        : brokerCeilingMs(op, sent, this.#options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS);
+      expiresAt === null
+        ? 0
+        : expiresAt !== undefined
+          ? Math.max(0, expiresAt - Date.now()) + REQUEST_GRACE_MS
+          : brokerCeilingMs(op, sent, this.#options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS);
     const answer = new Promise<T>((resolve, reject) => {
       // No timer at all when there is no ceiling, so this waits exactly as long
       // as a private kernel would.

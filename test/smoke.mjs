@@ -2808,6 +2808,56 @@ heading("On a broker too a request's ceiling counts from its arrival, and one an
     refused ? `refusing: ${refused.reason.slice(0, 80)}` : `no window; the other session's request ${took}`,
   );
 
+  // A caller may say "no ceiling" with a null expiry, whatever its timeoutMs:
+  // the broker's kernel session then waits, so the client's own timer must
+  // too. Timed from timeoutMs, it failed what a private kernel waited for.
+  if (socketsHere("a call with no ceiling on a broker")) {
+    const address = join(privateDir(join(home, "broker-no-ceiling")), "broker.sock");
+    const calls = [];
+    const server = createServer((socket) => {
+      socket.setEncoding("utf8");
+      socket.on("error", () => socket.destroy());
+      const send = (frame) => socket.writable && socket.write(`${JSON.stringify(frame)}\n`);
+      let buffered = "";
+      socket.on("data", (chunk) => {
+        buffered += chunk;
+        for (let at; (at = buffered.indexOf("\n")) !== -1; buffered = buffered.slice(at + 1)) {
+          const frame = JSON.parse(buffered.slice(0, at));
+          if (frame.op === "hello") {
+            send({ id: frame.id, ok: true, result: { flavours: true, flavour: frame.params?.digest } });
+          } else if (frame.op === "ping") {
+            send({ id: frame.id, ok: true, result: {} });
+          } else if (frame.op === "callTool") {
+            calls.push(frame);
+            // Past the 1 s ceiling and its grace, as a long evaluation is.
+            setTimeout(() => send({ id: frame.id, ok: true, result: { content: [{ type: "text", text: "evaluated" }] } }), 3_500);
+          }
+        }
+      });
+    });
+    await listening(server, address);
+    const backend = await lib.BrokerBackend.attachIfRunning({
+      address,
+      flavour,
+      spawnCommand: join(home, "definitely-not-a-binary"),
+      spawnArgs: [],
+      spawnEnv: {},
+      log: () => {},
+    });
+    const said = backend
+      ? await backend
+          .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, { timeoutMs: 1_000, expiresAt: null })
+          .then((r) => r.content?.[0]?.text ?? "(empty)", (e) => `failed: ${e.message}`)
+      : "could not attach";
+    await backend?.stop();
+    server.close();
+    check(
+      "a call with no ceiling waits for the broker, as a private kernel waits, whatever its timeoutMs",
+      said === "evaluated" && calls[0]?.expiresAt === null,
+      `${said.slice(0, 80)}; expiresAt sent as ${JSON.stringify(calls[0]?.expiresAt)}`,
+    );
+  }
+
   if (socketsHere("a call made while the broker starts its kernel")) {
     wipeCache();
     const runtime = privateDir(join(home, "run-expires-starting"));
