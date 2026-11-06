@@ -466,6 +466,10 @@ export class DeferredBackend implements KernelBackend {
       const run = this.#slow && now - this.#slow.at < PREPARATION_BACKOFF_MS ? this.#slow : null;
       repeats = run?.count ?? 0;
       this.#slow = { count: repeats + 1, at: now };
+    } else {
+      // "In a row": a failure of another kind between two slow ones breaks the
+      // run, or slow, unresolved, slow, slow counted as three and escalated.
+      this.#slow = null;
     }
     const { windowMs, advice } = preparationBackoff(failure, repeats);
     this.#backoff.record(this.#identity(), err, windowMs, advice);

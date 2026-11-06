@@ -7321,6 +7321,21 @@ heading("Preparation has one deadline, and names the stage it ran out in");
       window(again) === 15_000,
       `${window(again)}ms`,
     );
+    // In a row means consecutive: a failure of another kind between slow ones
+    // breaks the run, so slow, unresolved, slow, slow is two in a row, not three.
+    now += 15_001;
+    failWith = () => new lib.ServerNotResolved("no server by that name");
+    await said(again);
+    now += 15_001;
+    failWith = timeout("attaching to the shared broker");
+    await said(again);
+    now += 15_001;
+    await said(again);
+    check(
+      "and a failure of another kind between slow ones breaks the run",
+      window(again) === 15_000,
+      `${window(again)}ms`,
+    );
 
     // A server name is fixed by creating the server, which no back-off can see,
     // so escalating it would hold off the fix #5 shortened the window for.
@@ -7352,7 +7367,7 @@ heading("Preparation has one deadline, and names the stage it ran out in");
       `${window(tooShort)}ms: ${tooShortSaid.split("\n")[0].slice(0, 160)}`,
     );
     failWith = null;
-    check("and none of these made a second attempt inside its window", attempts === 11, `${attempts} attempts`);
+    check("and none of these made a second attempt inside its window", attempts === 14, `${attempts} attempts`);
   }
 
   // A private session's kernel restarts after an idle shutdown inside its next
