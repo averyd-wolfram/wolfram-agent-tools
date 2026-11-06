@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.9](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.8...v0.1.9) (2026-11-06)
+
+
+### Bug Fixes
+
+* back off a failed kernel preparation by what failed, rather than ten minutes for every timeout ([#144](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/144)) ([4e7fdc2](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/4e7fdc22a0d969394e1494d285820cac9287fa01))
+* back off any failed kernel start in the broker's pool, rather than only a server name that did not resolve ([#146](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/146)) ([a0b8252](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/a0b82522428bc62215a337fb8b2eaff50875ceb6))
+* end the kernel's input after the client's exit, and stop a kernel that still does not go ([#148](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/148)) ([25d6cb7](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/25d6cb7e05ffd538cb18e9818a224a6cf2fba7c8))
+* hold a request on its own flavour rather than evict for an unproven start, or refuse what its busy kernel will serve ([#147](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/147)) ([85d901b](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/85d901b304499580c5b842092c331f15f1feca45))
+
+
+### Refactoring
+
+* decide the pool's tier in one place, so acquire and the waiter drain cannot drift apart ([#142](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/142)) ([6e0145b](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/6e0145bfcf5f8e1bc8eacd839b49b723e928df4a))
+
 ## [0.1.8](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.7...v0.1.8) (2026-11-05)
 
 
