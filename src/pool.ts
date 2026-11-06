@@ -24,6 +24,7 @@ import {
   ServerNotResolved,
   type RunOptions,
 } from "./kernel.js";
+import { timerDelay } from "./config.js";
 import { baseDirectoryEnv, type KernelFacts } from "./inspect.js";
 import { errorText, type Logger } from "./log.js";
 import { elapsedText, waitText } from "./duration.js";
@@ -128,6 +129,7 @@ type Plan =
   | { tier: "grow" }
   | { tier: "swap"; victim: Slot }
   | { tier: "reuse"; slot: Slot }
+  | { tier: "hold" }
   | { tier: "wait" };
 
 /**
@@ -189,6 +191,12 @@ export class KernelPool {
    * before the first failure is recorded is not covered: #19.
    */
   readonly #failed = new Map<string, { backoff: Backoff; unresolved: boolean }>();
+  /** Flavours whose kernel started since their last failed start (#19). */
+  readonly #proven = new Set<string>();
+  /** Requests held on their own flavour, apart from the FIFO queue (#19, #115). */
+  readonly #held = new Map<string, Waiter[]>();
+  /** A second look for a flavour's held requests when its window ends. */
+  readonly #windowTimers = new Map<string, NodeJS.Timeout>();
 
   constructor(options: KernelPoolOptions) {
     this.#options = options;
@@ -290,6 +298,9 @@ export class KernelPool {
       log: (message) => log(`kernel ${index}: ${message}`),
       onFacts: (facts, chosen) => this.#learn(facts, chosen),
       onReady: async (client: Client) => {
+        // Proven: what its held requests were waiting to learn (#19).
+        this.#proven.add(flavour.digest);
+        this.#wake(flavour.digest);
         await this.#options.onKernelReady?.(client, flavour.digest);
       },
     });
@@ -375,25 +386,67 @@ export class KernelPool {
     const window = this.#window(flavour.digest);
     const free = this.#slots.find((s) => this.#servable(s, flavour, window !== null));
     if (free) return { tier: "take", slot: free };
-    // Turned away before anything below starts a kernel, or retires another
-    // session's to make room. Waiting instead for a running kernel of its own
-    // was tried in #113 and reverted (#115): queued in the window, a request
-    // could wait out its ceiling behind an abandoned call, or hold up every
-    // other flavour's waiter behind it.
-    if (window) return { tier: "refuse", window };
+    // Inside the window nothing below may start a kernel, or retire another
+    // session's to make room. A kernel of its own that is busy with a live call,
+    // or starting, will be free soon, so the request waits for it, held on its
+    // flavour, rather than being refused with advice to repair a server that
+    // resolves (#115). Queued in the FIFO instead, as #113 tried, it held up
+    // every other flavour's waiter behind it.
+    if (window) return this.#ownBusy(flavour) ? { tier: "hold" } : { tier: "refuse", window };
     // A fresh kernel beats stopping one that may still be finishing something.
     if (this.#slots.length < this.#budget) return { tier: "grow" };
     // Nothing of ours is free and the budget is spent, so a seat has to come
-    // from somewhere. An idle kernel of another flavour is the cheapest loss.
+    // from somewhere. An idle kernel of another flavour is the cheapest loss —
+    // but not for a second start of a flavour whose first is still under way
+    // and that has not yet shown it can start at all: a burst for a server that
+    // will not start retired one session's kernel per request to fail (#19).
+    // Held, it waits for that start, and proven or refused with it.
     const victim = this.#victim(flavour);
-    if (victim) return { tier: "swap", victim };
+    if (victim) {
+      if (!this.#isProven(flavour) && this.#starting(flavour)) return { tier: "hold" };
+      return { tier: "swap", victim };
+    }
     const spent = this.#idle(flavour);
     if (spent) return { tier: "reuse", slot: spent };
     return { tier: "wait" };
   }
 
-  /** Carry out any decision of `#plan`'s but waiting, which is the caller's. */
-  #act(plan: Exclude<Plan, { tier: "wait" }>, flavour: KernelFlavour): Slot | Promise<Slot> {
+  /**
+   * A kernel of this flavour busy with a live call, or starting: either ends
+   * in a release or a retirement, which wakes whoever is held for it. Never one
+   * holding an abandoned call, whose settling wakes nobody: held behind one, a
+   * request waited out its own ceiling (#115).
+   */
+  #ownBusy(flavour: KernelFlavour): boolean {
+    return this.#slots.some(
+      (s) => s.busy && !s.session.abandoned && s.flavour.digest === flavour.digest,
+    );
+  }
+
+  /** A kernel of this flavour whose start is under way. */
+  #starting(flavour: KernelFlavour): boolean {
+    return this.#slots.some(
+      (s) => s.busy && !s.session.running && s.flavour.digest === flavour.digest,
+    );
+  }
+
+  /**
+   * Whether this flavour has shown it can start: a kernel of it started since
+   * its last failed start, or one is running — so one failed extra start, while
+   * a kernel of it runs, does not make its next request wait (#19).
+   */
+  #isProven(flavour: KernelFlavour): boolean {
+    return (
+      this.#proven.has(flavour.digest) ||
+      this.#slots.some((s) => s.session.running && s.flavour.digest === flavour.digest)
+    );
+  }
+
+  /** Carry out any decision of `#plan`'s but waiting or holding, which are the caller's. */
+  #act(
+    plan: Exclude<Plan, { tier: "wait" } | { tier: "hold" }>,
+    flavour: KernelFlavour,
+  ): Slot | Promise<Slot> {
     switch (plan.tier) {
       case "take":
         plan.slot.busy = true;
@@ -421,23 +474,26 @@ export class KernelPool {
 
   async #acquire(flavour: KernelFlavour, signal?: AbortSignal): Promise<Slot> {
     const plan = this.#plan(flavour);
-    if (plan.tier !== "wait") return this.#act(plan, flavour);
-
-    this.#options.log(
-      `all ${this.#slots.length} kernel(s) busy and budget reached; queueing ` +
-        `(${this.#waiters.length + 1} waiting)`,
-    );
+    if (plan.tier === "hold") {
+      this.#options.log(`holding a request for environment ${flavour.digest} for its own kernel`);
+    } else if (plan.tier === "wait") {
+      this.#options.log(
+        `all ${this.#slots.length} kernel(s) busy and budget reached; queueing ` +
+          `(${this.#waiters.length + 1} waiting)`,
+      );
+    } else {
+      return this.#act(plan, flavour);
+    }
     return new Promise<Slot>((resolve, reject) => {
       const waiter: Waiter = { flavour, resolve, reject };
-      this.#waiters.push(waiter);
-      // Cancelled in the queue, it leaves the queue: left in, it was served
-      // like any other, by a kernel grown or another session's retired for it.
+      if (plan.tier === "hold") this.#hold(waiter);
+      else this.#waiters.push(waiter);
+      // Cancelled while it waits, it leaves, held or queued: left in, it was
+      // served like any other, by a kernel grown or another session's retired.
       signal?.addEventListener(
         "abort",
         () => {
-          const at = this.#waiters.indexOf(waiter);
-          if (at === -1) return; // already served; `session.run` drops it
-          this.#waiters.splice(at, 1);
+          if (!this.#unqueue(waiter)) return; // already served; `session.run` drops it
           reject(new RequestDropped(signal.reason));
         },
         { once: true },
@@ -445,8 +501,70 @@ export class KernelPool {
     });
   }
 
+  /**
+   * Hold a request on its own flavour, apart from the FIFO queue, so it blocks
+   * no other flavour's waiter (#115). It is planned again when a kernel of its
+   * flavour is released or retired, or proves it can start, and when the
+   * flavour's window ends, which no release may bring: a timer gives it that
+   * second look.
+   */
+  #hold(waiter: Waiter): void {
+    const { digest } = waiter.flavour;
+    const held = this.#held.get(digest) ?? [];
+    held.push(waiter);
+    this.#held.set(digest, held);
+    const window = this.#window(digest);
+    if (window && !this.#windowTimers.has(digest)) {
+      const timer = setTimeout(
+        () => {
+          this.#windowTimers.delete(digest);
+          this.#wake(digest);
+        },
+        timerDelay(window.remainingMs + 1),
+      );
+      timer.unref?.();
+      this.#windowTimers.set(digest, timer);
+    }
+  }
+
+  /** Take a waiter out of wherever it waits; false when it has been served. */
+  #unqueue(waiter: Waiter): boolean {
+    const at = this.#waiters.indexOf(waiter);
+    if (at !== -1) {
+      this.#waiters.splice(at, 1);
+      return true;
+    }
+    const held = this.#held.get(waiter.flavour.digest);
+    const there = held?.indexOf(waiter) ?? -1;
+    if (held && there !== -1) {
+      held.splice(there, 1);
+      return true;
+    }
+    return false;
+  }
+
+  /** Plan again for the requests held on a flavour, in the order they came. */
+  #wake(digest: string): void {
+    const held = this.#held.get(digest);
+    if (!held?.length) return;
+    this.#held.delete(digest);
+    for (const waiter of held) {
+      const plan = this.#plan(waiter.flavour);
+      if (plan.tier === "hold") this.#hold(waiter);
+      else if (plan.tier === "wait") this.#waiters.push(waiter);
+      else {
+        try {
+          waiter.resolve(this.#act(plan, waiter.flavour));
+        } catch (err) {
+          waiter.reject(err);
+        }
+      }
+    }
+  }
+
   #release(slot: Slot): void {
     slot.busy = false;
+    this.#wake(slot.flavour.digest);
     this.#drainWaiters();
   }
 
@@ -516,6 +634,7 @@ export class KernelPool {
     if (at !== -1) this.#slots.splice(at, 1);
     this.#options.log(`retiring kernel after ${reason}; pool now ${this.#slots.length} kernel(s)`);
     void slot.session.stop().catch(() => {});
+    this.#wake(slot.flavour.digest);
     if (!this.#draining) this.#drainWaiters();
   }
 
@@ -542,6 +661,10 @@ export class KernelPool {
       const plan = this.#plan(head.flavour);
       if (plan.tier === "wait") return;
       this.#waiters.shift();
+      if (plan.tier === "hold") {
+        this.#hold(head);
+        continue;
+      }
       try {
         head.resolve(this.#act(plan, head.flavour));
       } catch (err) {
@@ -607,6 +730,7 @@ export class KernelPool {
     const backoff = new Backoff(PREPARATION_BACKOFF_MS, () => this.#now());
     backoff.record(identity, err, windowMs, advice);
     this.#failed.set(digest, { backoff, unresolved });
+    this.#proven.delete(digest);
   }
 
   /**
@@ -661,6 +785,8 @@ export class KernelPool {
   }
 
   async stop(): Promise<void> {
+    for (const timer of this.#windowTimers.values()) clearTimeout(timer);
+    this.#windowTimers.clear();
     await Promise.all(this.#slots.map((s) => s.session.stop().catch(() => {})));
     this.#slots.length = 0;
   }

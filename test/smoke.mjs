@@ -5569,7 +5569,10 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
 
     // And a request of a flavour whose first kernel is still starting is served
     // once the start succeeds, not when the request that made it finishes: a
-    // hold for #19, tried and reverted, kept it waiting for the whole call.
+    // hold for #19, tried and reverted, kept it waiting for the whole call. The
+    // hold that landed (#19's design) waits for the start alone: at the budget
+    // the request is held, woken when the flavour's kernel is ready, and only
+    // then retires the other flavour's idle kernel to start its own.
     // Each flavour carries its own fake timings, declared so the pool starts
     // its kernel with them.
     const timed = (server, timings) =>
@@ -5677,16 +5680,20 @@ heading("The pool's refusal window spares a flavour's idle kernel, and is report
       /^failed/.test(extra) && /^evaluated/.test(served),
       `extra start: ${extra.replace(/\s+/g, " ").slice(0, 60)}; then: ${served.replace(/\s+/g, " ").slice(0, 80)}`,
     );
-    // What would start a kernel is still turned away, inside the window.
+    // Inside the window, a request its own busy kernel will serve waits for
+    // that kernel. It was refused, with advice to repair a server that resolves
+    // fine on the kernel it was waiting for (#115).
     const again = hold();
     await until(again.running, 10_000);
-    const refused = await outcome(pool.run(flavour, evaluate));
+    const waiting = outcome(pool.run(flavour, evaluate));
+    await new Promise((r) => setTimeout(r, 200));
     again.release();
     await again.done;
+    const waited = await waiting;
     check(
-      "and one that would start a kernel is still refused",
-      /none was started for this request/.test(refused),
-      refused.replace(/\s+/g, " ").slice(0, 100),
+      "and one its own busy kernel can serve waits for that kernel, rather than being refused",
+      /^evaluated/.test(waited),
+      waited.replace(/\s+/g, " ").slice(0, 100),
     );
   } finally {
     await pool.stop();
@@ -5724,6 +5731,90 @@ heading("The pool's refusal window spares a flavour's idle kernel, and is report
     else process.env.FAKE_MODE = savedMode;
     if (savedMarker === undefined) delete process.env.FAKE_MARKER;
     else process.env.FAKE_MARKER = savedMarker;
+  }
+
+  // A burst for a flavour that has not shown it can start, at a full budget:
+  // each request found no seat, retired another session's idle kernel, and
+  // started one of its own to fail, one eviction per request (#19).
+  {
+    const burstMarker = join(home, "starts-unproven-burst");
+    process.env.FAKE_MARKER = burstMarker;
+    const burstPool = poolOf(60_000);
+    const other = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage", MCP_APPS_ENABLED: "false" });
+    try {
+      delete process.env.FAKE_MODE;
+      // Two idle kernels of another session fill the budget.
+      await Promise.all([outcome(burstPool.run(other, evaluate)), outcome(burstPool.run(other, evaluate))]);
+      const before = starts(burstMarker);
+      process.env.FAKE_MODE = "unactivated";
+      const burst = await Promise.all([1, 2, 3].map(() => outcome(burstPool.run(flavour, evaluate))));
+      delete process.env.FAKE_MODE;
+      const burstStarts = starts(burstMarker) - before;
+      const afterBurst = starts(burstMarker);
+      await Promise.all([outcome(burstPool.run(other, evaluate)), outcome(burstPool.run(other, evaluate))]);
+      const evicted = starts(burstMarker) - afterBurst;
+      check(
+        "a burst for a flavour that will not start starts one kernel and retires one other session's, not one per request",
+        burstStarts === 1 && evicted === 1 && burst.every((r) => /^failed/.test(r)),
+        `${burstStarts} start(s), ${evicted} of the other session's retired: ` +
+          burst.map((r) => r.replace(/\s+/g, " ").slice(8, 40)).join(" | "),
+      );
+    } finally {
+      await burstPool.stop();
+      if (savedMode === undefined) delete process.env.FAKE_MODE;
+      else process.env.FAKE_MODE = savedMode;
+      if (savedMarker === undefined) delete process.env.FAKE_MARKER;
+      else process.env.FAKE_MARKER = savedMarker;
+    }
+  }
+
+  // Held inside the window behind a long call, a request gets a second look
+  // when the window ends, which no release brings: then it may start a kernel
+  // of its own. The pool's clock is moved, so the window ends in a moment
+  // rather than fifteen seconds.
+  {
+    let poolNow = 5_000_000;
+    const clockPool = new lib.KernelPool({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 2, type: null },
+      learnFromKernels: false,
+      clock: () => poolNow,
+    });
+    try {
+      delete process.env.FAKE_MODE;
+      const long = hold(clockPool);
+      await until(long.running, 10_000);
+      process.env.FAKE_MODE = "no-such-server";
+      await outcome(clockPool.run(flavour, evaluate)); // an extra start fails: the window opens
+      delete process.env.FAKE_MODE;
+      poolNow += 15_000 - 300; // 300ms of it left
+      const heldAt = Date.now();
+      const late = outcome(clockPool.run(flavour, evaluate)); // held behind the long call
+      poolNow += 1_000; // and the window over, by the pool's clock
+      const served = await Promise.race([
+        late,
+        new Promise((r) => setTimeout(() => r("(still held after 5s)"), 5_000)),
+      ]);
+      const heldMs = Date.now() - heldAt;
+      long.release();
+      await long.done;
+      await late;
+      check(
+        "a request held inside the window is looked at again when the window ends, and served",
+        /^evaluated/.test(served),
+        `after ${heldMs}ms: ${String(served).replace(/\s+/g, " ").slice(0, 80)}`,
+      );
+    } finally {
+      await clockPool.stop();
+      if (savedMode === undefined) delete process.env.FAKE_MODE;
+      else process.env.FAKE_MODE = savedMode;
+    }
   }
 
   // Any failed start is remembered, not only a server name that did not

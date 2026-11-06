@@ -224,8 +224,9 @@ instead of the server.
   back-off, on both paths: it is fixed by creating the server or installing its paclet,
   which the full back-off, keyed on the kernel binary, cannot see, but every ask starts a
   kernel, so calls that follow it within a few seconds are answered from it. Calls that
-  reach a shared broker together, before any failure is recorded, each still start a
-  kernel, and past the budget may retire another session's (#19).
+  reach a shared broker together, before any failure is recorded, may each start a kernel
+  below the budget, but past it only the first retires another session's: the rest are held
+  for that start, until the flavour has shown it can start at all (#19).
 - All four built-in servers advertise `prompts`; none advertise `resources`. Tool counts:
   `Wolfram` 3, `WolframLanguage` 7, `WolframAlpha` 2, `WolframPacletDevelopment` 13.
 - Sessions survive a kernel restart. The evaluator persists session state to disk and
