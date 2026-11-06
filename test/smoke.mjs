@@ -8903,6 +8903,18 @@ heading("The plugin is assembled from its template, and the archive is that tree
       Boolean(replies.get(8)?.result) && Boolean(pair?.result),
       `8 ${replies.has(8) ? "answered" : "none"}; 9 ${pair ? "answered" : "none"}`,
     );
+    // Told to exit, LSPServer stays alive until its input ends, and a client
+    // need not close it: the launcher, piping the client's stdin through and
+    // waiting on the kernel, never ended (#106). The client's pipe stays open.
+    const goneBy = new Promise((resolve) => live.once("exit", resolve));
+    await ask(10, "shutdown", null);
+    live.stdin.write(frame({ jsonrpc: "2.0", method: "exit", params: null }));
+    const exitCode = await Promise.race([goneBy, new Promise((r) => setTimeout(() => r("hung"), 4_000))]);
+    check(
+      "exit ends the launcher and its kernel, though the client keeps its pipe open",
+      exitCode === 0,
+      `exit=${exitCode}`,
+    );
     live.kill();
 
     // A kernel that replies and exits at once. With stdio piped through the

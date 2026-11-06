@@ -237,6 +237,35 @@ const REQUEST_CAPABILITY: Record<string, readonly [string, ...string[]]> = {
   "workspace/executeCommand": ["executeCommandProvider"],
 };
 
+/** How long a kernel told to exit has before it is stopped, and again before it is killed. */
+const EXIT_GRACE_MS = 5_000;
+
+/**
+ * After the client's `exit`, end the kernel's input, and stop the kernel if it
+ * does not go. LSPServer logged "KERNEL IS EXITING GRACEFULLY" and then stayed
+ * alive until its stdin closed, which a client need not do after `exit` —
+ * Claude Code keeps the pipe, and so did this launcher on its behalf — so the
+ * launcher, waiting on the kernel's `close`, never ended (#106). Nothing may
+ * follow `exit`, so its input ends with it; and a kernel that still does not
+ * go is stopped, then killed, rather than left holding a seat.
+ */
+function endAfterExit(child: ChildProcess): void {
+  child.stdin?.end();
+  const gone = () => child.exitCode !== null || child.signalCode !== null;
+  const stop = setTimeout(() => {
+    if (gone()) return;
+    process.stderr.write(
+      `[wolfram-lsp] the kernel did not end within ${EXIT_GRACE_MS / 1000}s of exit; stopping it\n`,
+    );
+    child.kill("SIGTERM");
+    const kill = setTimeout(() => {
+      if (!gone()) child.kill("SIGKILL");
+    }, EXIT_GRACE_MS);
+    kill.unref();
+  }, EXIT_GRACE_MS);
+  stop.unref();
+}
+
 /**
  * Stand between the client and Wolfram's LSPServer, and answer what it cannot.
  *
@@ -293,6 +322,7 @@ function guardUnadvertised(child: ChildProcess): void {
         return;
       }
       child.stdin?.write(frame);
+      if (msg.method === "exit" && msg.id === undefined) endAfterExit(child);
     }),
   );
   process.stdin.on("end", () => child.stdin?.end());
