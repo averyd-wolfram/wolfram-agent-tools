@@ -107,7 +107,8 @@ export interface KernelPoolOptions {
    * slot is still held, so anything the caller needs from the new kernel has to
    * be read here rather than by going back through `run`.
    */
-  onKernelReady?: ((client: Client, flavour: string) => void | Promise<void>) | undefined;
+  onKernelReady?:
+    ((client: Client, flavour: string, late?: AbortSignal) => void | Promise<void>) | undefined;
   /** For the suite, which cannot wait out a window of real time. */
   clock?: (() => number) | undefined;
 }
@@ -308,11 +309,11 @@ export class KernelPool {
       flavour,
       log: (message) => log(`kernel ${index}: ${message}`),
       onFacts: (facts, chosen) => this.#learn(facts, chosen),
-      onReady: async (client: Client) => {
+      onReady: async (client: Client, late?: AbortSignal) => {
         // Proven: what its held requests were waiting to learn (#19).
         this.#proven.add(flavour.digest);
         this.#schedule();
-        await this.#options.onKernelReady?.(client, flavour.digest);
+        await this.#options.onKernelReady?.(client, flavour.digest, late);
       },
     });
     const slot: Slot = { session, busy: true, flavour };

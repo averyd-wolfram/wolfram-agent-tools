@@ -7437,13 +7437,22 @@ heading("A call, a prompt or a resource read longer than a minute is answered, o
       return { path, op, s, result, elapsed: Date.now() - started };
     }),
   );
-  for (const { path, s, log, result } of await Promise.all(listRuns)) {
+  // The late tools/list answers at 65 s: long enough after it for a follow-up
+  // the refresh should no longer send, a prompts/list, to have reached the log.
+  const listed = await Promise.all(listRuns);
+  await new Promise((r) => setTimeout(r, 3_000));
+  for (const { path, s, log, result } of listed) {
     const methods = existsSync(log) ? readFileSync(log, "utf8") : "";
     check(
-      `a ${path} kernel's list read after its start is not cancelled at the SDK's minute`,
-      !result.error && answeredByFake(result) && /tools\/list/.test(methods) && !/notifications\/cancelled/.test(methods),
+      `a ${path} kernel's list read after its start is not cancelled at the SDK's minute, nor followed once the start stopped waiting`,
+      !result.error &&
+        answeredByFake(result) &&
+        /tools\/list/.test(methods) &&
+        !/notifications\/cancelled/.test(methods) &&
+        !/prompts\/list/.test(methods),
       `${result.error ? result.error.message.slice(0, 60) : (result.content?.[0]?.text ?? "").slice(0, 60)}; ` +
-        `${(methods.match(/notifications\/cancelled/g) ?? []).length} cancellation(s) sent to the kernel`,
+        `${(methods.match(/notifications\/cancelled/g) ?? []).length} cancellation(s), ` +
+        `${(methods.match(/prompts\/list/g) ?? []).length} prompts/list sent to the kernel`,
     );
     await s.client.close();
   }

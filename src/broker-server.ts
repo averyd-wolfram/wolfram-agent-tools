@@ -275,7 +275,7 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
       onFacts: (facts, chosen) => {
         if (options.allowInspect) recordFacts(options.bin, facts, chosen, log);
       },
-      onKernelReady: (client, flavour) => announceKernel(client, flavour),
+      onKernelReady: (client, flavour, late) => announceKernel(client, flavour, late),
     });
   })();
   // Nothing may reject unhandled while nobody is awaiting it yet.
@@ -287,7 +287,11 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
    * Runs inside the queue, holding the slot that just started, so it must use
    * this client directly and never `pool.run`.
    */
-  async function announceKernel(client: Client, flavour: string): Promise<void> {
+  async function announceKernel(
+    client: Client,
+    flavour: string,
+    late?: AbortSignal,
+  ): Promise<void> {
     // Only the sessions this kernel can serve. Telling the others would put one
     // flavour's tool list into another's cache entry, under a key that exists to
     // keep them apart.
@@ -297,8 +301,9 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
       const capabilities = client.getServerCapabilities() ?? {};
       // Whole lists, so a broadcast carries every page, not page one.
       // This server's request options, as `pool.run` gives every other request:
-      // with the SDK's own, a slow list was cancelled at 60 s (#70).
-      const tools = await listAllTools(client, requestOptions());
+      // with the SDK's own, a slow list was cancelled at 60 s (#70). And nothing
+      // new once the start has stopped waiting for this (`late`).
+      const tools = await listAllTools(client, requestOptions(), late);
       // Read apart from the tools, so a failure costs the prompts alone. Read
       // together, any failure of prompts/list lost the whole broadcast, and a
       // cold machine's cache stayed cold until the next kernel start (#122).
@@ -313,7 +318,7 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
               requestOptions(),
             );
             return { items: page.prompts ?? [], nextCursor: page.nextCursor };
-          });
+          }, late);
         } catch (err) {
           promptsError = errorText(err);
           log(`could not read the new kernel's prompts; sessions keep theirs: ${promptsError}`);

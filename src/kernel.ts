@@ -296,10 +296,12 @@ type Judged<T> =
  */
 export async function drainPages<T>(
   page: (cursor?: string) => Promise<{ items: T[]; nextCursor?: string | undefined }>,
+  stop?: AbortSignal,
 ): Promise<T[]> {
   const all: T[] = [];
   let cursor: string | undefined;
   for (let guard = 0; guard < 50; guard++) {
+    stopIfLate(stop);
     const result = await page(cursor);
     all.push(...result.items);
     cursor = result.nextCursor;
@@ -313,11 +315,27 @@ export async function drainPages<T>(
  * nothing reports page one as the list: `doctor` did, and showed a kernel that
  * pages fewer tools than it offered.
  */
-export function listAllTools(client: Client, options?: RequestOptions): Promise<Tool[]> {
+export function listAllTools(
+  client: Client,
+  options?: RequestOptions,
+  stop?: AbortSignal,
+): Promise<Tool[]> {
   return drainPages(async (cursor) => {
     const page = await client.listTools(cursor ? { cursor } : undefined, options);
     return { items: page.tools ?? [], nextCursor: page.nextCursor };
-  });
+  }, stop);
+}
+
+/**
+ * Before a ready hook sends anything new: once the start has stopped waiting
+ * for it (`KernelSessionOptions.onReady`'s `late`), nothing more is asked.
+ */
+export function stopIfLate(late: AbortSignal | undefined): void {
+  if (late?.aborted) {
+    throw new Error(
+      "the post-start refresh outlived the start's wait for it, so nothing more is asked of the kernel",
+    );
+  }
 }
 
 /** The SDK's own timeout, which a request given `requestOptions` never meets. */
@@ -441,8 +459,14 @@ export interface KernelSessionOptions {
    * callers. Used to re-read the upstream capability lists. Throwing here is
    * logged and ignored: a bookkeeping failure must not fail the tool call that
    * triggered the start.
+   *
+   * `late` aborts once the start stops waiting for it (`DEFAULT_DEADLINE_MS`):
+   * from then on the hook sends nothing new. Its request in flight is left
+   * outstanding, but a page or a prompt list asked after the start's caller has
+   * the kernel landed among that caller's calls on a kernel that runs one at a
+   * time, while the session and the pool held it free (#149's review).
    */
-  onReady?: (client: Client) => Promise<void>;
+  onReady?: (client: Client, late?: AbortSignal) => Promise<void>;
   /**
    * What the kernel reported, once per start, before its server is up, and
    * which `SHAPING_VARS` its environment chose. Only a report that chose none
@@ -720,7 +744,8 @@ export class KernelSession {
       // Called inside an async function, so a hook that throws as it is called,
       // not only one that rejects, is logged and ignored as the option promises.
       const onReady = this.#options.onReady;
-      const refresh = (async () => onReady(client))().catch((err: unknown) =>
+      const stopAsking = new AbortController();
+      const refresh = (async () => onReady(client, stopAsking.signal))().catch((err: unknown) =>
         log(`post-start refresh failed, continuing: ${errorText(err)}`),
       );
       let timer: NodeJS.Timeout | undefined;
@@ -731,6 +756,7 @@ export class KernelSession {
       const outcome = await Promise.race([refresh, late]);
       clearTimeout(timer);
       if (outcome === "late") {
+        stopAsking.abort();
         log(
           `post-start refresh not answered within ${budgetText(DEFAULT_DEADLINE_MS)}; ` +
             `continuing, and taking its answer when it comes`,
