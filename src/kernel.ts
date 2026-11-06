@@ -17,14 +17,19 @@ import {
   PromptListChangedNotificationSchema,
   PromptSchema,
   ResourceSchema,
+  ResultSchema,
   ToolListChangedNotificationSchema,
   ToolSchema,
+  type CallToolRequest,
+  type CallToolResult,
   type ListPromptsRequest,
   type ListPromptsResult,
   type ListResourcesRequest,
   type ListResourcesResult,
   type ListToolsRequest,
   type ListToolsResult,
+  type Prompt,
+  type Resource,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { deadlineDelay, MAX_TIMER_MS, timerDelay } from "./config.js";
@@ -170,6 +175,15 @@ export function requestOptions(signal?: AbortSignal): RequestOptions {
  * broker's `kernelReady` failed whole, its tools with it. A user's own server,
  * reached by name, is what could send one; AgentTools 2.2.7 builds its prompts
  * from fixed keys.
+ *
+ * An item that passes is relayed as the kernel sent it, not as zod parsed it:
+ * those schemas are plain objects, so a field the pinned SDK does not know, a
+ * newer revision's or a server's own, was dropped on the way (#123). Measured,
+ * Claude Code 2.1.319 lists a tool and a prompt carrying a field it does not
+ * know. And a tool's result is relayed unparsed: the SDK's schema holds
+ * `structuredContent` to an object, so a result whose tool declares an array
+ * became a protocol error here, with the kernel's answer gone, where the
+ * client is the one to judge it (#117).
  */
 class RelayClient extends Client {
   readonly #log: (message: string) => void;
@@ -193,12 +207,10 @@ class RelayClient extends Client {
       PaginatedResultSchema,
       options,
     );
-    const tools = this.#judge(result, "tool", (tool) => {
-      const { outputSchema, ...rest } = tool;
-      const parsed = ToolSchema.safeParse(rest);
-      if (!parsed.success || outputSchema === undefined) return parsed;
-      return { success: true, data: { ...parsed.data, outputSchema } as Tool };
-    });
+    // All but the output schema, which is the client's to judge (#69).
+    const tools = this.#judge<Tool>(result, "tool", ({ outputSchema: _, ...rest }) =>
+      ToolSchema.safeParse(rest),
+    );
     return { ...result, tools };
   }
 
@@ -211,7 +223,9 @@ class RelayClient extends Client {
       PaginatedResultSchema,
       options,
     );
-    const prompts = this.#judge(result, "prompt", (prompt) => PromptSchema.safeParse(prompt));
+    const prompts = this.#judge<Prompt>(result, "prompt", (prompt) =>
+      PromptSchema.safeParse(prompt),
+    );
     return { ...result, prompts };
   }
 
@@ -224,10 +238,27 @@ class RelayClient extends Client {
       PaginatedResultSchema,
       options,
     );
-    const resources = this.#judge(result, "resource", (resource) =>
+    const resources = this.#judge<Resource>(result, "resource", (resource) =>
       ResourceSchema.safeParse(resource),
     );
     return { ...result, resources };
+  }
+
+  /**
+   * A tool's result as the kernel sent it, for the client to judge (#117). The
+   * SDK's `CallToolResultSchema` would refuse a `structuredContent` that is not
+   * an object, and strip what it does not know from the rest. Nothing here
+   * reads a result's shape, and the SDK checks it against a tool's output
+   * schema only once it has cached one from `Client.listTools`, which this
+   * client never calls.
+   */
+  override async callTool(
+    params: CallToolRequest["params"],
+    _resultSchema?: unknown,
+    options?: RequestOptions,
+  ): Promise<CallToolResult> {
+    const result = await this.request({ method: "tools/call", params }, ResultSchema, options);
+    return result as CallToolResult;
   }
 
   /**
@@ -239,7 +270,7 @@ class RelayClient extends Client {
   #judge<T>(
     result: Record<string, unknown>,
     kind: "tool" | "prompt" | "resource",
-    parse: (item: Record<string, unknown>) => Judged<T>,
+    parse: (item: Record<string, unknown>) => Judged,
   ): T[] {
     const key = `${kind}s`;
     const method = `${key}/list`;
@@ -257,7 +288,7 @@ class RelayClient extends Client {
         typeof item === "object" && item !== null ? (item as Record<string, unknown>) : {};
       const parsed = parse(fields);
       if (parsed.success) {
-        kept.push(parsed.data);
+        kept.push(fields as T);
         return;
       }
       // A resource always has its URI to be known by, when it has no name; an
@@ -281,8 +312,8 @@ class RelayClient extends Client {
 }
 
 /** What a per-item judgment answers: the part of zod's `safeParse` result read. */
-type Judged<T> =
-  | { success: true; data: T }
+type Judged =
+  | { success: true }
   | {
       success: false;
       error: { issues: readonly { path: readonly PropertyKey[]; message: string }[] };
