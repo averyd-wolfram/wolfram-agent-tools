@@ -5872,6 +5872,73 @@ heading("The pool's refusal window spares a flavour's idle kernel, and is report
     }
   }
 
+  // Nor when the kernel it is held for dies rather than being released: the
+  // retirement woke the held request first, and once the window had ended it
+  // grew a kernel into the freed seat ahead of the older queued request.
+  {
+    let poolNow = 7_000_000;
+    const diePool = new lib.KernelPool({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 2, type: null },
+      learnFromKernels: false,
+      clock: () => poolNow,
+    });
+    const third = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage", LLMKIT_ENABLED: "false" });
+    const fourth = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage", MCP_APPS_ENABLED: "false" });
+    // A call held open until released, then evaluating `code`.
+    const holdFor = (fl, code = "1+1") => {
+      let release;
+      const held = new Promise((resolve) => (release = resolve));
+      let running = false;
+      const done = outcome(
+        diePool.run(fl, async (client) => {
+          running = true;
+          await held;
+          return client.callTool({ name: "WolframLanguageEvaluator", arguments: { code } });
+        }),
+      );
+      return { release: () => release(), running: () => running, done };
+    };
+    try {
+      delete process.env.FAKE_MODE;
+      const doomed = holdFor(flavour, "Exit[]");
+      await until(doomed.running, 10_000);
+      process.env.FAKE_MODE = "no-such-server";
+      await outcome(diePool.run(flavour, evaluate)); // an extra start fails: the window opens
+      delete process.env.FAKE_MODE;
+      const otherBusy = holdFor(fourth); // the budget is full, nothing idle
+      await until(otherBusy.running, 10_000);
+      const queued = outcome(diePool.run(third, evaluate)); // waits for a seat
+      await new Promise((r) => setTimeout(r, 100));
+      const heldLater = holdFor(flavour); // held for its own kernel, long once it has one
+      await new Promise((r) => setTimeout(r, 100));
+      poolNow += 16_000; // the window over, by the pool's clock
+      doomed.release(); // and its kernel dies mid-call, retired, not released
+      const first = await Promise.race([
+        queued,
+        new Promise((r) => setTimeout(() => r("(still queued after 3s)"), 3_000)),
+      ]);
+      heldLater.release();
+      otherBusy.release();
+      await Promise.all([doomed.done, otherBusy.done, queued, heldLater.done]);
+      check(
+        "and a kernel that dies rather than being released goes to the older queued request too",
+        /^evaluated/.test(first),
+        String(first).replace(/\s+/g, " ").slice(0, 80),
+      );
+    } finally {
+      await diePool.stop();
+      if (savedMode === undefined) delete process.env.FAKE_MODE;
+      else process.env.FAKE_MODE = savedMode;
+    }
+  }
+
   // The window ends early when the kernel binary changes, which nothing
   // announces: held behind a long call, a request waited out the old window,
   // ten minutes for a kernel that died on launch, though the installation had

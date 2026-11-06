@@ -586,16 +586,23 @@ export class KernelPool {
    */
   #release(slot: Slot): void {
     slot.busy = false;
-    const { digest } = slot.flavour;
+    this.#reseat(slot.flavour.digest);
+  }
+
+  /**
+   * After a kernel of this flavour is released or retired, serve whoever came
+   * first: the queue's head, or the requests held for this flavour. One
+   * decision for both, so a kernel that dies, rather than being released, does
+   * not hand its seat to a newer held request either (#147's review). The drain
+   * guards itself against re-entry, from a swap's retirement inside it.
+   */
+  #reseat(digest: string): void {
     const head = this.#waiters[0];
     const held = this.#held.get(digest) ?? [];
-    if (head && held.every((waiter) => head.seq < waiter.seq)) {
-      this.#drainWaiters();
-      this.#wake(digest);
-    } else {
-      this.#wake(digest);
-      this.#drainWaiters();
-    }
+    const queueFirst = head !== undefined && held.every((waiter) => head.seq < waiter.seq);
+    if (queueFirst) this.#drainWaiters();
+    this.#wake(digest);
+    if (!queueFirst) this.#drainWaiters();
   }
 
   /**
@@ -664,8 +671,7 @@ export class KernelPool {
     if (at !== -1) this.#slots.splice(at, 1);
     this.#options.log(`retiring kernel after ${reason}; pool now ${this.#slots.length} kernel(s)`);
     void slot.session.stop().catch(() => {});
-    this.#wake(slot.flavour.digest);
-    if (!this.#draining) this.#drainWaiters();
+    this.#reseat(slot.flavour.digest);
   }
 
   #draining = false;
