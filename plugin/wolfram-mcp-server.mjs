@@ -8208,7 +8208,7 @@ var init_version = __esm({
   "dist/version.js"() {
     "use strict";
     here = dirname(fileURLToPath(import.meta.url));
-    PKG = true ? JSON.parse('{"name":"wolfram-mcp-server","version":"0.1.8","description":"MCP server that drives a locally installed Wolfram kernel, with lazy start and idle shutdown."}') : JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8"));
+    PKG = true ? JSON.parse('{"name":"wolfram-mcp-server","version":"0.1.9","description":"MCP server that drives a locally installed Wolfram kernel, with lazy start and idle shutdown."}') : JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8"));
   }
 });
 
@@ -18672,19 +18672,26 @@ function isServerNotResolved(err) {
 function chosenShaping(flavour) {
   return SHAPING_VARS.filter((name) => Boolean((flavour ? flavour.env[name] : process.env[name])?.trim()));
 }
+function isKernelStartFailed(err) {
+  for (let e = err; e instanceof Error; e = e.cause) {
+    if (e instanceof KernelStartFailed)
+      return true;
+  }
+  return false;
+}
 function withKernelOutput(err, output) {
   const message = errorText(err);
   const recent = output.filter((line) => !isFactsLine(line));
   if (recent.length === 0)
-    return new Error(message, { cause: err });
+    return new KernelStartFailed(message, err);
   const tail = recent.map((line) => `  ${line}`).join("\n");
   const hint = recent.some((line) => NOT_ACTIVATED.test(line)) ? "\n\nThis kernel is not activated. Activate it, by opening Wolfram once and signing in or with `wolframscript -activate` in a terminal, then try again." : "";
-  return new Error(`${message}
+  return new KernelStartFailed(`${message}
 
 Last output from the kernel:
-${tail}${hint}`, { cause: err });
+${tail}${hint}`, err);
 }
-var PACLET_KERNEL_ARGS, LOAD_AGENTTOOLS, KERNEL_ARGS, DeadlineExceeded, HandshakeTimeout, SDK_REQUEST_TIMEOUT_MS, DEFAULT_DEADLINE_MS, RelayClient, REQUEST_TIMEOUT, RequestDropped, SERVER_NOT_FOUND, ServerNotResolved, HANDSHAKE_SDK_GRACE_MS, NOT_ACTIVATED, SHAPING_VARS, KernelSession;
+var PACLET_KERNEL_ARGS, LOAD_AGENTTOOLS, KERNEL_ARGS, DeadlineExceeded, HandshakeTimeout, SDK_REQUEST_TIMEOUT_MS, DEFAULT_DEADLINE_MS, RelayClient, REQUEST_TIMEOUT, RequestDropped, SERVER_NOT_FOUND, ServerNotResolved, HANDSHAKE_SDK_GRACE_MS, NOT_ACTIVATED, SHAPING_VARS, KernelStartFailed, SessionClosed, KernelSession;
 var init_kernel = __esm({
   "dist/kernel.js"() {
     "use strict";
@@ -18807,11 +18814,25 @@ var init_kernel = __esm({
       "WOLFRAM_CLOUDBASE",
       "WOLFRAMINIT"
     ];
+    KernelStartFailed = class extends Error {
+      constructor(message, cause) {
+        super(message, { cause });
+        this.name = "KernelStartFailed";
+      }
+    };
+    SessionClosed = class extends Error {
+      constructor() {
+        super("the kernel session was closed before this call could start a kernel");
+        this.name = "SessionClosed";
+      }
+    };
     KernelSession = class {
       #options;
       #client = null;
       #transport = null;
       #starting = null;
+      /** Set by `close()`: no kernel starts again, unlike after `stop()`. */
+      #closed = false;
       /**
        * A kernel mid-handshake, and how to end that handshake. `#transport` is set
        * only once the handshake succeeds, so `stop()` used to find nothing to close
@@ -18820,6 +18841,15 @@ var init_kernel = __esm({
        */
       #handshaking = null;
       #queue = Promise.resolve();
+      /** Calls handed to `run`, numbered as they queue. */
+      #queued = 0;
+      /**
+       * The last start that failed inside `run`, and the last call queued by then:
+       * those calls share its failure rather than each starting a kernel to fail
+       * again. A burst queued behind a restart that failed started one kernel per
+       * call, back to back, before the owner could give the session up (#20).
+       */
+      #failedStart = null;
       /** Verdict in flight for the last failure, if any. */
       #deciding = null;
       /** Work left running that nobody is waiting for. */
@@ -18939,6 +18969,8 @@ var init_kernel = __esm({
        * before the handshake shortens the handshake rather than adding to it.
        */
       async ensure(startTimeoutMs) {
+        if (this.#closed)
+          throw new SessionClosed();
         if (this.#client)
           return this.#client;
         this.#starting ??= this.#spawn(startTimeoutMs).finally(() => {
@@ -18955,7 +18987,11 @@ var init_kernel = __esm({
        * request before that deadline does.
        */
       async run(fn, options = {}) {
+        const ticket = ++this.#queued;
         const task = this.#queue.then(async () => {
+          const failed = this.#failedStart;
+          if (failed && ticket <= failed.upTo)
+            throw failed.err;
           if (options.signal?.aborted)
             throw new RequestDropped(options.signal.reason);
           this.#clearIdle();
@@ -18967,7 +19003,14 @@ var init_kernel = __esm({
           };
           await this.#reclaim();
           dropIfCancelled();
-          const client = await this.ensure();
+          let client;
+          try {
+            client = await this.ensure();
+          } catch (err) {
+            if (isKernelStartFailed(err))
+              this.#failedStart = { err, upTo: this.#queued };
+            throw err;
+          }
           dropIfCancelled();
           const work = fn(client, requestOptions(options.signal));
           try {
@@ -19141,6 +19184,16 @@ var init_kernel = __esm({
           void this.stop();
         }, timerDelay(idleMs));
         this.#idleTimer.unref?.();
+      }
+      /**
+       * Stop for good: the owner has given this session up. `stop()` alone is what
+       * an idle shutdown does, after which the next call starts a kernel again —
+       * so a call still queued here when its owner stopped it started a kernel
+       * nobody owned. Closed, such a call fails with `SessionClosed` instead.
+       */
+      async close() {
+        this.#closed = true;
+        await this.stop();
       }
       async stop() {
         this.#clearIdle();
@@ -20517,6 +20570,32 @@ var init_doctor = __esm({
 
 // dist/prepare.js
 import { statSync as statSync5 } from "node:fs";
+function preparationBackoff(failure2, repeats = 0) {
+  switch (failure2.kind) {
+    case "unresolved":
+      return { windowMs: SHORT_BACKOFF_MS, advice: NOT_RESOLVED_ADVICE };
+    case "slow": {
+      const where = failure2.began ? `time ran out while ${failure2.stage}, ahead of the kernel's own start` : `too little of the deadline was left to begin ${failure2.stage}, after the stages before it`;
+      if (repeats + 1 >= SLOW_STAGE_ESCALATES_AT) {
+        return {
+          windowMs: PREPARATION_BACKOFF_MS,
+          advice: `${where}, ${repeats + 1} times in a row, so it is not retried soon; meanwhile, raise WOLFRAM_MCP_START_TIMEOUT_SECONDS`
+        };
+      }
+      return {
+        windowMs: SHORT_BACKOFF_MS,
+        advice: `${where}, so the next attempt has a fresh deadline; if this keeps happening, raise WOLFRAM_MCP_START_TIMEOUT_SECONDS`
+      };
+    }
+    case "setting":
+      return {
+        windowMs: PREPARATION_BACKOFF_MS,
+        advice: `WOLFRAM_MCP_START_TIMEOUT_SECONDS allows ${budgetText(failure2.startTimeoutMs)}, less than the ${budgetText(MIN_START_MS)} any kernel start is given, so every start is refused; raise it and restart this server`
+      };
+    case "kernel":
+      return { windowMs: PREPARATION_BACKOFF_MS };
+  }
+}
 function candidateIdentity(bin) {
   try {
     const stat = statSync5(bin);
@@ -20526,9 +20605,11 @@ function candidateIdentity(bin) {
   }
 }
 function sameCandidate(a, b) {
-  return a !== null && b !== null && a.bin === b.bin && a.mtimeMs === b.mtimeMs && a.size === b.size;
+  if (a === null || b === null)
+    return a === b;
+  return a.bin === b.bin && a.mtimeMs === b.mtimeMs && a.size === b.size;
 }
-var PREPARATION_BACKOFF_MS, NOT_RESOLVED_BACKOFF_MS, MIN_START_MS, NOT_RESOLVED_ADVICE, PreparationTimeout, PreparationStopped, Deadline, Backoff;
+var PREPARATION_BACKOFF_MS, SHORT_BACKOFF_MS, KERNEL_START_STAGE, SLOW_STAGE_ESCALATES_AT, MIN_START_MS, NOT_RESOLVED_ADVICE, PreparationTimeout, PreparationStopped, Deadline, Backoff;
 var init_prepare = __esm({
   "dist/prepare.js"() {
     "use strict";
@@ -20536,11 +20617,15 @@ var init_prepare = __esm({
     init_duration();
     init_log();
     PREPARATION_BACKOFF_MS = 10 * 6e4;
-    NOT_RESOLVED_BACKOFF_MS = 15e3;
+    SHORT_BACKOFF_MS = 15e3;
+    KERNEL_START_STAGE = "starting the kernel";
+    SLOW_STAGE_ESCALATES_AT = 3;
     MIN_START_MS = 1e3;
     NOT_RESOLVED_ADVICE = "meanwhile, check the server MCP_SERVER_NAME names: create it, install the paclet that provides it, or repair its definition";
     PreparationTimeout = class extends Error {
       stage;
+      /** False for a stage refused before it began, for lack of time (#10, #22). */
+      began;
       /**
        * `cause` is the work's own failure when one landed as time ran out, kept so
        * a caller can still tell what it was: a server name that did not resolve
@@ -20554,6 +20639,7 @@ var init_prepare = __esm({
         (detail ? `. ${detail}` : ""), cause === void 0 ? void 0 : { cause });
         this.name = "PreparationTimeout";
         this.stage = stage;
+        this.began = began;
       }
     };
     PreparationStopped = class extends Error {
@@ -20739,6 +20825,17 @@ __export(backend_exports, {
   createBackend: () => createBackend,
   deferredBackend: () => deferredBackend
 });
+function preparationFailure(err, startTimeoutMs) {
+  if (isServerNotResolved(err))
+    return { kind: "unresolved" };
+  if (!(err instanceof PreparationTimeout))
+    return { kind: "kernel" };
+  if (startTimeoutMs < MIN_START_MS)
+    return { kind: "setting", startTimeoutMs };
+  if (err.stage === KERNEL_START_STAGE && err.began)
+    return { kind: "kernel" };
+  return { kind: "slow", stage: err.stage, began: err.began };
+}
 function deferredBackend(config2, install, log, overrides = {}) {
   return new DeferredBackend((deadline) => createBackend(config2, install, log, deadline), log, {
     ...overrides,
@@ -20840,8 +20937,8 @@ var init_backend = __esm({
        * configured timeout, so its expiry would be reported as the deadline's.
        */
       async prepare(deadline) {
-        const remainder = deadline.handOn("starting the kernel", MIN_START_MS);
-        await deadline.within("starting the kernel", this.#session.ensure(remainder), void 0, 1e3, (err) => err instanceof Error && err.cause instanceof HandshakeTimeout);
+        const remainder = deadline.handOn(KERNEL_START_STAGE, MIN_START_MS);
+        await deadline.within(KERNEL_START_STAGE, this.#session.ensure(remainder), void 0, 1e3, (err) => err instanceof Error && err.cause instanceof HandshakeTimeout);
       }
       async capabilities() {
         return this.#session.run(async (client) => client.getServerCapabilities() ?? {});
@@ -20886,8 +20983,12 @@ var init_backend = __esm({
           ...options.onprogress ? { onprogress: options.onprogress } : {}
         }), { deadlineMs: options.timeoutMs, signal: options.signal });
       }
+      /**
+       * For good: a backend is stopped only by its owner, giving it up, and a call
+       * still queued on it must not start a kernel afterwards (`KernelSession.close`).
+       */
       async stop() {
-        await this.#session.stop();
+        await this.#session.close();
       }
     };
     DeferredBackend = class {
@@ -20898,6 +20999,13 @@ var init_backend = __esm({
       #bin;
       #clock;
       #backoff;
+      /**
+       * Slow-stage failures in a row, and when the last was: what escalates them
+       * to the full window (#22). Kept here, with the back-off, and not as a side
+       * effect of choosing its window; ended by a gap of the full window, and by a
+       * preparation that succeeds.
+       */
+      #slow = null;
       #resolved = null;
       #resolving = null;
       /**
@@ -20958,24 +21066,63 @@ The failure was: ${waiting.reason}`);
         this.#resolving ??= this.#prepare().then((backend) => {
           this.#resolved = backend;
           this.#resolving = null;
+          this.#slow = null;
           return backend;
         }, (err) => {
           this.#resolving = null;
           if (err instanceof PreparationStopped)
             throw err;
-          const unresolved = isServerNotResolved(err);
-          this.#backoff.record(
-            this.#identity(),
-            err,
-            unresolved ? NOT_RESOLVED_BACKOFF_MS : void 0,
-            // Not the installation: the doctor and an install change point
-            // the user at the wrong thing.
-            unresolved ? NOT_RESOLVED_ADVICE : void 0
-          );
-          this.#log?.(`preparation failed; not retrying for ${waitText(this.#backoffWindow())}: ${errorText(err)}`);
+          this.#recordFailure("preparation", err);
           throw err;
         });
         return this.#resolving;
+      }
+      /**
+       * Back off by what failed (#22): `preparationBackoff` picks the window and the
+       * advice, and a slow stage's run of failures is counted here. A server name
+       * that does not resolve is fixed by creating the server or installing its
+       * paclet, which the back-off cannot see, so the full window held that fix off
+       * for ten minutes (issue #5); a slow stage has a fresh deadline next time.
+       * Neither is the installation, so neither points at doctor.
+       */
+      #recordFailure(what, err) {
+        const failure2 = preparationFailure(err, this.#startTimeoutMs);
+        let repeats = 0;
+        if (failure2.kind === "slow") {
+          const now = this.#clock();
+          const run = this.#slow && now - this.#slow.at < PREPARATION_BACKOFF_MS ? this.#slow : null;
+          repeats = run?.count ?? 0;
+          this.#slow = { count: repeats + 1, at: now };
+        } else {
+          this.#slow = null;
+        }
+        const { windowMs, advice } = preparationBackoff(failure2, repeats);
+        this.#backoff.record(this.#identity(), err, windowMs, advice);
+        this.#log?.(`${what} failed; not retrying for ${waitText(this.#backoffWindow())}: ${errorText(err)}`);
+      }
+      /**
+       * A call on the chosen backend, whose failure to start a kernel is a failed
+       * preparation too. A private session's kernel restarts after an idle shutdown
+       * inside its next call, outside any preparation, so that start's failure — a
+       * paclet uninstalled, a server file removed meanwhile — recorded nothing, and
+       * every later call restarted it to fail the same way (#20). Recorded, and the
+       * backend given up, the next call meets the back-off, and after it a fresh
+       * preparation. A broker's start failures arrive as text and are its pool's.
+       */
+      async #use(fn) {
+        const backend = await this.#get();
+        try {
+          return await fn(backend);
+        } catch (err) {
+          if (backend === this.#resolved && isKernelStartFailed(err)) {
+            this.#recordFailure("restarting the kernel", err);
+            this.#resolved = null;
+            this.#retire(backend);
+          } else if (backend !== this.#resolved && (err instanceof SessionClosed || isKernelStartFailed(err))) {
+            return this.#use(fn);
+          }
+          throw err;
+        }
       }
       #backoffWindow() {
         return this.#backoff.current(this.#identity())?.remainingMs ?? 0;
@@ -21036,25 +21183,25 @@ The failure was: ${waiting.reason}`);
         this.#resolved?.onKernelReady(handler);
       }
       async capabilities() {
-        return (await this.#get()).capabilities();
+        return this.#use((backend) => backend.capabilities());
       }
       async listTools(cursor) {
-        return (await this.#get()).listTools(cursor);
+        return this.#use((backend) => backend.listTools(cursor));
       }
       async listPrompts(cursor) {
-        return (await this.#get()).listPrompts(cursor);
+        return this.#use((backend) => backend.listPrompts(cursor));
       }
       async getPrompt(params, options) {
-        return (await this.#get()).getPrompt(params, options);
+        return this.#use((backend) => backend.getPrompt(params, options));
       }
       async listResources(params) {
-        return (await this.#get()).listResources(params);
+        return this.#use((backend) => backend.listResources(params));
       }
       async readResource(params, options) {
-        return (await this.#get()).readResource(params, options);
+        return this.#use((backend) => backend.readResource(params, options));
       }
       async callTool(params, options) {
-        return (await this.#get()).callTool(params, options);
+        return this.#use((backend) => backend.callTool(params, options));
       }
       async stop() {
         this.#stopped = true;
@@ -21179,6 +21326,23 @@ function frameReader(onFrame) {
     size = buf.length;
   };
 }
+function endAfterExit(child) {
+  child.stdin?.end();
+  const gone = () => child.exitCode !== null || child.signalCode !== null;
+  const stop = setTimeout(() => {
+    if (gone())
+      return;
+    process.stderr.write(`[wolfram-lsp] the kernel did not end within ${EXIT_GRACE_MS / 1e3}s of exit; stopping it
+`);
+    child.kill("SIGTERM");
+    const kill = setTimeout(() => {
+      if (!gone())
+        child.kill("SIGKILL");
+    }, EXIT_GRACE_MS);
+    kill.unref();
+  }, EXIT_GRACE_MS);
+  stop.unref();
+}
 function guardUnadvertised(child) {
   let capabilities = null;
   let initializeId;
@@ -21222,6 +21386,8 @@ ${body}`);
       return;
     }
     child.stdin?.write(frame);
+    if (msg.method === "exit" && msg.id === void 0)
+      endAfterExit(child);
   }));
   process.stdin.on("end", () => child.stdin?.end());
   child.stdout?.on("data", frameReader((frame, body) => {
@@ -21320,7 +21486,7 @@ ${body}`);
   }));
   process.stdin.on("end", () => process.exit(0));
 }
-var ON, OFF, REQUEST_CAPABILITY;
+var ON, OFF, REQUEST_CAPABILITY, EXIT_GRACE_MS;
 var init_lsp = __esm({
   "dist/lsp.js"() {
     "use strict";
@@ -21376,6 +21542,7 @@ var init_lsp = __esm({
       "workspaceSymbol/resolve": ["workspaceSymbolProvider", "resolveProvider"],
       "workspace/executeCommand": ["executeCommandProvider"]
     };
+    EXIT_GRACE_MS = 5e3;
   }
 });
 
@@ -21392,11 +21559,12 @@ function deriveBudget(licence, reserveSeats, explicitMax, current) {
 function clampBudget(value) {
   return Math.max(1, Math.min(Math.floor(value), HARD_KERNEL_CAP));
 }
-var LICENCE_SHAPING, HARD_KERNEL_CAP, UNLIMITED_BUDGET, KernelPool;
+var LICENCE_SHAPING, HARD_KERNEL_CAP, UNLIMITED_BUDGET, HELD_RECHECK_MS, KernelPool;
 var init_pool = __esm({
   "dist/pool.js"() {
     "use strict";
     init_kernel();
+    init_config();
     init_inspect();
     init_log();
     init_duration();
@@ -21404,6 +21572,7 @@ var init_pool = __esm({
     LICENCE_SHAPING = /* @__PURE__ */ new Set(["WOLFRAM_BASE", "WOLFRAM_USERBASE"]);
     HARD_KERNEL_CAP = 8;
     UNLIMITED_BUDGET = 4;
+    HELD_RECHECK_MS = 1e3;
     KernelPool = class {
       #options;
       #slots = [];
@@ -21412,16 +21581,28 @@ var init_pool = __esm({
       #licence;
       #extraEnv;
       /**
-       * The last time each flavour's server name did not resolve, and the kernel's
-       * words for it. A session's preparation only attaches to the broker, so this
-       * failure never reached a back-off: each request grew a kernel to fail, in
-       * parallel for simultaneous ones, and at the budget `#swapOut` retired other
+       * Each flavour's last failed kernel start, backed off by what failed, as a
+       * private session's preparation is (`preparationBackoff`). A session's
+       * preparation only attaches to the broker, so a start failing in the pool
+       * never reached a back-off: each request grew a kernel to fail, in parallel
+       * for simultaneous ones, and at the budget the swap tier retired other
        * sessions' idle kernels to make room for a start that could not succeed
-       * (issue #19). Keyed on the flavour, so sharing it changes no answer: a
-       * session of the same flavour would get the same one from a kernel. A burst
-       * that arrives before the first failure is recorded is not covered: #19.
+       * (#19). That was answered for a server name that did not resolve; any other
+       * failed start — a kernel that died on launch, a handshake that timed out —
+       * was still an ordinary call failure, retried by the next request (#20).
+       * Keyed on the flavour, so sharing it changes no answer: a session of the
+       * same flavour would get the same one from a kernel. A burst that arrives
+       * before the first failure is recorded is not covered: #19.
        */
-      #unresolved = /* @__PURE__ */ new Map();
+      #failed = /* @__PURE__ */ new Map();
+      /** Flavours whose kernel started since their last failed start (#19). */
+      #proven = /* @__PURE__ */ new Set();
+      /** Requests held on their own flavour, apart from the FIFO queue (#19, #115). */
+      #held = /* @__PURE__ */ new Map();
+      /** Requests numbered as they come to wait, held or queued. */
+      #arrivals = 0;
+      /** A second look for a flavour's held requests when its window ends. */
+      #windowTimers = /* @__PURE__ */ new Map();
       constructor(options) {
         this.#options = options;
         this.#licence = options.licence;
@@ -21489,7 +21670,7 @@ var init_pool = __esm({
           return;
         this.#options.log(`pool budget ${this.#budget} \u2192 ${next} kernel(s), from the licence a kernel reported (${facts.maxLicenseProcesses}, reserving ${this.#options.reserveSeats})`);
         this.#budget = next;
-        this.#drainWaiters();
+        this.#schedule();
       }
       async #grow(flavour) {
         const index = this.#slots.length + 1;
@@ -21505,6 +21686,8 @@ var init_pool = __esm({
           log: (message) => log(`kernel ${index}: ${message}`),
           onFacts: (facts, chosen) => this.#learn(facts, chosen),
           onReady: async (client) => {
+            this.#proven.add(flavour.digest);
+            this.#schedule();
             await this.#options.onKernelReady?.(client, flavour.digest);
           }
         });
@@ -21514,7 +21697,7 @@ var init_pool = __esm({
         return slot;
       }
       /**
-       * Free a seat by dropping an idle kernel of some other flavour.
+       * The kernel to drop to free a seat: an idle one of some other flavour.
        *
        * The budget counts seats, not kinds, so a session whose flavour has no kernel
        * cannot simply grow one once the budget is spent — something has to go. An
@@ -21527,13 +21710,8 @@ var init_pool = __esm({
        * nobody is waiting for, and taking it stops that; a genuinely idle one is not
        * doing anything at all.
        */
-      #swapOut(flavour) {
-        const victim = this.#slots.find((s) => !s.busy && !s.session.abandoned && s.flavour.digest !== flavour.digest) ?? this.#slots.find((s) => !s.busy && s.flavour.digest !== flavour.digest);
-        if (!victim)
-          return false;
-        this.#options.log(`budget reached and no kernel for environment ${flavour.digest}; retiring an idle kernel for ${victim.flavour.digest} to make room`);
-        this.#retire(victim, "a session with a different environment needed the seat");
-        return true;
+      #victim(flavour) {
+        return this.#slots.find((s) => !s.busy && !s.session.abandoned && s.flavour.digest !== flavour.digest) ?? this.#slots.find((s) => !s.busy && s.flavour.digest !== flavour.digest);
       }
       /**
        * A slot that can take a request of this flavour now. While the flavour's
@@ -21566,42 +21744,168 @@ var init_pool = __esm({
        * session from a kernel that is not its own kind. While the flavour's server
        * would not start, only the first applies, to running kernels only, and a
        * request it cannot serve is refused before any other (#101).
+       *
+       * The one place the tiers are written down: `#acquire` and the waiter drain
+       * each wrote them out by hand, so a change to when a tier applies had to be
+       * made twice, and #113's first head missed the same case in both (#114). It
+       * decides and changes nothing; `#act` carries the decision out.
        */
-      async #acquire(flavour, signal) {
+      #plan(flavour) {
         const window = this.#window(flavour.digest);
         const free = this.#slots.find((s) => this.#servable(s, flavour, window !== null));
-        if (free) {
-          free.busy = true;
-          return free;
-        }
+        if (free)
+          return { tier: "take", slot: free };
         if (window)
-          throw this.#refusal(window);
+          return this.#ownBusy(flavour) ? { tier: "hold" } : { tier: "refuse", window };
         if (this.#slots.length < this.#budget)
-          return this.#grow(flavour);
-        if (this.#swapOut(flavour))
-          return this.#grow(flavour);
-        const spent = this.#idle(flavour);
-        if (spent) {
-          this.#options.log(`budget reached; reusing a kernel that holds an abandoned call, which stops it \u2014 no other kernel can serve this request`);
-          spent.busy = true;
-          return spent;
+          return { tier: "grow" };
+        const victim = this.#victim(flavour);
+        if (victim) {
+          if (!this.#isProven(flavour) && this.#starting(flavour))
+            return { tier: "hold" };
+          return { tier: "swap", victim };
         }
-        this.#options.log(`all ${this.#slots.length} kernel(s) busy and budget reached; queueing (${this.#waiters.length + 1} waiting)`);
+        const spent = this.#idle(flavour);
+        if (spent)
+          return { tier: "reuse", slot: spent };
+        return { tier: "wait" };
+      }
+      /**
+       * A kernel of this flavour busy with a live call, or starting: either ends
+       * in a release or a retirement, which wakes whoever is held for it. Never one
+       * holding an abandoned call, whose settling wakes nobody: held behind one, a
+       * request waited out its own ceiling (#115).
+       */
+      #ownBusy(flavour) {
+        return this.#slots.some((s) => s.busy && !s.session.abandoned && s.flavour.digest === flavour.digest);
+      }
+      /** A kernel of this flavour whose start is under way. */
+      #starting(flavour) {
+        return this.#slots.some((s) => s.busy && !s.session.running && s.flavour.digest === flavour.digest);
+      }
+      /**
+       * Whether this flavour has shown it can start: a kernel of it started since
+       * its last failed start, or one is running — so one failed extra start, while
+       * a kernel of it runs, does not make its next request wait (#19).
+       */
+      #isProven(flavour) {
+        return this.#proven.has(flavour.digest) || this.#slots.some((s) => s.session.running && s.flavour.digest === flavour.digest);
+      }
+      /** Carry out any decision of `#plan`'s but waiting or holding, which are the caller's. */
+      #act(plan, flavour) {
+        switch (plan.tier) {
+          case "take":
+            plan.slot.busy = true;
+            return plan.slot;
+          case "refuse":
+            throw this.#refusal(plan.window);
+          case "grow":
+            return this.#grow(flavour);
+          case "swap": {
+            this.#options.log(`budget reached and no kernel for environment ${flavour.digest}; retiring an idle kernel for ${plan.victim.flavour.digest} to make room`);
+            this.#retire(plan.victim, "a session with a different environment needed the seat", false);
+            const replacement = this.#grow(flavour);
+            this.#schedule();
+            return replacement;
+          }
+          case "reuse":
+            this.#options.log(`budget reached; reusing a kernel that holds an abandoned call, which stops it \u2014 no other kernel can serve this request`);
+            plan.slot.busy = true;
+            return plan.slot;
+        }
+      }
+      async #acquire(flavour, signal) {
+        const plan = this.#plan(flavour);
+        if (plan.tier === "hold") {
+          this.#options.log(`holding a request for environment ${flavour.digest} for its own kernel`);
+        } else if (plan.tier === "wait") {
+          this.#options.log(`all ${this.#slots.length} kernel(s) busy and budget reached; queueing (${this.#waiters.length + 1} waiting)`);
+        } else {
+          return this.#act(plan, flavour);
+        }
         return new Promise((resolve, reject) => {
-          const waiter = { flavour, resolve, reject };
-          this.#waiters.push(waiter);
+          const waiter = { flavour, resolve, reject, seq: ++this.#arrivals };
+          if (plan.tier === "hold")
+            this.#hold(waiter);
+          else
+            this.#queue(waiter);
           signal?.addEventListener("abort", () => {
-            const at = this.#waiters.indexOf(waiter);
-            if (at === -1)
+            if (!this.#unqueue(waiter))
               return;
-            this.#waiters.splice(at, 1);
             reject(new RequestDropped(signal.reason));
           }, { once: true });
         });
       }
+      /**
+       * Hold a request on its own flavour, apart from the FIFO queue, so it blocks
+       * no other flavour's waiter (#115). It is planned again when a kernel of its
+       * flavour is released or retired, or proves it can start, and when the
+       * flavour's window ends, which no release may bring: a timer gives it that
+       * second look. The window also ends early when the kernel binary changes —
+       * a repaired installation — which nothing announces, so inside a window the
+       * timer looks every `HELD_RECHECK_MS` rather than only at its end: a request
+       * held behind a long call otherwise waited out the old window, minutes
+       * after newer requests were already starting kernels.
+       */
+      #hold(waiter) {
+        const { digest } = waiter.flavour;
+        const held = this.#held.get(digest) ?? [];
+        held.push(waiter);
+        this.#held.set(digest, held);
+        this.#recheck(digest);
+      }
+      /**
+       * The timed look for a flavour's held requests while its window stands, armed
+       * again after each look for as long as any stay held inside it. Armed once
+       * only, a request still held at the first look — a window with more than a
+       * second left — was never looked at again, and stayed held past the window's
+       * end, or a repaired binary, until something unrelated woke the pool.
+       */
+      #recheck(digest) {
+        if (this.#windowTimers.has(digest) || !this.#held.get(digest)?.length)
+          return;
+        const window = this.#window(digest);
+        if (!window)
+          return;
+        const timer = setTimeout(() => {
+          this.#windowTimers.delete(digest);
+          this.#schedule();
+        }, timerDelay(Math.min(window.remainingMs + 1, HELD_RECHECK_MS)));
+        timer.unref?.();
+        this.#windowTimers.set(digest, timer);
+      }
+      /**
+       * Into the queue by when it came, not at its tail: a held request that comes
+       * to need a seat — its window over, every kernel busy — was owed one before
+       * whoever queued while it was held. Appended, it fell behind them, and one of
+       * them could even retire the very kernel it had been waiting for (#147's
+       * review). A new request is the latest, so this is its tail.
+       */
+      #queue(waiter) {
+        const at = this.#waiters.findIndex((queued) => queued.seq > waiter.seq);
+        if (at === -1)
+          this.#waiters.push(waiter);
+        else
+          this.#waiters.splice(at, 0, waiter);
+      }
+      /** Take a waiter out of wherever it waits; false when it has been served. */
+      #unqueue(waiter) {
+        const at = this.#waiters.indexOf(waiter);
+        if (at !== -1) {
+          this.#waiters.splice(at, 1);
+          return true;
+        }
+        const held = this.#held.get(waiter.flavour.digest);
+        const there = held?.indexOf(waiter) ?? -1;
+        if (held && there !== -1) {
+          held.splice(there, 1);
+          return true;
+        }
+        return false;
+      }
       #release(slot) {
         slot.busy = false;
-        this.#drainWaiters();
+        this.#schedule();
       }
       /**
        * Hold a kernel out of circulation until it has been vouched for.
@@ -21645,74 +21949,94 @@ var init_pool = __esm({
           () => this.#retire(slot, reason)
         );
       }
-      /**
-       * Drop a kernel that could not answer for itself, or whose seat is needed.
-       *
-       * `#draining` guards the waiter drain because `#swapOut` retires from inside
-       * `#drainWaiters`: without it the drain re-enters itself, and the head waiter
-       * it is part-way through serving is handed a slot twice.
-       */
-      #retire(slot, reason) {
+      /** Drop a kernel that could not answer for itself, or whose seat is needed. */
+      #retire(slot, reason, reschedule = true) {
         const at = this.#slots.indexOf(slot);
         if (at !== -1)
           this.#slots.splice(at, 1);
         this.#options.log(`retiring kernel after ${reason}; pool now ${this.#slots.length} kernel(s)`);
         void slot.session.stop().catch(() => {
         });
-        if (!this.#draining)
-          this.#drainWaiters();
+        if (reschedule)
+          this.#schedule();
       }
-      #draining = false;
-      #drainWaiters() {
-        if (this.#draining)
+      #scheduling = false;
+      #rescheduled = false;
+      /**
+       * Serve every waiting request that can be served now, one at a time, oldest
+       * first, queued or held, planning everything again after each. Called on
+       * anything that frees capacity or changes a plan: a release, a retirement, a
+       * raised budget, a start that succeeds, a window's end.
+       *
+       * One scheduler, because the pool had one per event — wake the held, drain
+       * the queue — and each ordered whole groups: a flavour's held requests before
+       * or after the queue. A release or a retirement handed a seat to a newer held
+       * request over an older queued one, a raised budget gave the queue its seats
+       * first, and where several seats came at once a flavour's held requests took
+       * them all ahead of a queued request older than some of them (#147's review).
+       * Re-entered from inside — a swap retires a kernel — it only notes that it
+       * must look again.
+       */
+      #schedule() {
+        if (this.#scheduling) {
+          this.#rescheduled = true;
           return;
-        this.#draining = true;
+        }
+        this.#scheduling = true;
         try {
-          this.#drain();
+          do {
+            this.#rescheduled = false;
+            while (this.#serveOldest())
+              ;
+          } while (this.#rescheduled);
         } finally {
-          this.#draining = false;
+          this.#scheduling = false;
         }
+        for (const digest of this.#held.keys())
+          this.#recheck(digest);
       }
-      #drain() {
-        while (this.#waiters.length > 0) {
-          const head = this.#waiters[0];
-          if (!head)
-            return;
-          const { flavour } = head;
-          const take = (slot) => {
-            this.#waiters.shift();
-            slot.busy = true;
-            head.resolve(slot);
-          };
-          const window = this.#window(flavour.digest);
-          const fresh = this.#slots.find((s) => this.#servable(s, flavour, window !== null));
-          if (fresh) {
-            take(fresh);
-            continue;
+      /**
+       * Serve the oldest waiting request that can be served now; false when none
+       * can. The queue keeps its strict order — only its head is a candidate, so
+       * a stream of one flavour cannot starve another — while held requests each
+       * wait on their own flavour. Once the head must wait there is no seat, so
+       * a younger request may still be refused or held, but takes nothing.
+       */
+      #serveOldest() {
+        const head = this.#waiters[0];
+        const held = [...this.#held.values()].flat();
+        const candidates = (head ? [head, ...held] : held).sort((a, b) => a.seq - b.seq);
+        let noSeat = false;
+        for (const waiter of candidates) {
+          const plan = this.#plan(waiter.flavour);
+          const queued = waiter === head;
+          if (plan.tier === "wait") {
+            if (queued) {
+              noSeat = true;
+              continue;
+            }
+            this.#unqueue(waiter);
+            this.#queue(waiter);
+            return true;
           }
-          if (window) {
-            this.#waiters.shift();
-            head.reject(this.#refusal(window));
-            continue;
+          if (plan.tier === "hold") {
+            if (!queued)
+              continue;
+            this.#unqueue(waiter);
+            this.#hold(waiter);
+            return true;
           }
-          if (this.#slots.length < this.#budget) {
-            this.#waiters.shift();
-            void this.#grow(flavour).then(head.resolve);
+          if (noSeat && plan.tier !== "refuse")
             continue;
+          this.#unqueue(waiter);
+          try {
+            waiter.resolve(this.#act(plan, waiter.flavour));
+          } catch (err) {
+            waiter.reject(err);
           }
-          if (this.#swapOut(flavour)) {
-            this.#waiters.shift();
-            void this.#grow(flavour).then(head.resolve);
-            continue;
-          }
-          const spent = this.#idle(flavour);
-          if (spent) {
-            this.#options.log(`budget reached; a waiter is reusing a kernel that holds an abandoned call, which stops it`);
-            take(spent);
-            continue;
-          }
-          return;
+          return true;
         }
+        return false;
       }
       /**
        * Run `fn` on a kernel of this flavour, holding it for the duration.
@@ -21734,8 +22058,8 @@ var init_pool = __esm({
             this.#release(slot);
             throw err;
           }
-          if (isServerNotResolved(err))
-            this.#recordUnresolved(flavour.digest, err);
+          if (isKernelStartFailed(err))
+            this.#recordFailedStart(flavour.digest, err);
           this.#quarantine(slot, errorText(err));
           throw err;
         }
@@ -21743,13 +22067,22 @@ var init_pool = __esm({
       #now() {
         return (this.#options.clock ?? Date.now)();
       }
-      #recordUnresolved(digest, err) {
-        const now = this.#now();
-        for (const [key, known] of this.#unresolved) {
-          if (now - known.at >= NOT_RESOLVED_BACKOFF_MS)
-            this.#unresolved.delete(key);
+      /** What makes two starts starts of the same installation: a changed binary ends a window. */
+      #identity() {
+        return candidateIdentity(this.#options.bin);
+      }
+      #recordFailedStart(digest, err) {
+        const identity = this.#identity();
+        for (const [key, failed] of this.#failed) {
+          if (!failed.backoff.current(identity))
+            this.#failed.delete(key);
         }
-        this.#unresolved.set(digest, { at: now, reason: errorText(err) });
+        const unresolved = isServerNotResolved(err);
+        const { windowMs, advice } = preparationBackoff(unresolved ? { kind: "unresolved" } : { kind: "kernel" });
+        const backoff = new Backoff(PREPARATION_BACKOFF_MS, () => this.#now());
+        backoff.record(identity, err, windowMs, advice);
+        this.#failed.set(digest, { backoff, unresolved });
+        this.#proven.delete(digest);
       }
       /**
        * A flavour's window, while it stands: how long it has run, how much longer
@@ -21757,15 +22090,21 @@ var init_pool = __esm({
        * refusal and what `status` reports of it cannot disagree at the edge.
        */
       #window(digest) {
-        const known = this.#unresolved.get(digest);
-        if (!known)
+        const failed = this.#failed.get(digest);
+        if (!failed)
           return null;
-        const ageMs = this.#now() - known.at;
-        if (ageMs >= NOT_RESOLVED_BACKOFF_MS) {
-          this.#unresolved.delete(digest);
+        const state = failed.backoff.current(this.#identity());
+        if (!state) {
+          this.#failed.delete(digest);
           return null;
         }
-        return { ageMs, remainingMs: NOT_RESOLVED_BACKOFF_MS - ageMs, reason: known.reason };
+        return {
+          ageMs: this.#now() - state.failedAt,
+          remainingMs: state.remainingMs,
+          reason: state.reason,
+          advice: state.advice,
+          unresolved: failed.unresolved
+        };
       }
       /**
        * Whether this pool is refusing to start a kernel for a flavour, how much
@@ -21779,16 +22118,22 @@ var init_pool = __esm({
         return window && { remainingMs: window.remainingMs, reason: window.reason };
       }
       /**
-       * The refusal for a request while its flavour's server recently would not
+       * The refusal for a request while its flavour's kernel recently would not
        * start. Built only where it is thrown: a request inside the window that a
-       * running kernel serves needs no error.
+       * running kernel serves needs no error. No doctor command for the
+       * installation's failures: this runs in the broker, whose launch context is
+       * not the caller's, so it could name the wrong one.
        */
       #refusal(window) {
-        return new ServerNotResolved(`a kernel for this server could not start it ${elapsedText(window.ageMs)} ago, so none was started for this request; it is tried again in ${waitText(window.remainingMs)}; ${NOT_RESOLVED_ADVICE}.
+        const message = `a kernel for this server could not start ${elapsedText(window.ageMs)} ago, so none was started for this request; it is tried again in ${waitText(window.remainingMs)}` + (window.advice ? `; ${window.advice}.` : `, or as soon as the installation changes.`) + `
 
-The failure was: ${window.reason}`);
+The failure was: ${window.reason}`;
+        return window.unresolved ? new ServerNotResolved(message) : new Error(message);
       }
       async stop() {
+        for (const timer of this.#windowTimers.values())
+          clearTimeout(timer);
+        this.#windowTimers.clear();
         await Promise.all(this.#slots.map((s) => s.session.stop().catch(() => {
         })));
         this.#slots.length = 0;
