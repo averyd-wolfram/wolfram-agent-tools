@@ -29,7 +29,7 @@ import {
   SOCKET_MODE,
 } from "./broker-protocol.js";
 import { settingValue, type KernelFlavour } from "./flavour.js";
-import { drainPages, listAllTools } from "./kernel.js";
+import { drainPages, listAllTools, requestOptions } from "./kernel.js";
 import { errorText, type Logger } from "./log.js";
 
 /** How long to linger with no connections before exiting. */
@@ -296,7 +296,9 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
     try {
       const capabilities = client.getServerCapabilities() ?? {};
       // Whole lists, so a broadcast carries every page, not page one.
-      const tools = await listAllTools(client);
+      // This server's request options, as `pool.run` gives every other request:
+      // with the SDK's own, a slow list was cancelled at 60 s (#70).
+      const tools = await listAllTools(client, requestOptions());
       // Read apart from the tools, so a failure costs the prompts alone. Read
       // together, any failure of prompts/list lost the whole broadcast, and a
       // cold machine's cache stayed cold until the next kernel start (#122).
@@ -306,7 +308,10 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
       if (capabilities.prompts) {
         try {
           prompts = await drainPages<Prompt>(async (cursor) => {
-            const page = await client.listPrompts(cursor ? { cursor } : undefined);
+            const page = await client.listPrompts(
+              cursor ? { cursor } : undefined,
+              requestOptions(),
+            );
             return { items: page.prompts ?? [], nextCursor: page.nextCursor };
           });
         } catch (err) {

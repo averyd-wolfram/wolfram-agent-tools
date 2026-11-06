@@ -51,6 +51,8 @@
  * FAKE_PROMPT_DELAY_MS  the same for prompts/get, which a real kernel evaluates
  *                     as it does a call: the paclet's prompts run its searches
  * FAKE_RESOURCE_DELAY_MS  the same for resources/read
+ * FAKE_LIST_DELAY_MS  delay before answering tools/list, a list the paclet builds
+ *                     slowly: read after a kernel's start, it got the SDK's 60 s
  * FAKE_DELAY_FIRST_ONLY  apply that delay to the first call only, so a session
  *                     can have one call that outlives the server's ceiling and
  *                     then carry on normally — the shape of a real long build
@@ -454,7 +456,9 @@ function run() {
         });
         return;
       }
-      send({ jsonrpc: "2.0", id: msg.id, result: { tools } });
+      const listDelay = Number(process.env.FAKE_LIST_DELAY_MS ?? "0");
+      if (listDelay > 0) setTimeout(() => send({ jsonrpc: "2.0", id: msg.id, result: { tools } }), listDelay);
+      else send({ jsonrpc: "2.0", id: msg.id, result: { tools } });
       return;
     }
     if (msg.method === "prompts/list") {

@@ -920,6 +920,29 @@ heading("A kernel reports its installation as it starts");
   check("a kernel's facts arrive as it starts", facts?.version === "15.1.0", `version=${facts?.version}`);
   check("the licence seat count is a number", facts?.maxLicenseProcesses === 4, `${facts?.maxLicenseProcesses}`);
   check("the paclet version comes back", facts?.agentTools === "2.2.7", `${facts?.agentTools}`);
+  // The ready hook's failures are logged and ignored, as its option promises,
+  // including one that throws as it is called rather than rejecting.
+  {
+    const saidOnReady = [];
+    const throwing = new lib.KernelSession({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 0,
+      startTimeoutMs: 10_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: (m) => saidOnReady.push(m),
+      onReady: () => {
+        throw new Error("thrown as it was called");
+      },
+    });
+    const outcome = await throwing.run((c) => c.listTools()).then(() => "started", (e) => e.message);
+    await throwing.stop();
+    check(
+      "a ready hook that throws as it is called is logged, and the kernel still serves",
+      outcome === "started" && saidOnReady.some((m) => /post-start refresh failed.*thrown as it was called/.test(m)),
+      outcome,
+    );
+  }
   // The facts asked $CloudConnected, which signs a kernel in from the credential
   // store, so a kernel that crashes on that access crashed on every start: the
   // macOS 15.0 kernel under a HOME with no Library/Keychains does (#130).
@@ -7386,6 +7409,27 @@ heading("A call, a prompt or a resource read longer than a minute is answered, o
       ops.map(async (op) => ({ path, op, s: await connect(path === "shared" ? shared : slow) })),
     ),
   );
+  // And the lists read after a kernel starts, which bypassed the request
+  // options the rest are given: the SDK's own minute cancelled a list the
+  // kernel was still building, forgetting it, and the call that started the
+  // kernel queued behind it (#70). Side by side with the rest, so the suite
+  // still waits the minute once, but on a broker of its own: a broker's kernels
+  // inherit the environment of the session that spawned it, here slow calls.
+  const listRuntime = join(home, "run-list-delay");
+  privateDir(listRuntime);
+  const listRuns = paths.map(async (path) => {
+    const log = join(home, `list-delay-${path}.log`);
+    const s = await connect({
+      WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "120",
+      FAKE_LIST_DELAY_MS: "65000",
+      FAKE_METHOD_LOG: log,
+      ...(path === "shared" ? { WOLFRAM_MCP_SHARE: "1", XDG_RUNTIME_DIR: listRuntime } : {}),
+    });
+    const result = await s.client
+      .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, patient)
+      .catch((err) => ({ error: err }));
+    return { path, s, log, result };
+  });
   const outcomes = await Promise.all(
     sessions.map(async ({ path, op, s }) => {
       const started = Date.now();
@@ -7393,6 +7437,16 @@ heading("A call, a prompt or a resource read longer than a minute is answered, o
       return { path, op, s, result, elapsed: Date.now() - started };
     }),
   );
+  for (const { path, s, log, result } of await Promise.all(listRuns)) {
+    const methods = existsSync(log) ? readFileSync(log, "utf8") : "";
+    check(
+      `a ${path} kernel's list read after its start is not cancelled at the SDK's minute`,
+      !result.error && answeredByFake(result) && /tools\/list/.test(methods) && !/notifications\/cancelled/.test(methods),
+      `${result.error ? result.error.message.slice(0, 60) : (result.content?.[0]?.text ?? "").slice(0, 60)}; ` +
+        `${(methods.match(/notifications\/cancelled/g) ?? []).length} cancellation(s) sent to the kernel`,
+    );
+    await s.client.close();
+  }
   for (const { path, op, result, elapsed } of outcomes) {
     check(
       `a ${path === "shared" ? "shared" : "private"} kernel answers a 65 s ${op.what} under a 120 s ceiling`,
@@ -7414,6 +7468,7 @@ heading("A call, a prompt or a resource read longer than a minute is answered, o
   }
   await Promise.all(sessions.map(({ s }) => s.client.close()));
   signalOwnBrokers("SIGTERM", runtime);
+  signalOwnBrokers("SIGTERM", listRuntime);
   await new Promise((r) => setTimeout(r, 300));
 }
 

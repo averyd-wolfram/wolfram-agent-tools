@@ -130,7 +130,7 @@ export const DEFAULT_DEADLINE_MS = 60_000;
  * only the two tool-call sites gave the timeout that cannot fire first, and
  * `prompts/get` and `resources/read` were still cut at the SDK's minute (#39).
  */
-function requestOptions(signal: AbortSignal | undefined): RequestOptions {
+export function requestOptions(signal?: AbortSignal): RequestOptions {
   return { timeout: SDK_REQUEST_TIMEOUT_MS, ...(signal ? { signal } : {}) };
 }
 
@@ -710,10 +710,31 @@ export class KernelSession {
     );
 
     if (this.#options.onReady) {
-      try {
-        await this.#options.onReady(client);
-      } catch (err) {
-        log(`post-start refresh failed, continuing: ${errorText(err)}`);
+      // Waited for as long as a request's own deadline, and never cut. Its
+      // reads went through the SDK's own 60 s, which cancels a request and
+      // forgets it, so the kernel went on working out of sight and the call
+      // that started it queued behind that with nothing to say why (#70). Now
+      // they carry `requestOptions` like every other request, and past the
+      // deadline this stops waiting but leaves them outstanding: a late reply
+      // still refreshes the lists.
+      // Called inside an async function, so a hook that throws as it is called,
+      // not only one that rejects, is logged and ignored as the option promises.
+      const onReady = this.#options.onReady;
+      const refresh = (async () => onReady(client))().catch((err: unknown) =>
+        log(`post-start refresh failed, continuing: ${errorText(err)}`),
+      );
+      let timer: NodeJS.Timeout | undefined;
+      const late = new Promise<"late">((resolve) => {
+        timer = setTimeout(() => resolve("late"), timerDelay(DEFAULT_DEADLINE_MS));
+        timer.unref?.();
+      });
+      const outcome = await Promise.race([refresh, late]);
+      clearTimeout(timer);
+      if (outcome === "late") {
+        log(
+          `post-start refresh not answered within ${budgetText(DEFAULT_DEADLINE_MS)}; ` +
+            `continuing, and taking its answer when it comes`,
+        );
       }
     }
 

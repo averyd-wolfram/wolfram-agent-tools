@@ -51,6 +51,7 @@ import {
   isServerNotResolved,
   KernelSession,
   listAllTools,
+  requestOptions,
   SessionClosed,
 } from "./kernel.js";
 import { elapsedText, waitText } from "./duration.js";
@@ -198,8 +199,12 @@ export class LocalBackend implements KernelBackend {
         // The raw client, deliberately: this runs inside the queue.
         await this.#onReady?.({
           capabilities: async () => client.getServerCapabilities() ?? {},
-          listTools: (cursor) => client.listTools(cursor ? { cursor } : undefined),
-          listPrompts: (cursor) => client.listPrompts(cursor ? { cursor } : undefined),
+          // This server's request options, as `run` gives every other request:
+          // with the SDK's own, a slow list was cancelled at 60 s (#70).
+          listTools: (cursor) =>
+            client.listTools(cursor ? { cursor } : undefined, requestOptions()),
+          listPrompts: (cursor) =>
+            client.listPrompts(cursor ? { cursor } : undefined, requestOptions()),
         });
       },
     });
