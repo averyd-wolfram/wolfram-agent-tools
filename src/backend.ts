@@ -51,7 +51,9 @@ import {
   isServerNotResolved,
   KernelSession,
   listAllTools,
+  requestOptions,
   SessionClosed,
+  stopIfLate,
 } from "./kernel.js";
 import { elapsedText, waitText } from "./duration.js";
 import type { KernelInstall } from "./locate.js";
@@ -194,12 +196,21 @@ export class LocalBackend implements KernelBackend {
   }) {
     this.#session = new KernelSession({
       ...options,
-      onReady: async (client: Client) => {
+      onReady: async (client: Client, late?: AbortSignal) => {
         // The raw client, deliberately: this runs inside the queue.
         await this.#onReady?.({
           capabilities: async () => client.getServerCapabilities() ?? {},
-          listTools: (cursor) => client.listTools(cursor ? { cursor } : undefined),
-          listPrompts: (cursor) => client.listPrompts(cursor ? { cursor } : undefined),
+          // This server's request options, as `run` gives every other request:
+          // with the SDK's own, a slow list was cancelled at 60 s (#70). And
+          // nothing new once the start has stopped waiting for this.
+          listTools: async (cursor) => {
+            stopIfLate(late);
+            return client.listTools(cursor ? { cursor } : undefined, requestOptions());
+          },
+          listPrompts: async (cursor) => {
+            stopIfLate(late);
+            return client.listPrompts(cursor ? { cursor } : undefined, requestOptions());
+          },
         });
       },
     });
