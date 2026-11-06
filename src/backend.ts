@@ -51,6 +51,7 @@ import {
   isServerNotResolved,
   KernelSession,
   listAllTools,
+  SessionClosed,
 } from "./kernel.js";
 import { elapsedText, waitText } from "./duration.js";
 import type { KernelInstall } from "./locate.js";
@@ -301,8 +302,12 @@ export class LocalBackend implements KernelBackend {
     ) as Promise<CallToolResult>;
   }
 
+  /**
+   * For good: a backend is stopped only by its owner, giving it up, and a call
+   * still queued on it must not start a kernel afterwards (`KernelSession.close`).
+   */
   async stop(): Promise<void> {
-    await this.#session.stop();
+    await this.#session.close();
   }
 }
 
@@ -496,6 +501,15 @@ export class DeferredBackend implements KernelBackend {
         this.#recordFailure("restarting the kernel", err);
         this.#resolved = null;
         this.#retire(backend);
+      } else if (
+        backend !== this.#resolved &&
+        (err instanceof SessionClosed || isKernelStartFailed(err))
+      ) {
+        // Queued behind that restart, this call shared its failure, or found the
+        // backend given up, before it could start a kernel. It was never sent,
+        // so it goes the way a new call does: to the back-off, or a fresh
+        // preparation after it.
+        return this.#use(fn);
       }
       throw err;
     }

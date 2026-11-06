@@ -7378,26 +7378,38 @@ heading("Preparation has one deadline, and names the stage it ran out in");
     const savedMode = process.env.FAKE_MODE;
     const savedMarker = process.env.FAKE_MARKER;
     process.env.FAKE_MARKER = restartMarker;
-    const deferred = new lib.DeferredBackend(
-      async () =>
-        new lib.LocalBackend({
-          bin: fakeKernel,
-          serverName: "WolframLanguage",
-          idleMs: 200,
-          startTimeoutMs: 10_000,
-          clientInfo: { name: "smoke", version: "0" },
-          log: () => {},
-        }),
-      () => {},
-      { startTimeoutMs: 10_000, bin: fakeKernel },
-    );
-    try {
-      const first = await deferred.listTools().then(() => "ok", (e) => e.message);
-      await new Promise((r) => setTimeout(r, 800)); // the kernel idles out
+    const privateSession = () =>
+      new lib.DeferredBackend(
+        async () =>
+          new lib.LocalBackend({
+            bin: fakeKernel,
+            serverName: "WolframLanguage",
+            idleMs: 200,
+            startTimeoutMs: 10_000,
+            clientInfo: { name: "smoke", version: "0" },
+            log: () => {},
+          }),
+        () => {},
+        { startTimeoutMs: 10_000, bin: fakeKernel },
+      );
+    const outcome = (deferred) => deferred.listTools().then(() => "ok", (e) => e.message);
+    // Started, then idled out, then made to fail its next start.
+    const idledOut = async () => {
+      if (savedMode === undefined) delete process.env.FAKE_MODE;
+      else process.env.FAKE_MODE = savedMode;
+      const deferred = privateSession();
+      const first = await outcome(deferred);
+      await new Promise((r) => setTimeout(r, 800));
       process.env.FAKE_MODE = "unactivated";
-      const restart = await deferred.listTools().then(() => "ok", (e) => e.message);
+      return { deferred, first };
+    };
+    const sessions = [];
+    try {
+      const { deferred, first } = await idledOut();
+      sessions.push(deferred);
+      const restart = await outcome(deferred);
       const startsAfterRestart = starts(restartMarker);
-      const next = await deferred.listTools().then(() => "ok", (e) => e.message);
+      const next = await outcome(deferred);
       check(
         "a kernel that fails to restart after idling is backed off, not restarted by every call",
         first === "ok" &&
@@ -7406,8 +7418,24 @@ heading("Preparation has one deadline, and names the stage it ran out in");
           starts(restartMarker) === startsAfterRestart,
         `${starts(restartMarker)} start(s); next: ${next.split("\n")[0].slice(0, 100)}`,
       );
+
+      // Two calls at once queue in the one session. The second found it stopped
+      // once the first's restart failed, and started a kernel of its own, which
+      // nobody owned: given up, the session never stopped it.
+      const burst = await idledOut();
+      sessions.push(burst.deferred);
+      const before = starts(restartMarker);
+      const [a, b] = await Promise.all([outcome(burst.deferred), outcome(burst.deferred)]);
+      check(
+        "a call queued behind that failed restart meets the back-off rather than starting a kernel",
+        burst.first === "ok" &&
+          starts(restartMarker) === before + 1 &&
+          /not activated/.test(a) &&
+          /the last attempt to prepare a Wolfram kernel failed/.test(b),
+        `${starts(restartMarker) - before} start(s); second: ${b.split("\n")[0].slice(0, 100)}`,
+      );
     } finally {
-      await deferred.stop();
+      await Promise.all(sessions.map((s) => s.stop()));
       if (savedMode === undefined) delete process.env.FAKE_MODE;
       else process.env.FAKE_MODE = savedMode;
       if (savedMarker === undefined) delete process.env.FAKE_MARKER;

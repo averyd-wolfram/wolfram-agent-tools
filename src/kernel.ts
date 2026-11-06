@@ -512,6 +512,19 @@ export class KernelStartFailed extends Error {
   }
 }
 
+/**
+ * A call that reached a session its owner had closed: it was never sent, and no
+ * kernel was started for it. Calls queued behind a restart that failed found a
+ * stopped session and started a kernel each, which nobody owned once the owner
+ * had given the session up, and which kept its seat until it idled out.
+ */
+export class SessionClosed extends Error {
+  constructor() {
+    super("the kernel session was closed before this call could start a kernel");
+    this.name = "SessionClosed";
+  }
+}
+
 /** Whether `err`, or anything it was wrapped around, is a `KernelStartFailed`. */
 export function isKernelStartFailed(err: unknown): boolean {
   for (let e: unknown = err; e instanceof Error; e = e.cause) {
@@ -541,6 +554,8 @@ export class KernelSession {
   #client: Client | null = null;
   #transport: FilteringStdioTransport | null = null;
   #starting: Promise<Client> | null = null;
+  /** Set by `close()`: no kernel starts again, unlike after `stop()`. */
+  #closed = false;
   /**
    * A kernel mid-handshake, and how to end that handshake. `#transport` is set
    * only once the handshake succeeds, so `stop()` used to find nothing to close
@@ -549,6 +564,15 @@ export class KernelSession {
    */
   #handshaking: { transport: FilteringStdioTransport; abort: (error: Error) => void } | null = null;
   #queue: Promise<unknown> = Promise.resolve();
+  /** Calls handed to `run`, numbered as they queue. */
+  #queued = 0;
+  /**
+   * The last start that failed inside `run`, and the last call queued by then:
+   * those calls share its failure rather than each starting a kernel to fail
+   * again. A burst queued behind a restart that failed started one kernel per
+   * call, back to back, before the owner could give the session up (#20).
+   */
+  #failedStart: { err: unknown; upTo: number } | null = null;
   /** Verdict in flight for the last failure, if any. */
   #deciding: Promise<boolean> | null = null;
   /** Work left running that nobody is waiting for. */
@@ -704,6 +728,7 @@ export class KernelSession {
    * before the handshake shortens the handshake rather than adding to it.
    */
   async ensure(startTimeoutMs?: number): Promise<Client> {
+    if (this.#closed) throw new SessionClosed();
     if (this.#client) return this.#client;
     this.#starting ??= this.#spawn(startTimeoutMs).finally(() => {
       this.#starting = null;
@@ -723,7 +748,12 @@ export class KernelSession {
     fn: (client: Client, request: RequestOptions) => Promise<T>,
     options: RunOptions = {},
   ): Promise<T> {
+    const ticket = ++this.#queued;
     const task = this.#queue.then(async () => {
+      // Queued behind a start that failed: that failure is this call's too. It
+      // was never sent, so its caller may send it again, as a new call.
+      const failed = this.#failedStart;
+      if (failed && ticket <= failed.upTo) throw failed.err;
       // Cancelled while it waited its turn, so the kernel never had it: there
       // is nothing to stop, and no reason to start one. Sent on, the SDK
       // refused it unsent and `#fate`, seeing the cancel, stopped a kernel that
@@ -741,7 +771,13 @@ export class KernelSession {
       // stops being free to finish.
       await this.#reclaim();
       dropIfCancelled();
-      const client = await this.ensure();
+      let client: Client;
+      try {
+        client = await this.ensure();
+      } catch (err) {
+        if (isKernelStartFailed(err)) this.#failedStart = { err, upTo: this.#queued };
+        throw err;
+      }
       dropIfCancelled();
       const work = fn(client, requestOptions(options.signal));
       try {
@@ -935,6 +971,17 @@ export class KernelSession {
       void this.stop();
     }, timerDelay(idleMs));
     this.#idleTimer.unref?.();
+  }
+
+  /**
+   * Stop for good: the owner has given this session up. `stop()` alone is what
+   * an idle shutdown does, after which the next call starts a kernel again —
+   * so a call still queued here when its owner stopped it started a kernel
+   * nobody owned. Closed, such a call fails with `SessionClosed` instead.
+   */
+  async close(): Promise<void> {
+    this.#closed = true;
+    await this.stop();
   }
 
   async stop(): Promise<void> {
