@@ -5792,6 +5792,38 @@ heading("The pool's refusal window spares a flavour's idle kernel, and is report
       );
     } finally {
       await onePool.stop();
+    }
+    // A binary that cannot be read at all, deleted or on a filesystem gone:
+    // read as a changed one, its window ended at the next look, and every
+    // request started a kernel to fail again.
+    const missing = join(home, "pool-kernel-missing.mjs");
+    const missingPool = new lib.KernelPool({
+      bin: missing,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 1, type: null },
+      learnFromKernels: false,
+    });
+    try {
+      const gone = await outcome(missingPool.run(flavour, evaluate));
+      const goneAgain = await outcome(missingPool.run(flavour, evaluate));
+      writeFileSync(missing, readFileSync(fakeKernel, "utf8"));
+      chmodSync(missing, 0o755);
+      const restored = await outcome(missingPool.run(flavour, evaluate));
+      check(
+        "a kernel binary that cannot be read keeps its window, and reading again ends it",
+        /^failed/.test(gone) &&
+          !/none was started/.test(gone) &&
+          /none was started for this request/.test(goneAgain) &&
+          /^evaluated/.test(restored),
+        `${goneAgain.replace(/\s+/g, " ").slice(0, 80)}; restored: ${restored.slice(0, 40)}`,
+      );
+    } finally {
+      await missingPool.stop();
       if (savedMode === undefined) delete process.env.FAKE_MODE;
       else process.env.FAKE_MODE = savedMode;
       if (savedMarker === undefined) delete process.env.FAKE_MARKER;
