@@ -2451,13 +2451,18 @@ if (socketsHere()) {
 // and would have been answered at 8s failed at 5s, because a call with the
 // default ceiling queued behind it ran out first, and the session then
 // reattached to the very same broker. A broker that is merely busy answers
-// ping, which it serves ahead of its pool. (That the queued call fails at all,
-// where a private session would wait for it, is #80.)
+// ping, which it serves ahead of its pool. The queued call itself the broker
+// counted from when its pool ran it, so it was sent once the long call ended,
+// after its caller had been answered at the client's own grace; the broker now
+// answers it at its ceiling, counted from its arrival, in a private kernel's
+// words, and never sends it (#80).
 heading("A request that runs out on a busy broker costs the session no other call");
 if (socketsHere()) {
   wipeCache();
   const runtime = privateDir(join(home, "run-one-runs-out"));
+  const sharedLog = join(home, "methods-shared-queue.log");
   const s = await connect({
+    FAKE_METHOD_LOG: sharedLog,
     WOLFRAM_MCP_SHARE: "1",
     XDG_RUNTIME_DIR: runtime,
     WOLFRAM_MCP_LICENSE_LIMIT: "4",
@@ -2474,23 +2479,25 @@ if (socketsHere()) {
     s.client
       .callTool({ name: "WolframLanguageEvaluator", arguments: { code, ...extra } }, undefined, { timeout: 60_000 })
       .catch((err) => ({ isError: true, content: [{ type: "text", text: `rejected: ${err.message}` }] }));
-  const text = (r) => (r.content?.[0]?.text ?? "").slice(0, 100);
+  const text = (r) => (r.content?.[0]?.text ?? "").slice(0, 120);
   // A cold cache sends the list to the broker, which starts the one kernel
   // without spending a slow call on it.
   const { tools } = await s.client.listTools();
   check("the broker's one kernel is up", upstreamTools(tools).length > 0 && ownBrokers(runtime).length === 1);
   const long = call("1+1", { timeConstraint: 30 });
   await new Promise((r) => setTimeout(r, 300));
+  const shortAt = Date.now();
   const short = await call("2+2");
+  const shortMs = Date.now() - shortAt;
   // Made while the long call is still running: the request that used to
   // choose again and close the connection under it.
   const next = call("3+3", { timeConstraint: 30 });
   const longResult = await long;
   const chose = () => s.stderr().includes("deciding again");
   check(
-    "the request queued behind a long call runs out at its ceiling",
-    short.isError === true && /did not answer/.test(text(short)),
-    text(short),
+    "the request queued behind a long call is answered by the broker at its ceiling, as a private kernel answers it",
+    short.isError === true && /within 1s: the request had not been sent/.test(text(short)) && shortMs < 2_500,
+    `${shortMs}ms: ${text(short)}`,
   );
   check(
     "and the long call is still answered, on the broker the session kept",
@@ -2502,6 +2509,12 @@ if (socketsHere()) {
     "and so is the request made after it ran out",
     !nextResult.isError && answeredByFake(nextResult) && !chose(),
     `${chose() ? "the session chose again; " : ""}${text(nextResult)}`,
+  );
+  const sentShared = readFileSync(sharedLog, "utf8").split("\n").filter((l) => l === "tools/call").length;
+  check(
+    "and the request that ran out was never sent to the kernel",
+    sentShared === 2,
+    `${sentShared} call(s) sent, of the 3 made`,
   );
   await s.client.close();
   signalOwnBrokers("SIGKILL", runtime);
@@ -2710,6 +2723,172 @@ heading("On a private kernel a request's ceiling counts from its arrival, and on
     /had not been sent/.test(refused) && unhandled.length === 0,
     `${unhandled.length} unhandled: ${refused.slice(0, 60)}`,
   );
+}
+
+// ---------------------------------------------------------------------------
+// The broker counted a request's ceiling from when its pool ran it, so a request
+// that waited for a seat, or for its kernel to start, was sent once it had one,
+// whatever its caller had been told, and a private kernel, counting from the
+// arrival, answered the same request differently. The frame now carries when
+// the ceiling passes, and the pool answers a request still waiting then (#80).
+heading("On a broker too a request's ceiling counts from its arrival, and one answered at it is never sent");
+{
+  const flavour = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" });
+  const onePool = (extra = {}) =>
+    new lib.KernelPool({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 10_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 1, type: null },
+      licenceConfigured: true,
+      ...extra,
+    });
+
+  // Let into the pool already past its ceiling, a request retired another
+  // session's idle kernel to make room for itself, and was then never sent.
+  const pool = onePool();
+  const other = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage", WOLFRAM_USERBASE: join(home, "another-base") });
+  await pool.run(other, (c) => c.listTools());
+  let ran = false;
+  const past = await pool
+    .run(flavour, async () => ((ran = true), "ran"), { expiresAt: Date.now() - 1, deadlineMs: 1_000 })
+    .then((x) => x, (e) => e.message);
+  const stillUp = pool.running;
+  await pool.stop();
+  check(
+    "a request already past its ceiling retires no other session's kernel to make room for it",
+    !ran && /had not been sent/.test(past) && stillUp === 1 && pool.budget === 1,
+    `${stillUp} kernel(s) still up of ${pool.budget}: ${past.slice(0, 60)}`,
+  );
+
+  // A start that fails after its caller's ceiling passed reached no caller, so
+  // the pool recorded no window, and every later request started the kernel
+  // that would not start. Its session now tells the pool as the start fails.
+  const savedMode = process.env.FAKE_MODE;
+  process.env.FAKE_MODE = "mute";
+  const failing = onePool({ startTimeoutMs: 1_500 });
+  const expired = await failing
+    .run(flavour, (c) => c.listTools(), { expiresAt: Date.now() + 300, deadlineMs: 300 })
+    .then(() => "answered", (e) => e.message);
+  await new Promise((r) => setTimeout(r, 2_000)); // past the start's failure
+  if (savedMode === undefined) delete process.env.FAKE_MODE;
+  else process.env.FAKE_MODE = savedMode;
+  const window = failing.refusing(flavour.digest);
+  await failing.stop();
+  check(
+    "a start that fails after its caller's ceiling passed still opens its flavour's window",
+    /had not been sent/.test(expired) && window !== null,
+    window ? `refusing for ${Math.round(window.remainingMs / 1000)}s` : `no window: ${expired.slice(0, 60)}`,
+  );
+
+  // But a start the pool cut short is no failure. The seat of a request whose
+  // ceiling passed while its kernel started is free, and another session's
+  // request may retire that kernel for it: read as a failed start, that refused
+  // a healthy flavour for ten minutes.
+  const savedInit = process.env.FAKE_INIT_DELAY_MS;
+  process.env.FAKE_INIT_DELAY_MS = "1500";
+  const swapping = onePool();
+  const cutShort = await swapping
+    .run(flavour, (c) => c.listTools(), { expiresAt: Date.now() + 300, deadlineMs: 300 })
+    .then(() => "answered", (e) => e.message);
+  const took = await swapping
+    .run(other, (c) => c.listTools())
+    .then(() => "answered", (e) => e.message);
+  if (savedInit === undefined) delete process.env.FAKE_INIT_DELAY_MS;
+  else process.env.FAKE_INIT_DELAY_MS = savedInit;
+  const refused = swapping.refusing(flavour.digest);
+  await swapping.stop();
+  check(
+    "a start cut short to give its seat to another session opens no window for its flavour",
+    /had not been sent/.test(cutShort) && took === "answered" && refused === null,
+    refused ? `refusing: ${refused.reason.slice(0, 80)}` : `no window; the other session's request ${took}`,
+  );
+
+  // A caller may say "no ceiling" with a null expiry, whatever its timeoutMs:
+  // the broker's kernel session then waits, so the client's own timer must
+  // too. Timed from timeoutMs, it failed what a private kernel waited for.
+  if (socketsHere("a call with no ceiling on a broker")) {
+    const address = join(privateDir(join(home, "broker-no-ceiling")), "broker.sock");
+    const calls = [];
+    const server = createServer((socket) => {
+      socket.setEncoding("utf8");
+      socket.on("error", () => socket.destroy());
+      const send = (frame) => socket.writable && socket.write(`${JSON.stringify(frame)}\n`);
+      let buffered = "";
+      socket.on("data", (chunk) => {
+        buffered += chunk;
+        for (let at; (at = buffered.indexOf("\n")) !== -1; buffered = buffered.slice(at + 1)) {
+          const frame = JSON.parse(buffered.slice(0, at));
+          if (frame.op === "hello") {
+            send({ id: frame.id, ok: true, result: { flavours: true, flavour: frame.params?.digest } });
+          } else if (frame.op === "ping") {
+            send({ id: frame.id, ok: true, result: {} });
+          } else if (frame.op === "callTool") {
+            calls.push(frame);
+            // Past the 1 s ceiling and its grace, as a long evaluation is.
+            setTimeout(() => send({ id: frame.id, ok: true, result: { content: [{ type: "text", text: "evaluated" }] } }), 3_500);
+          }
+        }
+      });
+    });
+    await listening(server, address);
+    const backend = await lib.BrokerBackend.attachIfRunning({
+      address,
+      flavour,
+      spawnCommand: join(home, "definitely-not-a-binary"),
+      spawnArgs: [],
+      spawnEnv: {},
+      log: () => {},
+    });
+    const said = backend
+      ? await backend
+          .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, { timeoutMs: 1_000, expiresAt: null })
+          .then((r) => r.content?.[0]?.text ?? "(empty)", (e) => `failed: ${e.message}`)
+      : "could not attach";
+    await backend?.stop();
+    server.close();
+    check(
+      "a call with no ceiling waits for the broker, as a private kernel waits, whatever its timeoutMs",
+      said === "evaluated" && calls[0]?.expiresAt === null,
+      `${said.slice(0, 80)}; expiresAt sent as ${JSON.stringify(calls[0]?.expiresAt)}`,
+    );
+  }
+
+  if (socketsHere("a call made while the broker starts its kernel")) {
+    wipeCache();
+    const runtime = privateDir(join(home, "run-expires-starting"));
+    const startLog = join(home, "methods-shared-start.log");
+    const s = await connect({
+      WOLFRAM_MCP_SHARE: "1",
+      XDG_RUNTIME_DIR: runtime,
+      WOLFRAM_MCP_LICENSE_LIMIT: "4",
+      WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "1",
+      FAKE_INIT_DELAY_MS: "3000",
+      FAKE_METHOD_LOG: startLog,
+    });
+    const at = Date.now();
+    const early = await s.client
+      .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 60_000 })
+      .catch((err) => ({ isError: true, content: [{ type: "text", text: `rejected: ${err.message}` }] }));
+    const earlyMs = Date.now() - at;
+    await new Promise((r) => setTimeout(r, 3_500)); // the kernel is ready by now
+    const said = (early.content?.[0]?.text ?? "").slice(0, 120);
+    const sent = existsSync(startLog)
+      ? readFileSync(startLog, "utf8").split("\n").filter((l) => l === "tools/call").length
+      : 0;
+    check(
+      "a call whose ceiling passes while the broker starts its kernel is answered then, as a private one is, and never sent",
+      early.isError === true && /within 1s: the request had not been sent/.test(said) && earlyMs < 2_500 && sent === 0,
+      `${earlyMs}ms, ${sent} call(s) sent: ${said}`,
+    );
+    await s.client.close();
+    signalOwnBrokers("SIGKILL", runtime);
+    await new Promise((r) => setTimeout(r, 300));
+  }
 }
 
 // ---------------------------------------------------------------------------

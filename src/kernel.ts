@@ -502,7 +502,8 @@ export interface KernelSessionOptions {
    * Told of a kernel start that failed inside `run`, whatever its callers were
    * told. A caller whose ceiling passed during the start was answered that, and
    * never saw the start fail, so its owner could not record the failure: every
-   * later call restarted a kernel that would not start (#80's review).
+   * later call restarted a kernel that would not start (#80's review). Not
+   * told of a start `stop()` cut short, which says nothing of the kernel.
    */
   onStartFailed?: ((err: unknown) => void) | undefined;
   /**
@@ -588,6 +589,21 @@ export class SessionClosed extends Error {
 }
 
 /** Whether `err`, or anything it was wrapped around, is a `KernelStartFailed`. */
+/**
+ * A start ended by `stop()`, not by the kernel. A pool frees the seat of a
+ * request whose ceiling passed during its kernel's start, and may then retire
+ * that kernel for another session; read as a failed start, that refused its
+ * healthy flavour for ten minutes (#80's review).
+ */
+class StartStopped extends Error {}
+
+function isStartStopped(err: unknown): boolean {
+  for (let e: unknown = err; e instanceof Error; e = e.cause) {
+    if (e instanceof StartStopped) return true;
+  }
+  return false;
+}
+
 export function isKernelStartFailed(err: unknown): boolean {
   for (let e: unknown = err; e instanceof Error; e = e.cause) {
     if (e instanceof KernelStartFailed) return true;
@@ -905,7 +921,7 @@ export class KernelSession {
       } catch (err) {
         if (isKernelStartFailed(err)) {
           this.#failedStart = { err, upTo: this.#queued };
-          this.#options.onStartFailed?.(err);
+          if (!isStartStopped(err)) this.#options.onStartFailed?.(err);
         }
         throw err;
       }
@@ -1145,7 +1161,7 @@ export class KernelSession {
     const handshaking = this.#handshaking;
     this.#handshaking = null;
     if (handshaking) {
-      handshaking.abort(new Error("the kernel was stopped during its handshake"));
+      handshaking.abort(new StartStopped("the kernel was stopped during its handshake"));
       await handshaking.transport.close().catch(() => {});
     }
     const client = this.#client;
