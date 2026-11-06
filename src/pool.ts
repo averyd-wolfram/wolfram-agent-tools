@@ -466,13 +466,20 @@ export class KernelPool {
         throw this.#refusal(plan.window);
       case "grow":
         return this.#grow(flavour);
-      case "swap":
+      case "swap": {
         this.#options.log(
           `budget reached and no kernel for environment ${flavour.digest}; retiring an idle ` +
             `kernel for ${plan.victim.flavour.digest} to make room`,
         );
-        this.#retire(plan.victim, "a session with a different environment needed the seat");
-        return this.#grow(flavour);
+        // Whoever waits is woken only once the replacement holds the seat.
+        // Retiring wakes the queue and the requests held for the victim's
+        // flavour, and one that found the seat free grew into it before this
+        // could: three kernels on two seats.
+        this.#retire(plan.victim, "a session with a different environment needed the seat", false);
+        const replacement = this.#grow(flavour);
+        this.#reseat(plan.victim.flavour.digest);
+        return replacement;
+      }
       case "reuse":
         this.#options.log(
           `budget reached; reusing a kernel that holds an abandoned call, which ` +
@@ -498,7 +505,7 @@ export class KernelPool {
     return new Promise<Slot>((resolve, reject) => {
       const waiter: Waiter = { flavour, resolve, reject, seq: ++this.#arrivals };
       if (plan.tier === "hold") this.#hold(waiter);
-      else this.#waiters.push(waiter);
+      else this.#queue(waiter);
       // Cancelled while it waits, it leaves, held or queued: left in, it was
       // served like any other, by a kernel grown or another session's retired.
       signal?.addEventListener(
@@ -542,6 +549,19 @@ export class KernelPool {
     }
   }
 
+  /**
+   * Into the queue by when it came, not at its tail: a held request that comes
+   * to need a seat — its window over, every kernel busy — was owed one before
+   * whoever queued while it was held. Appended, it fell behind them, and one of
+   * them could even retire the very kernel it had been waiting for (#147's
+   * review). A new request is the latest, so this is its tail.
+   */
+  #queue(waiter: Waiter): void {
+    const at = this.#waiters.findIndex((queued) => queued.seq > waiter.seq);
+    if (at === -1) this.#waiters.push(waiter);
+    else this.#waiters.splice(at, 0, waiter);
+  }
+
   /** Take a waiter out of wherever it waits; false when it has been served. */
   #unqueue(waiter: Waiter): boolean {
     const at = this.#waiters.indexOf(waiter);
@@ -566,7 +586,7 @@ export class KernelPool {
     for (const waiter of held) {
       const plan = this.#plan(waiter.flavour);
       if (plan.tier === "hold") this.#hold(waiter);
-      else if (plan.tier === "wait") this.#waiters.push(waiter);
+      else if (plan.tier === "wait") this.#queue(waiter);
       else {
         try {
           waiter.resolve(this.#act(plan, waiter.flavour));
@@ -666,12 +686,12 @@ export class KernelPool {
    * inside `#drainWaiters`: without it the drain re-enters itself, and the head
    * waiter it is part-way through serving is handed a slot twice.
    */
-  #retire(slot: Slot, reason: string): void {
+  #retire(slot: Slot, reason: string, reseat = true): void {
     const at = this.#slots.indexOf(slot);
     if (at !== -1) this.#slots.splice(at, 1);
     this.#options.log(`retiring kernel after ${reason}; pool now ${this.#slots.length} kernel(s)`);
     void slot.session.stop().catch(() => {});
-    this.#reseat(slot.flavour.digest);
+    if (reseat) this.#reseat(slot.flavour.digest);
   }
 
   #draining = false;
