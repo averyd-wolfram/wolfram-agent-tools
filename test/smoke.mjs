@@ -4630,6 +4630,80 @@ heading("A tool whose output schema cannot be compiled costs only itself, on eit
 }
 
 // ---------------------------------------------------------------------------
+// What passed was relayed as zod parsed it, and the SDK's schemas are plain
+// objects: a field the pinned SDK does not know, a newer revision's or a
+// server's own, was dropped from every tool, prompt and resource (#123). And a
+// tool's result was held to the SDK's CallToolResultSchema, on the kernel's
+// client and again in this server's handler, so a structuredContent that is
+// not an object became a protocol error with the kernel's answer gone (#117).
+// Measured, Claude Code 2.1.319 lists items carrying fields it does not know,
+// and judges such a result itself: both are relayed as the kernel sent them.
+heading("What the kernel sends is relayed as it sent it, for the client to judge");
+{
+  const future = { note: "not in the SDK's schemas" };
+  const asSent = {
+    FAKE_EXTRA_TOOLS: JSON.stringify([
+      { name: "Future", description: "Carries a field.", inputSchema: { type: "object" }, futureField: future },
+    ]),
+    FAKE_EXTRA_PROMPTS: JSON.stringify([{ name: "FuturePrompt", description: "Carries a field.", futureField: future }]),
+    FAKE_RESOURCES: "1",
+    FAKE_EXTRA_RESOURCES: JSON.stringify([{ name: "FutureResource", uri: "ui://fake/future", futureField: future }]),
+    FAKE_OUTPUT_SCHEMA: JSON.stringify({ type: "array", items: { type: "number" } }),
+    FAKE_STRUCTURED_CONTENT: JSON.stringify([1, 2, 3]),
+  };
+  // ResultSchema throughout: this suite's own client would otherwise judge
+  // what the server sent by the SDK's schemas, the very thing under test.
+  const raw = (s, method, params) =>
+    s.client.request({ method, params }, ResultSchema, { timeout: 20_000 }).catch((err) => ({ error: err.message }));
+  for (const sharing of ["0", "1"]) {
+    if (sharing === "1" && !socketsHere("the shared path")) continue;
+    const path = sharing === "1" ? "shared" : "private";
+    const runtime = join(home, `run-as-sent-${sharing}`);
+    wipeCache();
+    await warmCache({ FAKE_RESOURCES: "1" });
+    const s = await connect({
+      WOLFRAM_MCP_SHARE: sharing,
+      XDG_RUNTIME_DIR: privateDir(runtime),
+      WOLFRAM_MCP_LICENSE_LIMIT: "4",
+      ...asSent,
+    });
+    // Resources are a kernel's to list, so this starts one.
+    const resources = await raw(s, "resources/list");
+    const resource = resources.resources?.find((r) => r.name === "FutureResource");
+    check(
+      `a resource is listed with a field the SDK does not know (${path})`,
+      isDeepStrictEqual(resource?.futureField, future),
+      resources.error?.slice(0, 120) ?? JSON.stringify(resource)?.slice(0, 120) ?? "not listed",
+    );
+    const called = await raw(s, "tools/call", { name: "Structured", arguments: {} });
+    check(
+      `a result whose structuredContent is not an object reaches the client as the kernel sent it (${path})`,
+      !called.error && !called.isError && isDeepStrictEqual(called.structuredContent, [1, 2, 3]),
+      called.error?.slice(0, 120) ?? JSON.stringify(called).slice(0, 120),
+    );
+    // Tools and prompts are served from the cache, which the refresh after
+    // that kernel's start replaces with what the kernel lists.
+    const cachedPrompt = () => lib.readCache(suiteKey)?.prompts?.find((p) => p.name === "FuturePrompt");
+    await until(() => cachedPrompt() !== undefined, 5_000);
+    const tools = await raw(s, "tools/list");
+    const tool = tools.tools?.find((t) => t.name === "Future");
+    check(
+      `and so is a tool, once the refresh after a kernel start has it (${path})`,
+      isDeepStrictEqual(tool?.futureField, future),
+      tools.error?.slice(0, 120) ?? JSON.stringify(tool)?.slice(0, 120) ?? "not listed",
+    );
+    check(
+      `and so is a prompt (${path})`,
+      isDeepStrictEqual(cachedPrompt()?.futureField, future),
+      JSON.stringify(cachedPrompt())?.slice(0, 120) ?? "not cached",
+    );
+    await s.client.close();
+    signalOwnBrokers("SIGKILL", runtime);
+    await new Promise((r) => setTimeout(r, 300));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // The same loss for prompts and resources, which were still held to the SDK's
 // list schemas: one item a schema refused failed the whole prompts/list or
 // resources/list (#118). A session lists prompts from its cache, which the

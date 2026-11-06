@@ -802,7 +802,13 @@ are *traced* in this tree on 2026-10-05 unless marked otherwise.
    for any other reason now costs only the prompts there too (#122): the broker still sends the
    tools with the kernel's words, and a session keeps the prompts it had and says why, as the
    private path's refresh always did. With none cached, neither path records prompts it never
-   read, so the next session does not offer an empty list.
+   read, so the next session does not offer an empty list. An item that passes is relayed as the
+   kernel sent it, not as zod parsed it, so a field the pinned SDK does not know survives (#123):
+   measured, Claude Code 2.1.319 lists a tool and a prompt carrying one. And a tool's result is
+   relayed unparsed, past the SDK's `CallToolResultSchema` on the kernel's client and in this
+   server's handler, so a client judges a `structuredContent` that is not an object itself
+   (#117): measured, Claude Code 2.1.319 refuses one in its own words, and takes the same tool's
+   text-only answer.
    *Traced:* AgentTools 2.2.7 emits neither — a tool's entry is built from five fixed keys
    (`createMCPToolData`, `Kernel/Server/Shared.wl`), and its results leave `structuredContent`
    out on purpose — so `test:custom` cannot pin this until a paclet lets a tool declare an

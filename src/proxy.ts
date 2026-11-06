@@ -8,6 +8,7 @@
  * cache and the kernel is started on the first request that genuinely needs it.
  */
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { Protocol } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import {
   CallToolRequestSchema,
   ErrorCode,
@@ -611,7 +612,16 @@ export function createWolframServer(
     return { tools: [...(live.tools ?? []), STATUS_TOOL] };
   });
 
-  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+  // Registered past the SDK's `Server`, whose own registration holds every
+  // tools/call result to `CallToolResultSchema`: a result the client should
+  // judge, `structuredContent` that is not an object, became a protocol error
+  // here with the kernel's answer gone (#117). `Protocol`'s still parses the
+  // request by `CallToolRequestSchema`. Every result this handler makes itself
+  // is one the schema takes.
+  const relayCalls = Protocol.prototype.setRequestHandler.bind(
+    server,
+  ) as typeof server.setRequestHandler;
+  relayCalls(CallToolRequestSchema, async (request, extra) => {
     const arrivedAt = Date.now();
     const { name, arguments: args } = request.params;
     if (name === STATUS_TOOL.name) {

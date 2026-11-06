@@ -70,6 +70,9 @@
  *                     that allows one could send a schema ajv cannot compile — a
  *                     malformed `$id` — which failed the whole tools/list in the
  *                     SDK's client (#31)
+ * FAKE_STRUCTURED_CONTENT  JSON: what Structured answers as its structuredContent,
+ *                     in place of {"answer": 42}: an array, say, to match an
+ *                     array FAKE_OUTPUT_SCHEMA, which the spec does not allow (#117)
  * FAKE_RESOURCES      declare the resources capability and serve one resource.
  *                     AgentTools 2.2.7 answers resources/list and resources/read,
  *                     for MCP Apps' UI resources, but declares no resources
@@ -602,7 +605,13 @@ function run() {
         ],
         // A tool that declares an output schema owes its caller structured
         // content, as the spec says.
-        ...(msg.params?.name === "Structured" ? { structuredContent: { answer: 42 } } : {}),
+        ...(msg.params?.name === "Structured"
+          ? {
+              structuredContent: process.env.FAKE_STRUCTURED_CONTENT
+                ? JSON.parse(process.env.FAKE_STRUCTURED_CONTENT)
+                : { answer: 42 },
+            }
+          : {}),
       }));
       return;
     }
