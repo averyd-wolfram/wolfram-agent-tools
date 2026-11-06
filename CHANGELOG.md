@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.11](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.10...v0.1.11) (2026-11-06)
+
+
+### Bug Fixes
+
+* relay what a kernel lists and answers as it sent it, for the client to judge ([#155](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/155)) ([92ad977](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/92ad9776ec0efd9c78115699a1a9ee74abca8853))
+
 ## [0.1.10](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.9...v0.1.10) (2026-11-06)
 
 
