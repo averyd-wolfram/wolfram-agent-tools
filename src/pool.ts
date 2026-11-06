@@ -26,7 +26,7 @@ import {
 import { baseDirectoryEnv, type KernelFacts } from "./inspect.js";
 import { errorText, type Logger } from "./log.js";
 import { elapsedText, waitText } from "./duration.js";
-import { NOT_RESOLVED_ADVICE, NOT_RESOLVED_BACKOFF_MS } from "./prepare.js";
+import { NOT_RESOLVED_ADVICE, SHORT_BACKOFF_MS } from "./prepare.js";
 
 /**
  * The `SHAPING_VARS` a licence can depend on: `$BaseDirectory` and
@@ -578,7 +578,7 @@ export class KernelPool {
     // failed, kernel output and all.
     const now = this.#now();
     for (const [key, known] of this.#unresolved) {
-      if (now - known.at >= NOT_RESOLVED_BACKOFF_MS) this.#unresolved.delete(key);
+      if (now - known.at >= SHORT_BACKOFF_MS) this.#unresolved.delete(key);
     }
     this.#unresolved.set(digest, { at: now, reason: errorText(err) });
   }
@@ -592,11 +592,11 @@ export class KernelPool {
     const known = this.#unresolved.get(digest);
     if (!known) return null;
     const ageMs = this.#now() - known.at;
-    if (ageMs >= NOT_RESOLVED_BACKOFF_MS) {
+    if (ageMs >= SHORT_BACKOFF_MS) {
       this.#unresolved.delete(digest);
       return null;
     }
-    return { ageMs, remainingMs: NOT_RESOLVED_BACKOFF_MS - ageMs, reason: known.reason };
+    return { ageMs, remainingMs: SHORT_BACKOFF_MS - ageMs, reason: known.reason };
   }
 
   /**

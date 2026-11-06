@@ -25,16 +25,90 @@ import { errorText } from "./log.js";
 export const PREPARATION_BACKOFF_MS = 10 * 60_000;
 
 /**
- * How long a server name that did not resolve is not asked again.
+ * How long a failure that is not the installation's is not retried: a server
+ * name that did not resolve, or a stage ahead of the kernel's own start that
+ * ran out of time. One window for both (#22).
  *
- * Not the full back-off: that is fixed by creating the server or installing its
- * paclet, which the back-off, keyed on the kernel binary, cannot see, so ten
- * minutes held the fix off (issue #5). Not none either: every ask starts a
- * kernel and spends a seat for the second it takes to fail, and a client asks
- * several things on connect and may retry in a loop. Long enough that a burst
- * shares one failure; short enough that whoever fixes it rarely waits.
+ * Not the full back-off: a server name is fixed by creating the server or
+ * installing its paclet, which the back-off, keyed on the kernel binary, cannot
+ * see, so ten minutes held the fix off (issue #5); and a slow stage has a fresh
+ * deadline on the next call. Not none either: every attempt may start a kernel
+ * and spend a seat, and a client asks several things on connect and may retry
+ * in a loop. Long enough that a burst shares one failure; short enough that
+ * whoever fixes it rarely waits.
  */
-export const NOT_RESOLVED_BACKOFF_MS = 15_000;
+export const SHORT_BACKOFF_MS = 15_000;
+
+/**
+ * The stage the kernel's own start runs as. Only it running out of time is the
+ * kernel's failure; any stage before it, or this one refused before it began,
+ * ran out because the stages ahead used the deadline (#22).
+ */
+export const KERNEL_START_STAGE = "starting the kernel";
+
+/**
+ * How many short back-offs in a row for a slow stage before the full window:
+ * a stage slow every time would otherwise respawn a broker, or wait out its
+ * preparation, every `SHORT_BACKOFF_MS` for good. "In a row" means with no gap
+ * of `PREPARATION_BACKOFF_MS` between them, so a refusal an hour after an
+ * unrelated one does not count (#22).
+ */
+export const SLOW_STAGE_ESCALATES_AT = 3;
+
+/** What a failed preparation was, for choosing its back-off. */
+export type PreparationFailure =
+  | { kind: "unresolved" }
+  | { kind: "slow"; stage: string; began: boolean }
+  | { kind: "setting"; startTimeoutMs: number }
+  | { kind: "kernel" };
+
+/**
+ * The window and the advice for a failed preparation, by what failed: the one
+ * place that is decided, so the window, the advice and the edge between them
+ * cannot drift apart (#22). `repeats` is how many slow-stage failures came just
+ * before this one; the caller keeps that count with its back-off. No advice
+ * means the installation's: doctor, and a changed binary ending it sooner.
+ */
+export function preparationBackoff(
+  failure: PreparationFailure,
+  repeats = 0,
+): { windowMs: number; advice?: string } {
+  switch (failure.kind) {
+    case "unresolved":
+      return { windowMs: SHORT_BACKOFF_MS, advice: NOT_RESOLVED_ADVICE };
+    case "slow": {
+      // Named as it happened: refused, the stage is the one the time ran out
+      // before, and what used the time is the stages ahead of it.
+      const where = failure.began
+        ? `time ran out while ${failure.stage}, ahead of the kernel's own start`
+        : `too little of the deadline was left to begin ${failure.stage}, after the stages before it`;
+      if (repeats + 1 >= SLOW_STAGE_ESCALATES_AT) {
+        return {
+          windowMs: PREPARATION_BACKOFF_MS,
+          advice:
+            `${where}, ${repeats + 1} times in a row, so it is not retried soon; ` +
+            `meanwhile, raise WOLFRAM_MCP_START_TIMEOUT_SECONDS`,
+        };
+      }
+      return {
+        windowMs: SHORT_BACKOFF_MS,
+        advice:
+          `${where}, so the next attempt has a fresh deadline; if this keeps happening, ` +
+          `raise WOLFRAM_MCP_START_TIMEOUT_SECONDS`,
+      };
+    }
+    case "setting":
+      return {
+        windowMs: PREPARATION_BACKOFF_MS,
+        advice:
+          `WOLFRAM_MCP_START_TIMEOUT_SECONDS allows ${budgetText(failure.startTimeoutMs)}, ` +
+          `less than the ${budgetText(MIN_START_MS)} any kernel start is given, so every ` +
+          `start is refused; raise it and restart this server`,
+      };
+    case "kernel":
+      return { windowMs: PREPARATION_BACKOFF_MS };
+  }
+}
 
 /**
  * The least a kernel start is handed: below this, the handshake could only
@@ -52,6 +126,8 @@ export const NOT_RESOLVED_ADVICE =
 /** A preparation that did not finish in time, naming the stage it was in. */
 export class PreparationTimeout extends Error {
   readonly stage: string;
+  /** False for a stage refused before it began, for lack of time (#10, #22). */
+  readonly began: boolean;
   /**
    * `cause` is the work's own failure when one landed as time ran out, kept so
    * a caller can still tell what it was: a server name that did not resolve
@@ -77,6 +153,7 @@ export class PreparationTimeout extends Error {
     );
     this.name = "PreparationTimeout";
     this.stage = stage;
+    this.began = began;
   }
 }
 
