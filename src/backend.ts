@@ -27,7 +27,7 @@ import type {
 } from "@modelcontextprotocol/sdk/types.js";
 import { BrokerBackend, type BrokerClientOptions } from "./broker-client.js";
 import { brokerAddress } from "./broker-protocol.js";
-import { DEFAULT_START_TIMEOUT_MS, type Config } from "./config.js";
+import { deadlineDelay, DEFAULT_START_TIMEOUT_MS, type Config } from "./config.js";
 import { doctorCommand } from "./doctor.js";
 import { installationEnv, recordFacts, type KernelFacts } from "./inspect.js";
 import {
@@ -51,6 +51,7 @@ import {
   isServerNotResolved,
   KernelSession,
   listAllTools,
+  RequestExpired,
   requestOptions,
   SessionClosed,
   stopIfLate,
@@ -90,6 +91,14 @@ export interface EvaluationOptions {
    * long. A deadline for the caller, not the kernel (`KernelSession.#fate`).
    */
   timeoutMs: number;
+  /**
+   * When the caller stops waiting, a `Date.now()` time stamped where the
+   * request arrived, or `null` for no ceiling. Every wait before the kernel has
+   * the request counts against it — a kernel's preparation, a queue — and a
+   * request still unsent when it passes is answered then and never sent
+   * (#80). Unset, `timeoutMs` counts from when the kernel runs it.
+   */
+  expiresAt?: number | null | undefined;
   /**
    * Aborts the request, and tells the kernel to stop if it can. A client
    * pressing Escape used to leave the kernel working: the request was abandoned
@@ -136,6 +145,8 @@ export interface KernelBackend {
    * notice that the Wolfram/AgentTools paclet was upgraded underneath us.
    */
   onKernelReady(handler: KernelReadyHandler): void;
+  /** Told of a kernel start that failed while serving a request, as it fails. */
+  onStartFailed?(handler: (err: unknown) => void): void;
   /**
    * False once this backend can never serve again — a broker whose socket has
    * closed, or which stopped answering. `DeferredBackend` drops a backend that
@@ -183,6 +194,7 @@ export class LocalBackend implements KernelBackend {
   readonly kind = "local" as const;
   readonly #session: KernelSession;
   #onReady: KernelReadyHandler | undefined;
+  #onStartFailed: ((err: unknown) => void) | undefined;
 
   constructor(options: {
     bin: string;
@@ -196,6 +208,7 @@ export class LocalBackend implements KernelBackend {
   }) {
     this.#session = new KernelSession({
       ...options,
+      onStartFailed: (err) => this.#onStartFailed?.(err),
       onReady: async (client: Client, late?: AbortSignal) => {
         // The raw client, deliberately: this runs inside the queue.
         await this.#onReady?.({
@@ -218,6 +231,10 @@ export class LocalBackend implements KernelBackend {
 
   onKernelReady(handler: KernelReadyHandler): void {
     this.#onReady = handler;
+  }
+
+  onStartFailed(handler: (err: unknown) => void): void {
+    this.#onStartFailed = handler;
   }
 
   /**
@@ -278,6 +295,7 @@ export class LocalBackend implements KernelBackend {
   ): Promise<GetPromptResult> {
     return this.#session.run((c, request) => c.getPrompt(params, request), {
       deadlineMs: options?.timeoutMs,
+      expiresAt: options?.expiresAt,
       signal: options?.signal,
     });
   }
@@ -292,6 +310,7 @@ export class LocalBackend implements KernelBackend {
   ): Promise<ReadResourceResult> {
     return this.#session.run((c, request) => c.readResource(params, request), {
       deadlineMs: options?.timeoutMs,
+      expiresAt: options?.expiresAt,
       signal: options?.signal,
     });
   }
@@ -309,7 +328,7 @@ export class LocalBackend implements KernelBackend {
           ...request,
           ...(options.onprogress ? { onprogress: options.onprogress } : {}),
         }),
-      { deadlineMs: options.timeoutMs, signal: options.signal },
+      { deadlineMs: options.timeoutMs, expiresAt: options.expiresAt, signal: options.signal },
     ) as Promise<CallToolResult>;
   }
 
@@ -371,6 +390,10 @@ export class DeferredBackend implements KernelBackend {
    * preparation that succeeds.
    */
   #slow: { count: number; at: number } | null = null;
+  /** Start failures already recorded, so one told twice is recorded once. */
+  readonly #startFailures = new WeakSet<object>();
+  /** Start failures a caller has already been given in the kernel's words. */
+  readonly #toldFailures = new WeakSet<object>();
   #resolved: KernelBackend | null = null;
   #resolving: Promise<KernelBackend> | null = null;
   /**
@@ -503,15 +526,22 @@ export class DeferredBackend implements KernelBackend {
    * backend given up, the next call meets the back-off, and after it a fresh
    * preparation. A broker's start failures arrive as text and are its pool's.
    */
-  async #use<T>(fn: (backend: KernelBackend) => Promise<T>): Promise<T> {
-    const backend = await this.#get();
+  async #use<T>(fn: (backend: KernelBackend) => Promise<T>, by?: EvaluationOptions): Promise<T> {
+    // Already past, before preparation is asked for at all: asked and then
+    // dropped, a preparation that failed rejected with nobody listening.
+    if (by?.expiresAt != null && Date.now() >= by.expiresAt) {
+      throw new RequestExpired(by.timeoutMs);
+    }
+    const backend = await this.#beforeExpiry(this.#get(), by);
     try {
       return await fn(backend);
     } catch (err) {
-      if (backend === this.#resolved && isKernelStartFailed(err)) {
-        this.#recordFailure("restarting the kernel", err);
-        this.#resolved = null;
-        this.#retire(backend);
+      if (isKernelStartFailed(err) && this.#startFailedOn(backend, err)) {
+        // Recorded, now or as it failed. The first caller to see it has the
+        // kernel's words; one that only shared it, queued behind the start,
+        // never reached a kernel, and goes the way a new call does.
+        if (this.#toldFailures.has(err as object)) return this.#use(fn, by);
+        this.#toldFailures.add(err as object);
       } else if (
         backend !== this.#resolved &&
         (err instanceof SessionClosed || isKernelStartFailed(err))
@@ -520,9 +550,54 @@ export class DeferredBackend implements KernelBackend {
         // backend given up, before it could start a kernel. It was never sent,
         // so it goes the way a new call does: to the back-off, or a fresh
         // preparation after it.
-        return this.#use(fn);
+        return this.#use(fn, by);
       }
       throw err;
+    }
+  }
+
+  /**
+   * A start of the chosen backend's kernel that failed, recorded once as a
+   * failed preparation, the backend given up so the next call meets the
+   * back-off (#20). Told as it fails (`onStartFailed`) as well as through the
+   * call that saw it, since a call whose ceiling passed first never sees it.
+   * True when this error is that failure.
+   */
+  #startFailedOn(backend: KernelBackend, err: unknown): boolean {
+    if (typeof err === "object" && err !== null && this.#startFailures.has(err)) return true;
+    if (backend !== this.#resolved) return false;
+    if (typeof err === "object" && err !== null) this.#startFailures.add(err);
+    this.#recordFailure("restarting the kernel", err);
+    this.#resolved = null;
+    this.#retire(backend);
+    return true;
+  }
+
+  /**
+   * The backend, unless the caller's ceiling passes first: a preparation can
+   * outlast it — a kernel's start, a broker's — and a request that waited it
+   * out was sent once it was done, after its caller had been answered (#80).
+   * The preparation goes on for the calls after; this one is answered at its
+   * ceiling and never sent.
+   */
+  async #beforeExpiry(
+    preparing: Promise<KernelBackend>,
+    by: EvaluationOptions | undefined,
+  ): Promise<KernelBackend> {
+    const expiresAt = by?.expiresAt;
+    if (expiresAt == null) return preparing;
+    let timer: NodeJS.Timeout | undefined;
+    const expiry = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new RequestExpired(by?.timeoutMs ?? 0)),
+        deadlineDelay(Math.max(0, expiresAt - Date.now())),
+      );
+      timer.unref?.();
+    });
+    try {
+      return await Promise.race([preparing, expiry]);
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -574,6 +649,7 @@ export class DeferredBackend implements KernelBackend {
       // inspecting, before there was a backend to reach.
       if (this.#stopped) throw new PreparationStopped();
       if (this.#onReady) backend.onKernelReady(this.#onReady);
+      backend.onStartFailed?.((err) => this.#startFailedOn(backend, err));
       await backend.prepare?.(deadline);
       if (this.#stopped) throw new PreparationStopped();
     } catch (err) {
@@ -603,7 +679,7 @@ export class DeferredBackend implements KernelBackend {
     params: GetPromptRequest["params"],
     options?: EvaluationOptions,
   ): Promise<GetPromptResult> {
-    return this.#use((backend) => backend.getPrompt(params, options));
+    return this.#use((backend) => backend.getPrompt(params, options), options);
   }
   async listResources(params?: ListResourcesRequest["params"]): Promise<ListResourcesResult> {
     return this.#use((backend) => backend.listResources(params));
@@ -612,10 +688,10 @@ export class DeferredBackend implements KernelBackend {
     params: ReadResourceRequest["params"],
     options?: EvaluationOptions,
   ): Promise<ReadResourceResult> {
-    return this.#use((backend) => backend.readResource(params, options));
+    return this.#use((backend) => backend.readResource(params, options), options);
   }
   async callTool(params: CallToolRequest["params"], options: CallOptions): Promise<CallToolResult> {
-    return this.#use((backend) => backend.callTool(params, options));
+    return this.#use((backend) => backend.callTool(params, options), options);
   }
   async stop(): Promise<void> {
     this.#stopped = true;
