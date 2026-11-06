@@ -7225,6 +7225,180 @@ heading("Preparation has one deadline, and names the stage it ran out in");
     );
     check("and is not recorded as a failed preparation", interrupted.backoff() === null);
   }
+
+  // Back off by what failed (#22). Every timeout was the full ten minutes, with
+  // advice to look at the installation, though a stage ahead of the kernel's
+  // own start running out of time is no fault of the installation, and the next
+  // call has a fresh deadline.
+  {
+    let now = 2_000_000;
+    const bin = join(home, "policy-kernel");
+    writeFileSync(bin, "one");
+    let failWith = null;
+    let attempts = 0;
+    const failing = (startTimeoutMs = 1_000) =>
+      new lib.DeferredBackend(
+        async () => {
+          attempts++;
+          return {
+            kind: "local",
+            onKernelReady() {},
+            async prepare() {
+              if (failWith) throw failWith();
+            },
+            async listTools() {
+              return { tools: [] };
+            },
+            async stop() {},
+          };
+        },
+        () => {},
+        { startTimeoutMs, bin, clock: () => now, backoffMs: 600_000 },
+      );
+    const said = (deferred) => deferred.listTools().then(() => "ok", (e) => String(e.message));
+    const window = (deferred) => deferred.backoff()?.remainingMs ?? 0;
+    const timeout = (stage, began = true) => () =>
+      new lib.PreparationTimeout(stage, 1_000, undefined, undefined, { began });
+
+    failWith = timeout("waiting for the shared broker to prepare");
+    const slow = failing();
+    await said(slow);
+    const slowSaid = await said(slow);
+    check(
+      "a stage ahead of the kernel's start that ran out of time is retried in seconds, naming the stage",
+      window(slow) === 15_000 &&
+        /time ran out while waiting for the shared broker to prepare, ahead of the kernel's own start/.test(slowSaid) &&
+        /WOLFRAM_MCP_START_TIMEOUT_SECONDS/.test(slowSaid) &&
+        !/doctor/.test(slowSaid.split("\n\n")[0]),
+      `${window(slow)}ms: ${slowSaid.split("\n")[0].slice(0, 160)}`,
+    );
+
+    failWith = timeout("starting the kernel", false);
+    const refused = failing();
+    await said(refused);
+    check(
+      "so is the kernel's start refused before it began, because the stages ahead used the time",
+      window(refused) === 15_000 &&
+        /too little of the deadline was left to begin starting the kernel, after the stages before it/.test(
+          await said(refused),
+        ),
+      `${window(refused)}ms: ${(await said(refused)).split("\n")[0].slice(0, 160)}`,
+    );
+
+    failWith = timeout("starting the kernel");
+    const own = failing();
+    await said(own);
+    const ownSaid = await said(own);
+    check(
+      "the kernel's own start running out of time keeps the full window and the installation's advice",
+      window(own) === 600_000 && /run .*doctor/.test(ownSaid),
+      `${window(own)}ms: ${ownSaid.split("\n")[0].slice(0, 120)}`,
+    );
+
+    // Slow every time: the short window alone would repeat the broker's spawn
+    // or preparation every 15s for good.
+    failWith = timeout("attaching to the shared broker");
+    const again = failing();
+    const windows = [];
+    for (let i = 0; i < 3; i++) {
+      await said(again);
+      windows.push(window(again));
+      now += window(again) + 1;
+    }
+    const thirdSaid = await (async () => {
+      now -= windows[2] + 1;
+      return said(again);
+    })();
+    check(
+      "the third slow-stage failure in a row waits the full window, saying how many",
+      windows.join(",") === "15000,15000,600000" && /3 times in a row/.test(thirdSaid),
+      `${windows.join(", ")}: ${thirdSaid.split("\n")[0].slice(0, 120)}`,
+    );
+    now += 600_001 + 600_000;
+    await said(again);
+    check(
+      "and after a quiet full window the count starts again",
+      window(again) === 15_000,
+      `${window(again)}ms`,
+    );
+
+    // A server name is fixed by creating the server, which no back-off can see,
+    // so escalating it would hold off the fix #5 shortened the window for.
+    failWith = () => new lib.ServerNotResolved("no server by that name");
+    const unresolved = failing();
+    const unresolvedWindows = [];
+    for (let i = 0; i < 3; i++) {
+      await said(unresolved);
+      unresolvedWindows.push(window(unresolved));
+      now += window(unresolved) + 1;
+    }
+    check(
+      "a server name that does not resolve never escalates",
+      unresolvedWindows.join(",") === "15000,15000,15000",
+      unresolvedWindows.join(", "),
+    );
+
+    // Below the least any start is given, every start is refused: that is the
+    // setting, not earlier stages being slow.
+    failWith = () =>
+      new lib.PreparationTimeout("starting the kernel", 500, undefined, undefined, { began: false });
+    const tooShort = failing(500);
+    await said(tooShort);
+    const tooShortSaid = await said(tooShort);
+    check(
+      "a start timeout too short for any start is said to be the setting",
+      window(tooShort) === 600_000 &&
+        /WOLFRAM_MCP_START_TIMEOUT_SECONDS allows 500ms, less than the 1s/.test(tooShortSaid),
+      `${window(tooShort)}ms: ${tooShortSaid.split("\n")[0].slice(0, 160)}`,
+    );
+    failWith = null;
+    check("and none of these made a second attempt inside its window", attempts === 11, `${attempts} attempts`);
+  }
+
+  // A private session's kernel restarts after an idle shutdown inside its next
+  // call, outside any preparation: that start's failure recorded nothing, so
+  // every later call restarted the kernel to fail again (#20).
+  {
+    const restartMarker = join(home, "restart-starts.log");
+    const savedMode = process.env.FAKE_MODE;
+    const savedMarker = process.env.FAKE_MARKER;
+    process.env.FAKE_MARKER = restartMarker;
+    const deferred = new lib.DeferredBackend(
+      async () =>
+        new lib.LocalBackend({
+          bin: fakeKernel,
+          serverName: "WolframLanguage",
+          idleMs: 200,
+          startTimeoutMs: 10_000,
+          clientInfo: { name: "smoke", version: "0" },
+          log: () => {},
+        }),
+      () => {},
+      { startTimeoutMs: 10_000, bin: fakeKernel },
+    );
+    try {
+      const first = await deferred.listTools().then(() => "ok", (e) => e.message);
+      await new Promise((r) => setTimeout(r, 800)); // the kernel idles out
+      process.env.FAKE_MODE = "unactivated";
+      const restart = await deferred.listTools().then(() => "ok", (e) => e.message);
+      const startsAfterRestart = starts(restartMarker);
+      const next = await deferred.listTools().then(() => "ok", (e) => e.message);
+      check(
+        "a kernel that fails to restart after idling is backed off, not restarted by every call",
+        first === "ok" &&
+          /not activated/.test(restart) &&
+          /the last attempt to prepare a Wolfram kernel failed/.test(next) &&
+          starts(restartMarker) === startsAfterRestart,
+        `${starts(restartMarker)} start(s); next: ${next.split("\n")[0].slice(0, 100)}`,
+      );
+    } finally {
+      await deferred.stop();
+      if (savedMode === undefined) delete process.env.FAKE_MODE;
+      else process.env.FAKE_MODE = savedMode;
+      if (savedMarker === undefined) delete process.env.FAKE_MARKER;
+      else process.env.FAKE_MARKER = savedMarker;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

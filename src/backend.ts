@@ -34,18 +34,20 @@ import {
   Backoff,
   candidateIdentity,
   Deadline,
+  KERNEL_START_STAGE,
   MIN_START_MS,
-  NOT_RESOLVED_ADVICE,
-  NOT_RESOLVED_BACKOFF_MS,
+  preparationBackoff,
   PreparationStopped,
   PreparationTimeout,
   PREPARATION_BACKOFF_MS,
   type BackoffState,
   type CandidateIdentity,
+  type PreparationFailure,
 } from "./prepare.js";
 import {
   drainPages,
   HandshakeTimeout,
+  isKernelStartFailed,
   isServerNotResolved,
   KernelSession,
   listAllTools,
@@ -218,12 +220,12 @@ export class LocalBackend implements KernelBackend {
    */
   async prepare(deadline: Deadline): Promise<void> {
     // Read once, and not spent on a start too short to succeed.
-    const remainder = deadline.handOn("starting the kernel", MIN_START_MS);
+    const remainder = deadline.handOn(KERNEL_START_STAGE, MIN_START_MS);
     // A beat of grace, so the handshake's own timer fires first: its error
     // carries the kernel's last output, which names the actual cause. That
     // timer is the deadline's remainder, so its expiry is the deadline's.
     await deadline.within(
-      "starting the kernel",
+      KERNEL_START_STAGE,
       this.#session.ensure(remainder),
       undefined,
       1_000,
@@ -322,6 +324,22 @@ export interface DeferredOptions {
   backoffMs?: number;
 }
 
+/**
+ * What a failed preparation was, by the stage that failed rather than where the
+ * deadline happened to land: an earlier stage finishing at 19.9s of 20 had the
+ * kernel's start refused, and at 20.1s timed out itself, one cause given two
+ * treatments (#22). Only the kernel's own start running out of time, or any
+ * other failure of it, is the kernel's; time running out anywhere before it is
+ * a slow stage, unless the start timeout is too short for any start at all.
+ */
+function preparationFailure(err: unknown, startTimeoutMs: number): PreparationFailure {
+  if (isServerNotResolved(err)) return { kind: "unresolved" };
+  if (!(err instanceof PreparationTimeout)) return { kind: "kernel" };
+  if (startTimeoutMs < MIN_START_MS) return { kind: "setting", startTimeoutMs };
+  if (err.stage === KERNEL_START_STAGE && err.began) return { kind: "kernel" };
+  return { kind: "slow", stage: err.stage, began: err.began };
+}
+
 export class DeferredBackend implements KernelBackend {
   readonly kind = "deferred" as const;
   readonly #factory: (deadline: Deadline) => Promise<KernelBackend>;
@@ -330,6 +348,13 @@ export class DeferredBackend implements KernelBackend {
   readonly #bin: string | undefined;
   readonly #clock: () => number;
   readonly #backoff: Backoff;
+  /**
+   * Slow-stage failures in a row, and when the last was: what escalates them
+   * to the full window (#22). Kept here, with the back-off, and not as a side
+   * effect of choosing its window; ended by a gap of the full window, and by a
+   * preparation that succeeds.
+   */
+  #slow: { count: number; at: number } | null = null;
   #resolved: KernelBackend | null = null;
   #resolving: Promise<KernelBackend> | null = null;
   /**
@@ -410,6 +435,7 @@ export class DeferredBackend implements KernelBackend {
       (backend) => {
         this.#resolved = backend;
         this.#resolving = null;
+        this.#slow = null;
         return backend;
       },
       (err: unknown) => {
@@ -417,26 +443,58 @@ export class DeferredBackend implements KernelBackend {
         // failure is recorded first, and that call meets the back-off.
         this.#resolving = null;
         if (err instanceof PreparationStopped) throw err;
-        // A server name that does not resolve is fixed by creating the server
-        // or installing its paclet, which the back-off cannot see: the full
-        // window held that fix off for ten minutes (issue #5). So it gets a
-        // short one, which still spares a seat on every call meanwhile.
-        const unresolved = isServerNotResolved(err);
-        this.#backoff.record(
-          this.#identity(),
-          err,
-          unresolved ? NOT_RESOLVED_BACKOFF_MS : undefined,
-          // Not the installation: the doctor and an install change point
-          // the user at the wrong thing.
-          unresolved ? NOT_RESOLVED_ADVICE : undefined,
-        );
-        this.#log?.(
-          `preparation failed; not retrying for ${waitText(this.#backoffWindow())}: ${errorText(err)}`,
-        );
+        this.#recordFailure("preparation", err);
         throw err;
       },
     );
     return this.#resolving;
+  }
+
+  /**
+   * Back off by what failed (#22): `preparationBackoff` picks the window and the
+   * advice, and a slow stage's run of failures is counted here. A server name
+   * that does not resolve is fixed by creating the server or installing its
+   * paclet, which the back-off cannot see, so the full window held that fix off
+   * for ten minutes (issue #5); a slow stage has a fresh deadline next time.
+   * Neither is the installation, so neither points at doctor.
+   */
+  #recordFailure(what: string, err: unknown): void {
+    const failure = preparationFailure(err, this.#startTimeoutMs);
+    let repeats = 0;
+    if (failure.kind === "slow") {
+      const now = this.#clock();
+      const run = this.#slow && now - this.#slow.at < PREPARATION_BACKOFF_MS ? this.#slow : null;
+      repeats = run?.count ?? 0;
+      this.#slow = { count: repeats + 1, at: now };
+    }
+    const { windowMs, advice } = preparationBackoff(failure, repeats);
+    this.#backoff.record(this.#identity(), err, windowMs, advice);
+    this.#log?.(
+      `${what} failed; not retrying for ${waitText(this.#backoffWindow())}: ${errorText(err)}`,
+    );
+  }
+
+  /**
+   * A call on the chosen backend, whose failure to start a kernel is a failed
+   * preparation too. A private session's kernel restarts after an idle shutdown
+   * inside its next call, outside any preparation, so that start's failure — a
+   * paclet uninstalled, a server file removed meanwhile — recorded nothing, and
+   * every later call restarted it to fail the same way (#20). Recorded, and the
+   * backend given up, the next call meets the back-off, and after it a fresh
+   * preparation. A broker's start failures arrive as text and are its pool's.
+   */
+  async #use<T>(fn: (backend: KernelBackend) => Promise<T>): Promise<T> {
+    const backend = await this.#get();
+    try {
+      return await fn(backend);
+    } catch (err) {
+      if (backend === this.#resolved && isKernelStartFailed(err)) {
+        this.#recordFailure("restarting the kernel", err);
+        this.#resolved = null;
+        this.#retire(backend);
+      }
+      throw err;
+    }
   }
 
   #backoffWindow(): number {
@@ -504,31 +562,31 @@ export class DeferredBackend implements KernelBackend {
   }
 
   async capabilities(): Promise<ServerCapabilities> {
-    return (await this.#get()).capabilities();
+    return this.#use((backend) => backend.capabilities());
   }
   async listTools(cursor?: string): Promise<ToolPage> {
-    return (await this.#get()).listTools(cursor);
+    return this.#use((backend) => backend.listTools(cursor));
   }
   async listPrompts(cursor?: string): Promise<PromptPage> {
-    return (await this.#get()).listPrompts(cursor);
+    return this.#use((backend) => backend.listPrompts(cursor));
   }
   async getPrompt(
     params: GetPromptRequest["params"],
     options?: EvaluationOptions,
   ): Promise<GetPromptResult> {
-    return (await this.#get()).getPrompt(params, options);
+    return this.#use((backend) => backend.getPrompt(params, options));
   }
   async listResources(params?: ListResourcesRequest["params"]): Promise<ListResourcesResult> {
-    return (await this.#get()).listResources(params);
+    return this.#use((backend) => backend.listResources(params));
   }
   async readResource(
     params: ReadResourceRequest["params"],
     options?: EvaluationOptions,
   ): Promise<ReadResourceResult> {
-    return (await this.#get()).readResource(params, options);
+    return this.#use((backend) => backend.readResource(params, options));
   }
   async callTool(params: CallToolRequest["params"], options: CallOptions): Promise<CallToolResult> {
-    return (await this.#get()).callTool(params, options);
+    return this.#use((backend) => backend.callTool(params, options));
   }
   async stop(): Promise<void> {
     this.#stopped = true;

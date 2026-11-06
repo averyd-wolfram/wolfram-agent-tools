@@ -498,12 +498,34 @@ function chosenShaping(flavour: KernelFlavour | undefined): string[] {
  * call. The original rides along as `cause`, so a caller can still tell a
  * handshake timeout from any other failure.
  */
-function withKernelOutput(err: unknown, output: string[]): Error {
+/**
+ * A kernel that did not start, as opposed to a call that failed on a running
+ * one. Typed so a failed restart is told apart from a failed call where the
+ * text alone cannot be: a private session's kernel restarting after an idle
+ * shutdown starts outside any preparation, and its failure recorded no back-off,
+ * so every later call restarted it to fail again (#20).
+ */
+export class KernelStartFailed extends Error {
+  constructor(message: string, cause: unknown) {
+    super(message, { cause });
+    this.name = "KernelStartFailed";
+  }
+}
+
+/** Whether `err`, or anything it was wrapped around, is a `KernelStartFailed`. */
+export function isKernelStartFailed(err: unknown): boolean {
+  for (let e: unknown = err; e instanceof Error; e = e.cause) {
+    if (e instanceof KernelStartFailed) return true;
+  }
+  return false;
+}
+
+function withKernelOutput(err: unknown, output: string[]): KernelStartFailed {
   const message = errorText(err);
   // The facts line is this server's own bookkeeping, not something the kernel
   // said about the failure.
   const recent = output.filter((line) => !isFactsLine(line));
-  if (recent.length === 0) return new Error(message, { cause: err });
+  if (recent.length === 0) return new KernelStartFailed(message, err);
   const tail = recent.map((line) => `  ${line}`).join("\n");
   // No doctor command here: on the shared path this runs in the broker, whose
   // launch context is not the caller's, so it could name the wrong one.
@@ -511,7 +533,7 @@ function withKernelOutput(err: unknown, output: string[]): Error {
     ? "\n\nThis kernel is not activated. Activate it, by opening Wolfram once and " +
       "signing in or with `wolframscript -activate` in a terminal, then try again."
     : "";
-  return new Error(`${message}\n\nLast output from the kernel:\n${tail}${hint}`, { cause: err });
+  return new KernelStartFailed(`${message}\n\nLast output from the kernel:\n${tail}${hint}`, err);
 }
 
 export class KernelSession {
