@@ -511,8 +511,53 @@ connection was closed under every other call the session had there, on a broker 
 busy. Now the broker client asks the *broker*, not a kernel, whether it is still running. The
 broker answers `ping` from its event loop, ahead of its pool, so the question is answerable,
 unlike the kernel probe below. Only a broker that doesn't answer is given up, and
-`DeferredBackend` waits for that verdict before sending anything else. How long a queued request
-may wait, on either path, is #80.
+`DeferredBackend` waits for that verdict before sending anything else. When the ceiling starts
+counting, on either path, is the next section's.
+
+### A ceiling counts from the request's arrival
+
+The table above is about a request the kernel has. Before that, a request can wait a long time:
+while its kernel is prepared, in the pool's queue or held for its own flavour, in the session's
+queue behind another call, while abandoned work is taken back, and during a start. None of that
+counted (#80):
+
+- A private kernel counted from when the call ran. A call queued behind a long one waited it
+  out, was sent, and failed a whole ceiling later: a 1 s call behind a 5 s one was answered at 6 s.
+- The broker counted the same way, but its client counted from the send. So a queued request was
+  answered at its ceiling plus the client's grace, and the broker sent it anyway, after its
+  caller had been told it failed. A model that retried it ran it twice.
+
+The rule now, the same on both paths:
+
+| | |
+|---|---|
+| Where it is stamped | Once, where the request arrives in `proxy.ts` (`expiryOf`), as an absolute `expiresAt`, or `null` when the ceiling is 0. This covers tool calls, prompts and resource reads. The lists keep `DEFAULT_DEADLINE_MS`, counted from the run |
+| Before a kernel has it | Everything counts: preparation (`DeferredBackend`), the pool's queue and its holds, the session's queue, taking back abandoned work, a start |
+| Still unsent when it passes | Answered then with `RequestExpired` (*the request had not been sent to a kernel by then, and it will not be*), and never sent. Each step also reads the clock, since a timer due before a step can still run after it |
+| Already past when it reaches the pool | Refused before the pool's tiers run, so no kernel is grown, and no other session's retired, for it |
+| Sent before it passes | Waits only for what is left of the one budget, and the error names the whole ceiling. After that, the table above applies |
+
+The broker frame carries `expiresAt`, which is why `BROKER_PROTOCOL` went to 8. Proxy and broker
+share the machine's clock, and the broker answers in the private path's words, exactly. The
+client's own timer waits for the broker until the expiry plus its grace, so it fires only for a
+broker that answers nothing, and a `null` expiry gives it no timer at all, whatever `timeoutMs`
+says, as the broker's kernel session reads it.
+
+This is **not** "at most once". A request that was sent runs to its end whatever its ceiling, as
+the table above says, and a retry made after the ceiling may run beside the first or after it.
+What the rule guarantees is narrower: nothing is started after its caller was answered.
+`RequestExpired` is a `RequestDropped`, so nothing mistakes it for a cancellation, which is the
+one thing that stops a kernel.
+
+A start is shared work, so a caller's ceiling passing does not end it:
+
+- A kernel started with no call left waiting for it idles out like any other, rather than
+  holding its seat.
+- A start that fails after its caller was answered is still reported, through `KernelSession`'s
+  `onStartFailed`. The back-off, and the pool's window, apply as they would have.
+- A start that `stop()` cut short is `StartStopped`, and is reported as no failure. A pool retires
+  such a kernel when its caller has gone and another session needs the seat; read as a failure,
+  that refused a healthy flavour for ten minutes.
 
 ### What was removed, and why
 
@@ -532,7 +577,8 @@ guards the whole design — if dispatch ever becomes concurrent, all of this nee
 - The broker erased the protocol-vs-`isError` distinction `proxy.ts` maintains, so the same
   call was an MCP error when private and an `isError` result when shared. `BROKER_PROTOCOL`
   went to 5 for the frame to carry the code, and to 6 for it to carry the error's `data` (#62).
-  It went to 7 for `kernelReady` to carry why a new kernel's prompts could not be read (#122).
+  It went to 7 for `kernelReady` to carry why a new kernel's prompts could not be read (#122),
+  and to 8 for a request to carry when its ceiling passes (#80).
 - A doubled `MCP error -32602: MCP error -32602:` prefix on every relayed protocol error — on
   `tools/call` first, and on every other request a kernel answers since #62.
 - `--help` and the "no usable Wolfram" diagnostic told users to run an unpublished
@@ -563,9 +609,10 @@ timeout fire anyway, from a library caller's options, the kernel is presumed bus
 request reclaims it.
 
 The handshake's `initialize` is sent with the start timeout plus a beat, so the handshake's own
-timer, which names the cause, is what fires. What remains on the SDK's minute is the lists the
-kernel-ready hook reads: inside a start, and again outside the queue whenever the kernel says a
-list changed. Neither has a caller to answer, and a failure is logged and ignored.
+timer, which names the cause, is what fires. The lists the kernel-ready hook reads, inside a start
+and again whenever the kernel says a list changed, carry the same options (#70). A start waits for
+them for `DEFAULT_DEADLINE_MS`, then stops waiting and leaves them outstanding, so a late answer
+still refreshes the lists. Neither has a caller to answer, and a failure is logged and ignored.
 
 A cancel stops the kernel only once the kernel has the work. A request cancelled while it
 waited — in the session's queue, the pool's, while abandoned work was taken back, or during a

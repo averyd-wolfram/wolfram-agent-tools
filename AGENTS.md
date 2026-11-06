@@ -374,7 +374,10 @@ progress notifications, the ceiling answers the caller and leaves the kernel run
 reply is proof of life; the kernel is stopped only when someone else needs the seat or the caller
 cancelled. `notifications/cancelled` cannot stop work already running. This is settled — the
 reasoning, including why a per-tool timeout table was rejected, is in `evaluationCeilingMs` and
-`KernelSession.#fate`.
+`KernelSession.#fate`. The ceiling counts from the request's arrival in the proxy, on both paths:
+a request still unsent when it passes is answered then and never sent (`RequestExpired`, #80).
+That is not at-most-once — work a kernel already has runs on, and a retry may run beside it. The
+contract is `docs/design.md`'s *A ceiling counts from the request's arrival*.
 
 **A running broker serves the code it started with.** It is spawned detached, its output
 discarded unless `WOLFRAM_MCP_LOG` names a file, so a fix to `pool.ts`, `kernel.ts` or
