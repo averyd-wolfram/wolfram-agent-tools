@@ -127,6 +127,8 @@ interface Waiter {
   flavour: KernelFlavour;
   resolve: (slot: Slot | Promise<Slot>) => void;
   reject: (err: unknown) => void;
+  /** When it came, so a held request and a queued one are served in order. */
+  seq: number;
 }
 
 /** Which tier serves a request now: `#plan` decides, and `#act` carries it out. */
@@ -202,6 +204,8 @@ export class KernelPool {
   readonly #proven = new Set<string>();
   /** Requests held on their own flavour, apart from the FIFO queue (#19, #115). */
   readonly #held = new Map<string, Waiter[]>();
+  /** Requests numbered as they come to wait, held or queued. */
+  #arrivals = 0;
   /** A second look for a flavour's held requests when its window ends. */
   readonly #windowTimers = new Map<string, NodeJS.Timeout>();
 
@@ -492,7 +496,7 @@ export class KernelPool {
       return this.#act(plan, flavour);
     }
     return new Promise<Slot>((resolve, reject) => {
-      const waiter: Waiter = { flavour, resolve, reject };
+      const waiter: Waiter = { flavour, resolve, reject, seq: ++this.#arrivals };
       if (plan.tier === "hold") this.#hold(waiter);
       else this.#waiters.push(waiter);
       // Cancelled while it waits, it leaves, held or queued: left in, it was
@@ -573,10 +577,25 @@ export class KernelPool {
     }
   }
 
+  /**
+   * A kernel free again goes to whoever came first: the head of the queue, or
+   * a request held for this kernel's flavour. Woken first always, held
+   * requests took every release of their flavour's kernel, so a stream of them
+   * inside a window kept an older queued request of another flavour from the
+   * seat it was owed, for as long as the window ran (#147's review).
+   */
   #release(slot: Slot): void {
     slot.busy = false;
-    this.#wake(slot.flavour.digest);
-    this.#drainWaiters();
+    const { digest } = slot.flavour;
+    const head = this.#waiters[0];
+    const held = this.#held.get(digest) ?? [];
+    if (head && held.every((waiter) => head.seq < waiter.seq)) {
+      this.#drainWaiters();
+      this.#wake(digest);
+    } else {
+      this.#wake(digest);
+      this.#drainWaiters();
+    }
   }
 
   /**

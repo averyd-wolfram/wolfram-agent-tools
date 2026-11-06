@@ -5817,6 +5817,61 @@ heading("The pool's refusal window spares a flavour's idle kernel, and is report
     }
   }
 
+  // A held request does not jump the queue: woken first on every release of
+  // its flavour's kernel, held requests kept an older queued request of
+  // another flavour from its seat for as long as their window ran.
+  {
+    const fifoPool = poolOf(60_000);
+    const third = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage", LLMKIT_ENABLED: "false" });
+    const fourth = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage", MCP_APPS_ENABLED: "false" });
+    const holdFor = (on, fl) => {
+      let release;
+      const held = new Promise((resolve) => (release = resolve));
+      let running = false;
+      const done = outcome(
+        on.run(fl, async (client) => {
+          running = true;
+          await held;
+          return evaluate(client);
+        }),
+      );
+      return { release: () => release(), running: () => running, done };
+    };
+    try {
+      delete process.env.FAKE_MODE;
+      const own = holdFor(fifoPool, flavour);
+      await until(own.running, 10_000);
+      process.env.FAKE_MODE = "unactivated";
+      await outcome(fifoPool.run(flavour, evaluate)); // an extra start dies: the window opens
+      delete process.env.FAKE_MODE;
+      const otherBusy = holdFor(fifoPool, fourth); // the budget is full, nothing idle
+      await until(otherBusy.running, 10_000);
+      const queued = outcome(fifoPool.run(third, evaluate)); // waits for a seat
+      await new Promise((r) => setTimeout(r, 100));
+      // Held for its own kernel, and long once it has one, as a stream of them is.
+      const heldLater = holdFor(fifoPool, flavour);
+      await new Promise((r) => setTimeout(r, 100));
+      own.release();
+      await own.done;
+      const first = await Promise.race([
+        queued,
+        new Promise((r) => setTimeout(() => r("(still queued after 3s)"), 3_000)),
+      ]);
+      heldLater.release();
+      otherBusy.release();
+      await Promise.all([otherBusy.done, queued, heldLater.done]);
+      check(
+        "a request held for its own kernel does not take it ahead of an older queued request",
+        /^evaluated/.test(first),
+        String(first).replace(/\s+/g, " ").slice(0, 80),
+      );
+    } finally {
+      await fifoPool.stop();
+      if (savedMode === undefined) delete process.env.FAKE_MODE;
+      else process.env.FAKE_MODE = savedMode;
+    }
+  }
+
   // The window ends early when the kernel binary changes, which nothing
   // announces: held behind a long call, a request waited out the old window,
   // ten minutes for a kernel that died on launch, though the installation had
