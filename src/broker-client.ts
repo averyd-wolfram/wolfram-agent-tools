@@ -700,22 +700,27 @@ export class BrokerBackend implements KernelBackend {
       ...(sent === undefined ? {} : { timeoutMs: sent }),
       ...(expiresAt === undefined ? {} : { expiresAt }),
     };
-    // From the arrival, as the broker counts it, so a request a busy broker
-    // answers at its ceiling is heard then, and not a whole ceiling later. A
-    // null expiry is no ceiling, whatever `timeoutMs` says, as the broker's
+    // A null expiry is no ceiling, whatever `timeoutMs` says, as the broker's
     // kernel session reads it: timed here, it failed what a private kernel
     // waited for.
     const ceiling =
       expiresAt === null
         ? 0
-        : expiresAt !== undefined
-          ? Math.max(0, expiresAt - Date.now()) + REQUEST_GRACE_MS
-          : brokerCeilingMs(op, sent, this.#options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS);
+        : brokerCeilingMs(op, sent, this.#options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS);
+    // Counted from the arrival, as the broker counts it, so a request a busy
+    // broker answers at its ceiling is heard then, and not a whole ceiling
+    // later. The error still names the whole ceiling, as a private kernel's
+    // does: named by what was left, it read "within 3.9s" for a 2 s call
+    // whose grace is 2 s, as the moment it was sent varied.
+    const waitMs =
+      typeof expiresAt === "number"
+        ? Math.max(0, expiresAt - Date.now()) + REQUEST_GRACE_MS
+        : ceiling;
     const answer = new Promise<T>((resolve, reject) => {
       // No timer at all when there is no ceiling, so this waits exactly as long
       // as a private kernel would.
       const timer =
-        ceiling === 0
+        waitMs === 0
           ? undefined
           : setTimeout(() => {
               this.#pending.delete(id);
@@ -723,14 +728,16 @@ export class BrokerBackend implements KernelBackend {
               // and a late progress event belongs to a caller already answered.
               this.#progress.delete(id);
               reject(
-                new Error(`the Wolfram broker did not answer ${op} within ${budgetText(ceiling)}`),
+                new Error(
+                  `the Wolfram broker did not answer ${op} within ${budgetText(ceiling || waitMs)}`,
+                ),
               );
               // The caller is answered; whether the broker is gone is another
               // question (`#stillAnswering`). A request still queued there at
               // its ceiling the broker answers itself (#80), so only a broker
               // that answers nothing gets here.
               void this.#stillAnswering(`${op} ran out`);
-            }, timerDelay(ceiling));
+            }, timerDelay(waitMs));
       timer?.unref?.();
       const settle = {
         resolve: (v: unknown) => {
