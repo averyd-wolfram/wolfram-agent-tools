@@ -53,6 +53,13 @@ export const HARD_KERNEL_CAP = 8;
 export const UNLIMITED_BUDGET = 4;
 
 /**
+ * How often a request held inside its flavour's window looks again: the window
+ * can end before its time, when the kernel binary changes, and nothing else
+ * would tell it. A look is a stat of the binary, so a second costs nothing.
+ */
+const HELD_RECHECK_MS = 1_000;
+
+/**
  * What the licence permits.
  *
  * `"unknown"` and `"unlimited"` are kept distinct on purpose. Treating a value
@@ -506,7 +513,11 @@ export class KernelPool {
    * no other flavour's waiter (#115). It is planned again when a kernel of its
    * flavour is released or retired, or proves it can start, and when the
    * flavour's window ends, which no release may bring: a timer gives it that
-   * second look.
+   * second look. The window also ends early when the kernel binary changes —
+   * a repaired installation — which nothing announces, so inside a window the
+   * timer looks every `HELD_RECHECK_MS` rather than only at its end: a request
+   * held behind a long call otherwise waited out the old window, minutes
+   * after newer requests were already starting kernels.
    */
   #hold(waiter: Waiter): void {
     const { digest } = waiter.flavour;
@@ -520,7 +531,7 @@ export class KernelPool {
           this.#windowTimers.delete(digest);
           this.#wake(digest);
         },
-        timerDelay(window.remainingMs + 1),
+        timerDelay(Math.min(window.remainingMs + 1, HELD_RECHECK_MS)),
       );
       timer.unref?.();
       this.#windowTimers.set(digest, timer);

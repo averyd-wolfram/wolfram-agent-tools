@@ -5817,6 +5817,56 @@ heading("The pool's refusal window spares a flavour's idle kernel, and is report
     }
   }
 
+  // The window ends early when the kernel binary changes, which nothing
+  // announces: held behind a long call, a request waited out the old window,
+  // ten minutes for a kernel that died on launch, though the installation had
+  // been repaired.
+  {
+    const repairable = join(home, "pool-kernel-repairable.mjs");
+    writeFileSync(repairable, readFileSync(fakeKernel, "utf8"));
+    chmodSync(repairable, 0o755);
+    const repairPool = new lib.KernelPool({
+      bin: repairable,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 2, type: null },
+      learnFromKernels: false,
+    });
+    try {
+      delete process.env.FAKE_MODE;
+      const long = hold(repairPool);
+      await until(long.running, 10_000);
+      process.env.FAKE_MODE = "unactivated";
+      await outcome(repairPool.run(flavour, evaluate)); // an extra start dies: ten minutes
+      delete process.env.FAKE_MODE;
+      const late = outcome(repairPool.run(flavour, evaluate)); // held behind the long call
+      await new Promise((r) => setTimeout(r, 200));
+      writeFileSync(repairable, `${readFileSync(fakeKernel, "utf8")}\n// repaired\n`);
+      const repairedAt = Date.now();
+      const served = await Promise.race([
+        late,
+        new Promise((r) => setTimeout(() => r("(still held after 5s)"), 5_000)),
+      ]);
+      const heldMs = Date.now() - repairedAt;
+      long.release();
+      await long.done;
+      await late;
+      check(
+        "and when the kernel binary changes, though the long call it is held behind runs on",
+        /^evaluated/.test(served),
+        `after ${heldMs}ms: ${String(served).replace(/\s+/g, " ").slice(0, 80)}`,
+      );
+    } finally {
+      await repairPool.stop();
+      if (savedMode === undefined) delete process.env.FAKE_MODE;
+      else process.env.FAKE_MODE = savedMode;
+    }
+  }
+
   // Any failed start is remembered, not only a server name that did not
   // resolve: a kernel that died on launch was an ordinary call failure, so each
   // request of its flavour started another to fail, and at the budget retired
