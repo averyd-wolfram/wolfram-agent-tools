@@ -329,9 +329,13 @@ export function candidateIdentity(bin: string): CandidateIdentity | null {
 }
 
 function sameCandidate(a: CandidateIdentity | null, b: CandidateIdentity | null): boolean {
-  return (
-    a !== null && b !== null && a.bin === b.bin && a.mtimeMs === b.mtimeMs && a.size === b.size
-  );
+  // Unreadable both times is the same missing binary, not a changed one: read
+  // as a change, a back-off recorded while the binary could not be read ended
+  // at the next look, and every call tried again — in the broker's pool,
+  // retiring another session's idle kernel each time to make room. A binary
+  // that reads again is a change, and ends it.
+  if (a === null || b === null) return a === b;
+  return a.bin === b.bin && a.mtimeMs === b.mtimeMs && a.size === b.size;
 }
 
 /** The state `wolfram_status` reports. */

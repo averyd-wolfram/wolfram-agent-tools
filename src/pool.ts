@@ -17,6 +17,7 @@ import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { KernelFlavour } from "./flavour.js";
 import {
+  isKernelStartFailed,
   isServerNotResolved,
   KernelSession,
   RequestDropped,
@@ -26,7 +27,13 @@ import {
 import { baseDirectoryEnv, type KernelFacts } from "./inspect.js";
 import { errorText, type Logger } from "./log.js";
 import { elapsedText, waitText } from "./duration.js";
-import { NOT_RESOLVED_ADVICE, SHORT_BACKOFF_MS } from "./prepare.js";
+import {
+  Backoff,
+  candidateIdentity,
+  PREPARATION_BACKOFF_MS,
+  preparationBackoff,
+  type CandidateIdentity,
+} from "./prepare.js";
 
 /**
  * The `SHAPING_VARS` a licence can depend on: `$BaseDirectory` and
@@ -154,6 +161,10 @@ interface Window {
   ageMs: number;
   remainingMs: number;
   reason: string;
+  /** What ends it sooner, when that is not the installation changing. */
+  advice: string | undefined;
+  /** Whether the start failed because the server name did not resolve. */
+  unresolved: boolean;
 }
 
 export class KernelPool {
@@ -164,16 +175,20 @@ export class KernelPool {
   #licence: LicenceInfo;
   #extraEnv: Record<string, string> | undefined;
   /**
-   * The last time each flavour's server name did not resolve, and the kernel's
-   * words for it. A session's preparation only attaches to the broker, so this
-   * failure never reached a back-off: each request grew a kernel to fail, in
-   * parallel for simultaneous ones, and at the budget the swap tier retired other
+   * Each flavour's last failed kernel start, backed off by what failed, as a
+   * private session's preparation is (`preparationBackoff`). A session's
+   * preparation only attaches to the broker, so a start failing in the pool
+   * never reached a back-off: each request grew a kernel to fail, in parallel
+   * for simultaneous ones, and at the budget the swap tier retired other
    * sessions' idle kernels to make room for a start that could not succeed
-   * (issue #19). Keyed on the flavour, so sharing it changes no answer: a
-   * session of the same flavour would get the same one from a kernel. A burst
-   * that arrives before the first failure is recorded is not covered: #19.
+   * (#19). That was answered for a server name that did not resolve; any other
+   * failed start — a kernel that died on launch, a handshake that timed out —
+   * was still an ordinary call failure, retried by the next request (#20).
+   * Keyed on the flavour, so sharing it changes no answer: a session of the
+   * same flavour would get the same one from a kernel. A burst that arrives
+   * before the first failure is recorded is not covered: #19.
    */
-  readonly #unresolved = new Map<string, { at: number; reason: string }>();
+  readonly #failed = new Map<string, { backoff: Backoff; unresolved: boolean }>();
 
   constructor(options: KernelPoolOptions) {
     this.#options = options;
@@ -563,7 +578,7 @@ export class KernelPool {
         this.#release(slot);
         throw err;
       }
-      if (isServerNotResolved(err)) this.#recordUnresolved(flavour.digest, err);
+      if (isKernelStartFailed(err)) this.#recordFailedStart(flavour.digest, err);
       this.#quarantine(slot, errorText(err));
       throw err;
     }
@@ -573,14 +588,25 @@ export class KernelPool {
     return (this.#options.clock ?? Date.now)();
   }
 
-  #recordUnresolved(digest: string, err: unknown): void {
-    // Pruned here, so a long-lived broker does not keep every name that ever
+  /** What makes two starts starts of the same installation: a changed binary ends a window. */
+  #identity(): CandidateIdentity | null {
+    return candidateIdentity(this.#options.bin);
+  }
+
+  #recordFailedStart(digest: string, err: unknown): void {
+    // Pruned here, so a long-lived broker does not keep every flavour that ever
     // failed, kernel output and all.
-    const now = this.#now();
-    for (const [key, known] of this.#unresolved) {
-      if (now - known.at >= SHORT_BACKOFF_MS) this.#unresolved.delete(key);
+    const identity = this.#identity();
+    for (const [key, failed] of this.#failed) {
+      if (!failed.backoff.current(identity)) this.#failed.delete(key);
     }
-    this.#unresolved.set(digest, { at: now, reason: errorText(err) });
+    const unresolved = isServerNotResolved(err);
+    const { windowMs, advice } = preparationBackoff(
+      unresolved ? { kind: "unresolved" } : { kind: "kernel" },
+    );
+    const backoff = new Backoff(PREPARATION_BACKOFF_MS, () => this.#now());
+    backoff.record(identity, err, windowMs, advice);
+    this.#failed.set(digest, { backoff, unresolved });
   }
 
   /**
@@ -589,14 +615,20 @@ export class KernelPool {
    * refusal and what `status` reports of it cannot disagree at the edge.
    */
   #window(digest: string): Window | null {
-    const known = this.#unresolved.get(digest);
-    if (!known) return null;
-    const ageMs = this.#now() - known.at;
-    if (ageMs >= SHORT_BACKOFF_MS) {
-      this.#unresolved.delete(digest);
+    const failed = this.#failed.get(digest);
+    if (!failed) return null;
+    const state = failed.backoff.current(this.#identity());
+    if (!state) {
+      this.#failed.delete(digest);
       return null;
     }
-    return { ageMs, remainingMs: SHORT_BACKOFF_MS - ageMs, reason: known.reason };
+    return {
+      ageMs: this.#now() - state.failedAt,
+      remainingMs: state.remainingMs,
+      reason: state.reason,
+      advice: state.advice,
+      unresolved: failed.unresolved,
+    };
   }
 
   /**
@@ -612,17 +644,20 @@ export class KernelPool {
   }
 
   /**
-   * The refusal for a request while its flavour's server recently would not
+   * The refusal for a request while its flavour's kernel recently would not
    * start. Built only where it is thrown: a request inside the window that a
-   * running kernel serves needs no error.
+   * running kernel serves needs no error. No doctor command for the
+   * installation's failures: this runs in the broker, whose launch context is
+   * not the caller's, so it could name the wrong one.
    */
-  #refusal(window: Window): ServerNotResolved {
-    return new ServerNotResolved(
-      `a kernel for this server could not start it ${elapsedText(window.ageMs)} ago, so ` +
-        `none was started for this request; it is tried again in ` +
-        `${waitText(window.remainingMs)}; ${NOT_RESOLVED_ADVICE}.` +
-        `\n\nThe failure was: ${window.reason}`,
-    );
+  #refusal(window: Window): Error {
+    const message =
+      `a kernel for this server could not start ${elapsedText(window.ageMs)} ago, so ` +
+      `none was started for this request; it is tried again in ` +
+      `${waitText(window.remainingMs)}` +
+      (window.advice ? `; ${window.advice}.` : `, or as soon as the installation changes.`) +
+      `\n\nThe failure was: ${window.reason}`;
+    return window.unresolved ? new ServerNotResolved(message) : new Error(message);
   }
 
   async stop(): Promise<void> {

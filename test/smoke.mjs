@@ -5726,6 +5726,111 @@ heading("The pool's refusal window spares a flavour's idle kernel, and is report
     else process.env.FAKE_MARKER = savedMarker;
   }
 
+  // Any failed start is remembered, not only a server name that did not
+  // resolve: a kernel that died on launch was an ordinary call failure, so each
+  // request of its flavour started another to fail, and at the budget retired
+  // another session's idle kernel to make room for it (#20).
+  {
+    const failMarker = join(home, "starts-any-failed-start");
+    // A copy, so a repaired installation can be shown by changing the binary.
+    const kernelCopy = join(home, "pool-kernel.mjs");
+    writeFileSync(kernelCopy, readFileSync(fakeKernel, "utf8"));
+    chmodSync(kernelCopy, 0o755);
+    process.env.FAKE_MARKER = failMarker;
+    const onePool = new lib.KernelPool({
+      bin: kernelCopy,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 1, type: null },
+      learnFromKernels: false,
+    });
+    const other = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage", MCP_APPS_ENABLED: "false" });
+    const asUnactivated = async (run) => {
+      process.env.FAKE_MODE = "unactivated";
+      try {
+        return await outcome(run());
+      } finally {
+        delete process.env.FAKE_MODE;
+      }
+    };
+    try {
+      delete process.env.FAKE_MODE;
+      // Another session's kernel, idle, holding the only seat.
+      const otherFirst = await outcome(onePool.run(other, evaluate));
+      // Its seat is taken for the start, which dies on launch.
+      const failedStart = await asUnactivated(() => onePool.run(flavour, evaluate));
+      await outcome(onePool.run(other, evaluate)); // the other session's kernel, again
+      const before = starts(failMarker);
+      const refused = await asUnactivated(() => onePool.run(flavour, evaluate));
+      const startedForIt = starts(failMarker) - before;
+      check(
+        "a flavour whose kernel died on launch is refused for the full window, starting no kernel",
+        /^evaluated/.test(otherFirst) &&
+          /not activated/.test(failedStart) &&
+          /none was started for this request; it is tried again in 10m, or as soon as the installation changes/.test(
+            refused,
+          ) &&
+          startedForIt === 0,
+        `${startedForIt} start(s): ${refused.replace(/\s+/g, " ").slice(0, 120)}`,
+      );
+      const otherAfter = await outcome(onePool.run(other, evaluate));
+      check(
+        "and no other session's idle kernel is retired to make room for it",
+        /^evaluated/.test(otherAfter) && starts(failMarker) === before,
+        `${starts(failMarker) - before} start(s) since: ${otherAfter.replace(/\s+/g, " ").slice(0, 60)}`,
+      );
+      writeFileSync(kernelCopy, `${readFileSync(fakeKernel, "utf8")}\n// repaired\n`);
+      const repaired = await outcome(onePool.run(flavour, evaluate));
+      check(
+        "a changed kernel binary ends that window at once",
+        /^evaluated/.test(repaired),
+        repaired.replace(/\s+/g, " ").slice(0, 100),
+      );
+    } finally {
+      await onePool.stop();
+    }
+    // A binary that cannot be read at all, deleted or on a filesystem gone:
+    // read as a changed one, its window ended at the next look, and every
+    // request started a kernel to fail again.
+    const missing = join(home, "pool-kernel-missing.mjs");
+    const missingPool = new lib.KernelPool({
+      bin: missing,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 1, type: null },
+      learnFromKernels: false,
+    });
+    try {
+      const gone = await outcome(missingPool.run(flavour, evaluate));
+      const goneAgain = await outcome(missingPool.run(flavour, evaluate));
+      writeFileSync(missing, readFileSync(fakeKernel, "utf8"));
+      chmodSync(missing, 0o755);
+      const restored = await outcome(missingPool.run(flavour, evaluate));
+      check(
+        "a kernel binary that cannot be read keeps its window, and reading again ends it",
+        /^failed/.test(gone) &&
+          !/none was started/.test(gone) &&
+          /none was started for this request/.test(goneAgain) &&
+          /^evaluated/.test(restored),
+        `${goneAgain.replace(/\s+/g, " ").slice(0, 80)}; restored: ${restored.slice(0, 40)}`,
+      );
+    } finally {
+      await missingPool.stop();
+      if (savedMode === undefined) delete process.env.FAKE_MODE;
+      else process.env.FAKE_MODE = savedMode;
+      if (savedMarker === undefined) delete process.env.FAKE_MARKER;
+      else process.env.FAKE_MARKER = savedMarker;
+    }
+  }
+
   if (socketsHere("a shared session")) {
     // The same window, as a shared session sees it: refused at once, and
     // wolfram_status saying why and for how long.
