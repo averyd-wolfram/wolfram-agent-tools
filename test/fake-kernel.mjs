@@ -157,7 +157,13 @@ if (process.argv.some((arg) => arg.includes("LSPServer`StartServer"))) {
       if (buf.length < end + 4 + length) return;
       const msg = JSON.parse(buf.subarray(end + 4, end + 4 + length).toString());
       buf = buf.subarray(end + 4 + length);
-      if (msg.method === "exit") process.exit(0);
+      // As LSPServer does, measured on 14.3: told to exit, it says so and then
+      // stays alive until its input ends, which a client need not close.
+      if (msg.method === "exit") {
+        process.stderr.write("KERNEL IS EXITING GRACEFULLY\n");
+        process.stdin.on("end", () => process.exit(0));
+        return;
+      }
       if (msg.id === undefined || !msg.method) continue; // notifications, replies
       const handler = handled[msg.method];
       if (!handler) {
