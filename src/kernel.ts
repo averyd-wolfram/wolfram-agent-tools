@@ -361,14 +361,45 @@ export class RequestDropped extends Error {
   }
 }
 
+/**
+ * A request whose caller's ceiling passed before it was sent to a kernel. Its
+ * caller is answered then, and the request is never started afterwards: a
+ * request queued behind another, or waiting for a kernel to be prepared, used
+ * to be sent whenever its turn came, after its caller had been told it failed,
+ * so a model that retried it ran it twice (#80). A `RequestDropped`, so a pool
+ * hands its slot straight back rather than vouching for a kernel that never
+ * had it. The text names the caller's whole budget, and is the same on both
+ * paths, so sharing does not change the answer.
+ */
+export class RequestExpired extends RequestDropped {
+  constructor(budgetMs: number) {
+    super("its ceiling passed first");
+    this.message =
+      `no answer from the Wolfram kernel within ${budgetText(budgetMs)}: ` +
+      `the request had not been sent to a kernel by then, and it will not be`;
+    this.name = "RequestExpired";
+  }
+}
+
 /** How a single unit of work is to be run. */
 export interface RunOptions {
   /**
    * How long the caller will wait. Not a timeout on the request: when it passes
    * the caller is answered and the request is left outstanding on purpose.
-   * Unset is `DEFAULT_DEADLINE_MS`; `0` waits as long as the work takes.
+   * Unset is `DEFAULT_DEADLINE_MS`; `0` waits as long as the work takes. With
+   * `expiresAt`, it is only the budget an error names.
    */
   deadlineMs?: number | undefined;
+  /**
+   * When the caller stops waiting, as a `Date.now()` time stamped where the
+   * request arrived, or `null` to wait as long as the work takes. Time spent
+   * queued, or waiting for a kernel, counts against it, and a request still
+   * unsent when it passes is answered then and never started (`RequestExpired`).
+   * Counted from when the work ran, a request queued behind an hour's call
+   * waited the hour; on the shared path it failed at its ceiling instead, so
+   * sharing changed the answer (#80). Unset, `deadlineMs` counts from the run.
+   */
+  expiresAt?: number | null | undefined;
   /**
    * Fires when the caller cancels, which is the one case that kills a kernel —
    * once the kernel has the work, and not before.
@@ -467,6 +498,13 @@ export interface KernelSessionOptions {
    * time, while the session and the pool held it free (#149's review).
    */
   onReady?: (client: Client, late?: AbortSignal) => Promise<void>;
+  /**
+   * Told of a kernel start that failed inside `run`, whatever its callers were
+   * told. A caller whose ceiling passed during the start was answered that, and
+   * never saw the start fail, so its owner could not record the failure: every
+   * later call restarted a kernel that would not start (#80's review).
+   */
+  onStartFailed?: ((err: unknown) => void) | undefined;
   /**
    * What the kernel reported, once per start, before its server is up, and
    * which `SHAPING_VARS` its environment chose. Only a report that chose none
@@ -590,6 +628,8 @@ export class KernelSession {
   #queue: Promise<unknown> = Promise.resolve();
   /** Calls handed to `run`, numbered as they queue. */
   #queued = 0;
+  /** Calls handed to `run` and not yet settled: what arms an idle shutdown. */
+  #inRun = 0;
   /**
    * The last start that failed inside `run`, and the last call queued by then:
    * those calls share its failure rather than each starting a kernel to fail
@@ -780,7 +820,13 @@ export class KernelSession {
     this.#starting ??= this.#spawn(startTimeoutMs).finally(() => {
       this.#starting = null;
     });
-    return this.#starting;
+    const client = await this.#starting;
+    // Started with no call waiting for it — a preparation whose caller's
+    // ceiling passed meanwhile (#80) — it idles out like any other kernel.
+    // A call arms that as it finishes; with none, the kernel held its licence
+    // seat until something else used it, or the session ended.
+    if (this.#inRun === 0) this.#scheduleIdle();
+    return client;
   }
 
   /**
@@ -796,7 +842,37 @@ export class KernelSession {
     options: RunOptions = {},
   ): Promise<T> {
     const ticket = ++this.#queued;
+    this.#inRun++;
+    // The caller's ceiling, counted from where the request arrived (#80): a
+    // request still unsent when it passes is answered then, by a timer of its
+    // own rather than when its turn comes, and is inert from then on.
+    const { expiresAt } = options;
+    const budget =
+      options.deadlineMs ?? (expiresAt != null ? Math.max(0, expiresAt - Date.now()) : 0);
+    let expired: RequestExpired | null = null;
+    const expire = (): RequestExpired => (expired ??= new RequestExpired(budget));
+    // Read off the clock, not only the timer: a deadline already past, or one
+    // that passed while a wait ended, has not yet had its timer run.
+    const pastDeadline = (): boolean => expiresAt != null && Date.now() >= expiresAt;
+    let sent = false;
+    let expiryTimer: NodeJS.Timeout | undefined;
+    let expiry: Promise<never> | null = null;
+    if (expiresAt != null) {
+      expiry = new Promise<never>((_, reject) => {
+        expiryTimer = setTimeout(
+          () => {
+            if (sent) return; // the kernel has it: its deadline is `#awaitWithin`'s now
+            reject(expire());
+          },
+          deadlineDelay(Math.max(0, expiresAt - Date.now())),
+        );
+        expiryTimer.unref?.();
+      });
+      void expiry.catch(() => {});
+    }
     const task = this.#queue.then(async () => {
+      // Answered at its ceiling while it waited: its turn starts nothing.
+      if (expired || pastDeadline()) throw expire();
       // Queued behind a start that failed: that failure is this call's too. It
       // was never sent, so its caller may send it again, as a new call.
       const failed = this.#failedStart;
@@ -807,12 +883,17 @@ export class KernelSession {
       // had never had the work — or one just started to receive it.
       if (options.signal?.aborted) throw new RequestDropped(options.signal.reason);
       this.#clearIdle();
-      // Cancelled while abandoned work was taken back, or during the start:
-      // the same, and the kernel, if there is one, idles out like any other.
+      // Cancelled, or past its ceiling, while abandoned work was taken back or
+      // during the start: the same, and the kernel, if there is one, idles out
+      // like any other.
       const dropIfCancelled = (): void => {
-        if (!options.signal?.aborted) return;
+        const gone =
+          expired ??
+          (pastDeadline() ? expire() : null) ??
+          (options.signal?.aborted ? new RequestDropped(options.signal.reason) : null);
+        if (!gone) return;
         this.#scheduleIdle();
-        throw new RequestDropped(options.signal.reason);
+        throw gone;
       };
       // Someone needs the kernel now, so this is the moment abandoned work
       // stops being free to finish.
@@ -822,13 +903,27 @@ export class KernelSession {
       try {
         client = await this.ensure();
       } catch (err) {
-        if (isKernelStartFailed(err)) this.#failedStart = { err, upTo: this.#queued };
+        if (isKernelStartFailed(err)) {
+          this.#failedStart = { err, upTo: this.#queued };
+          this.#options.onStartFailed?.(err);
+        }
         throw err;
       }
       dropIfCancelled();
+      sent = true;
+      clearTimeout(expiryTimer);
       const work = fn(client, requestOptions(options.signal));
+      // What is left of one budget, not a fresh one: a request that waited
+      // 900 ms of a 1 s ceiling has 100 ms more. The error names the whole.
+      const waitMs =
+        expiresAt === undefined
+          ? (options.deadlineMs ?? DEFAULT_DEADLINE_MS)
+          : expiresAt === null
+            ? 0
+            : Math.max(1, expiresAt - Date.now());
+      const budgetMs = expiresAt == null ? waitMs : (options.deadlineMs ?? waitMs);
       try {
-        return await this.#awaitWithin(work, options.deadlineMs ?? DEFAULT_DEADLINE_MS);
+        return await this.#awaitWithin(work, waitMs, budgetMs);
       } catch (err) {
         // Decided synchronously with the failure, so a caller that has just
         // learned of the rejection can already see the verdict: the pool reads
@@ -846,7 +941,12 @@ export class KernelSession {
       () => undefined,
       () => this.#deciding ?? undefined,
     );
-    return task;
+    const settled = (): void => {
+      this.#inRun--;
+      clearTimeout(expiryTimer);
+    };
+    task.then(settled, settled);
+    return expiry ? Promise.race([task, expiry]) : task;
   }
 
   /**
@@ -858,11 +958,18 @@ export class KernelSession {
    * this server can ever get that the kernel is alive. Keeping the request
    * outstanding is what makes `#fate` able to tell "still working" from "hung".
    */
-  async #awaitWithin<T>(work: Promise<T>, deadlineMs: number | undefined): Promise<T> {
+  async #awaitWithin<T>(
+    work: Promise<T>,
+    deadlineMs: number | undefined,
+    budgetMs = deadlineMs,
+  ): Promise<T> {
     if (deadlineMs === undefined || deadlineMs <= 0) return work;
     let timer: NodeJS.Timeout | undefined;
     const expiry = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new DeadlineExceeded(deadlineMs)), deadlineDelay(deadlineMs));
+      timer = setTimeout(
+        () => reject(new DeadlineExceeded(budgetMs ?? deadlineMs)),
+        deadlineDelay(deadlineMs),
+      );
       timer.unref?.();
     });
     void expiry.catch(() => {});

@@ -102,6 +102,18 @@ const EVALUATOR_DEFAULT_TEXT = `${budgetText(KERNEL_TIME_CONSTRAINT_S * 1000)} (
 const TIME_CONSTRAINT_HEADROOM_MS = 30_000;
 
 /**
+ * When a request's caller stops waiting, stamped as the request arrives, or
+ * `null` for a ceiling of 0, which is none. Every wait before a kernel has the
+ * request counts against it — a kernel's preparation, a queue — and a request
+ * still unsent when it passes is answered then and never sent. Counted from
+ * when the kernel ran it, a call queued behind an hour's evaluation waited the
+ * hour on a private kernel, and failed at its ceiling on a shared one (#80).
+ */
+function expiryOf(ceilingMs: number, arrivedAt = Date.now()): number | null {
+  return ceilingMs > 0 ? arrivedAt + ceilingMs : null;
+}
+
+/**
  * How long to wait for one tool call before answering the caller.
  *
  * A deadline for the *caller*, not for the kernel: when it passes, the kernel is
@@ -600,6 +612,7 @@ export function createWolframServer(
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    const arrivedAt = Date.now();
     const { name, arguments: args } = request.params;
     if (name === STATUS_TOOL.name) {
       // Deliberately not forwarded, and deliberately not a kernel start: this is
@@ -645,6 +658,7 @@ export function createWolframServer(
         { name, arguments: args ?? {} },
         {
           timeoutMs,
+          expiresAt: expiryOf(timeoutMs, arrivedAt),
           signal: extra.signal,
           ...(progressToken === undefined
             ? {}
@@ -695,7 +709,11 @@ export function createWolframServer(
     // tool call would, and a cancel stops it as one does. Given no ceiling, it
     // was cut at the SDK's minute (#39).
     fromKernel(GetPromptRequestSchema, async (request, extra) =>
-      backend.getPrompt(request.params, { timeoutMs: config.callTimeoutMs, signal: extra.signal }),
+      backend.getPrompt(request.params, {
+        timeoutMs: config.callTimeoutMs,
+        expiresAt: expiryOf(config.callTimeoutMs),
+        signal: extra.signal,
+      }),
     );
   }
 
@@ -706,6 +724,7 @@ export function createWolframServer(
     fromKernel(ReadResourceRequestSchema, async (request, extra) =>
       backend.readResource(request.params, {
         timeoutMs: config.callTimeoutMs,
+        expiresAt: expiryOf(config.callTimeoutMs),
         signal: extra.signal,
       }),
     );

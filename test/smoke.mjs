@@ -2509,6 +2509,210 @@ if (socketsHere()) {
 }
 
 // ---------------------------------------------------------------------------
+// A private kernel counted a call's ceiling from when the call ran, so a call
+// queued behind a long one waited it out, was sent, and failed a ceiling later,
+// long after its caller's: here 1 s became 6. And a call made while the kernel
+// was being prepared was sent once it was ready, whatever its caller had been
+// told. Its ceiling now counts from its arrival; a request still unsent when it
+// passes is answered then, and never sent (#80).
+heading("On a private kernel a request's ceiling counts from its arrival, and one answered at it is never sent");
+{
+  const sentCalls = (log) =>
+    existsSync(log) ? readFileSync(log, "utf8").split("\n").filter((l) => l === "tools/call").length : 0;
+  const call = (s, code, extra = {}) =>
+    s.client
+      .callTool({ name: "WolframLanguageEvaluator", arguments: { code, ...extra } }, undefined, { timeout: 60_000 })
+      .catch((err) => ({ isError: true, content: [{ type: "text", text: `rejected: ${err.message}` }] }));
+  const text = (r) => (r.content?.[0]?.text ?? "").slice(0, 120);
+
+  wipeCache();
+  const queueLog = join(home, "methods-private-queue.log");
+  const queued = await connect({
+    WOLFRAM_MCP_SHARE: "0",
+    WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "1",
+    FAKE_CALL_DELAY_MS: "5000",
+    FAKE_METHOD_LOG: queueLog,
+  });
+  await queued.client.listTools(); // the kernel, started without spending a slow call on it
+  const long = call(queued, "1+1", { timeConstraint: 30 });
+  await new Promise((r) => setTimeout(r, 300));
+  const shortAt = Date.now();
+  const short = await call(queued, "2+2");
+  const shortMs = Date.now() - shortAt;
+  const longResult = await long;
+  await new Promise((r) => setTimeout(r, 300));
+  check(
+    "a call queued behind a long one is answered at its ceiling, counted from its arrival",
+    short.isError === true && /within 1s: the request had not been sent/.test(text(short)) && shortMs < 2_500,
+    `${shortMs}ms: ${text(short)}`,
+  );
+  check(
+    "and is never sent afterwards, while the long call is still answered",
+    sentCalls(queueLog) === 1 && answeredByFake(longResult),
+    `${sentCalls(queueLog)} call(s) sent to the kernel`,
+  );
+  await queued.client.close();
+
+  wipeCache();
+  const startLog = join(home, "methods-private-start.log");
+  const starting = await connect({
+    WOLFRAM_MCP_SHARE: "0",
+    WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "1",
+    FAKE_INIT_DELAY_MS: "3000",
+    FAKE_METHOD_LOG: startLog,
+  });
+  const earlyAt = Date.now();
+  const early = await call(starting, "1+1");
+  const earlyMs = Date.now() - earlyAt;
+  await new Promise((r) => setTimeout(r, 3_500)); // the kernel is ready by now
+  check(
+    "a call whose ceiling passes while its kernel is prepared is answered then, and never sent",
+    early.isError === true &&
+      /within 1s: the request had not been sent/.test(text(early)) &&
+      earlyMs < 2_500 &&
+      sentCalls(startLog) === 0,
+    `${earlyMs}ms, ${sentCalls(startLog)} call(s) sent: ${text(early)}`,
+  );
+  await starting.client.close();
+
+  // Read off the clock, not only the timer: on a warm kernel the queue reaches
+  // a request before its expiry timer can run, and one already past was sent.
+  const warmSession = new lib.KernelSession({
+    bin: fakeKernel,
+    serverName: "WolframLanguage",
+    idleMs: 0,
+    startTimeoutMs: 10_000,
+    clientInfo: { name: "smoke", version: "1.0.0" },
+    log: () => {},
+  });
+  await warmSession.run((c) => c.listTools());
+  let ran = false;
+  const past = await warmSession
+    .run(async () => ((ran = true), "ran"), { expiresAt: Date.now() - 1, deadlineMs: 1_000 })
+    .then((x) => x, (e) => e.message);
+  await warmSession.stop();
+  check(
+    "a request whose ceiling has already passed is never sent, though its timer has not run",
+    !ran && /had not been sent/.test(past),
+    past,
+  );
+
+  // A kernel started for a call whose ceiling passed during the start: nothing
+  // ran on it to arm its idle shutdown, so it held its seat until something
+  // else used it. Started with no call waiting, it now idles out like any other.
+  const savedInit = process.env.FAKE_INIT_DELAY_MS;
+  process.env.FAKE_INIT_DELAY_MS = "1500";
+  const idleSaid = [];
+  const abandoned = new lib.DeferredBackend(
+    async () =>
+      new lib.LocalBackend({
+        bin: fakeKernel,
+        serverName: "WolframLanguage",
+        idleMs: 300,
+        startTimeoutMs: 10_000,
+        clientInfo: { name: "smoke", version: "1.0.0" },
+        log: (m) => idleSaid.push(m),
+      }),
+    () => {},
+    { startTimeoutMs: 10_000, bin: fakeKernel },
+  );
+  const expiredCall = await abandoned
+    .callTool(
+      { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } },
+      { timeoutMs: 500, expiresAt: Date.now() + 500 },
+    )
+    .then(() => "answered", (e) => e.message);
+  await until(() => idleSaid.some((m) => /shutting the kernel down/.test(m)), 4_000);
+  if (savedInit === undefined) delete process.env.FAKE_INIT_DELAY_MS;
+  else process.env.FAKE_INIT_DELAY_MS = savedInit;
+  await abandoned.stop();
+  check(
+    "a kernel started for a call that expired meanwhile idles out, rather than holding its seat",
+    /had not been sent/.test(expiredCall) && idleSaid.some((m) => /shutting the kernel down/.test(m)),
+    `${expiredCall.slice(0, 50)}; ${idleSaid.some((m) => /shutting/.test(m)) ? "idled out" : "never idled out"}`,
+  );
+
+  // A restart after an idle shutdown that fails after its caller's ceiling has
+  // passed: the caller was answered "expired" and never saw the start fail, so
+  // nothing recorded it, and every later call restarted a kernel that would not
+  // start. The session now tells its owner as the start fails.
+  const muteMarker = join(home, "starts-restart-after-expiry");
+  const savedMarker = process.env.FAKE_MARKER;
+  const savedMode = process.env.FAKE_MODE;
+  process.env.FAKE_MARKER = muteMarker;
+  delete process.env.FAKE_MODE;
+  const restarting = new lib.DeferredBackend(
+    async () =>
+      new lib.LocalBackend({
+        bin: fakeKernel,
+        serverName: "WolframLanguage",
+        idleMs: 200,
+        startTimeoutMs: 1_500,
+        clientInfo: { name: "smoke", version: "1.0.0" },
+        log: () => {},
+      }),
+    () => {},
+    { startTimeoutMs: 10_000, bin: fakeKernel },
+  );
+  const evaluateOn = (backend, ceilingMs) =>
+    backend
+      .callTool(
+        { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } },
+        { timeoutMs: ceilingMs, expiresAt: Date.now() + ceilingMs },
+      )
+      .then((r) => r.content?.[0]?.text ?? "answered", (e) => e.message);
+  const warmed = await evaluateOn(restarting, 10_000);
+  await new Promise((r) => setTimeout(r, 600)); // the kernel idles out
+  process.env.FAKE_MODE = "mute"; // its restart never answers, and fails at 1.5 s
+  const expiredFirst = await evaluateOn(restarting, 300);
+  await new Promise((r) => setTimeout(r, 2_000)); // past the restart's failure
+  delete process.env.FAKE_MODE;
+  const startsBefore = starts(muteMarker);
+  const afterIt = await evaluateOn(restarting, 10_000);
+  const restarted = starts(muteMarker) - startsBefore;
+  await restarting.stop();
+  if (savedMarker === undefined) delete process.env.FAKE_MARKER;
+  else process.env.FAKE_MARKER = savedMarker;
+  if (savedMode === undefined) delete process.env.FAKE_MODE;
+  else process.env.FAKE_MODE = savedMode;
+  check(
+    "a restart that fails after its caller's ceiling passed is still backed off",
+    /^evaluated/.test(warmed) &&
+      /had not been sent/.test(expiredFirst) &&
+      /the last attempt to prepare a Wolfram kernel failed/.test(afterIt) &&
+      restarted === 0,
+    `${restarted} restart(s) after it: ${afterIt.split("\n")[0].slice(0, 80)}`,
+  );
+
+  // Already past before it is made, a request is refused before preparation is
+  // asked for: asked and dropped, a preparation that failed rejected with
+  // nobody listening, which a library's host may end the process for.
+  const unhandled = [];
+  const onUnhandled = (reason) => unhandled.push(reason);
+  process.on("unhandledRejection", onUnhandled);
+  const failing = new lib.DeferredBackend(
+    async () => {
+      throw new Error("no kernel could be prepared");
+    },
+    () => {},
+    { startTimeoutMs: 10_000 },
+  );
+  const refused = await failing
+    .callTool(
+      { name: "WolframLanguageEvaluator", arguments: { code: "1+1" } },
+      { timeoutMs: 1_000, expiresAt: Date.now() - 1 },
+    )
+    .then(() => "answered", (e) => e.message);
+  await new Promise((r) => setTimeout(r, 200));
+  process.off("unhandledRejection", onUnhandled);
+  check(
+    "a request already past its ceiling is refused without leaving a preparation's failure unhandled",
+    /had not been sent/.test(refused) && unhandled.length === 0,
+    `${unhandled.length} unhandled: ${refused.slice(0, 60)}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 heading("Regression — several sessions recovering at once produce one broker");
 if (socketsHere()) {
   wipeCache();
@@ -4793,8 +4997,11 @@ if (socketsHere()) {
   // elsewhere: sent to the frozen broker instead, it was held to its own whole
   // ceiling, as the first was (#78).
   const asking = await until(() => s.stderr().includes("asking the broker whether it is still running"), 10_000);
+  // A ceiling of its own long enough for the ask and a private kernel's start:
+  // both count against it, from its arrival (#80), and the section's 2 s would
+  // see it answered unsent before it could go elsewhere.
   const meanwhile = await s.client
-    .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "4+4" } }, undefined, { timeout: 30_000 })
+    .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "4+4", timeConstraint: 10 } }, undefined, { timeout: 60_000 })
     .catch((err) => ({ isError: true, content: [{ type: "text", text: `rejected: ${err.message}` }] }));
   await first;
   check(
