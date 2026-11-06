@@ -110,9 +110,18 @@ interface Slot {
 
 interface Waiter {
   flavour: KernelFlavour;
-  resolve: (slot: Slot) => void;
+  resolve: (slot: Slot | Promise<Slot>) => void;
   reject: (err: unknown) => void;
 }
+
+/** Which tier serves a request now: `#plan` decides, and `#act` carries it out. */
+type Plan =
+  | { tier: "take"; slot: Slot }
+  | { tier: "refuse"; window: Window }
+  | { tier: "grow" }
+  | { tier: "swap"; victim: Slot }
+  | { tier: "reuse"; slot: Slot }
+  | { tier: "wait" };
 
 /**
  * How many kernels the pool may run.
@@ -158,7 +167,7 @@ export class KernelPool {
    * The last time each flavour's server name did not resolve, and the kernel's
    * words for it. A session's preparation only attaches to the broker, so this
    * failure never reached a back-off: each request grew a kernel to fail, in
-   * parallel for simultaneous ones, and at the budget `#swapOut` retired other
+   * parallel for simultaneous ones, and at the budget the swap tier retired other
    * sessions' idle kernels to make room for a start that could not succeed
    * (issue #19). Keyed on the flavour, so sharing it changes no answer: a
    * session of the same flavour would get the same one from a kernel. A burst
@@ -279,7 +288,7 @@ export class KernelPool {
   }
 
   /**
-   * Free a seat by dropping an idle kernel of some other flavour.
+   * The kernel to drop to free a seat: an idle one of some other flavour.
    *
    * The budget counts seats, not kinds, so a session whose flavour has no kernel
    * cannot simply grow one once the budget is spent — something has to go. An
@@ -292,18 +301,12 @@ export class KernelPool {
    * nobody is waiting for, and taking it stops that; a genuinely idle one is not
    * doing anything at all.
    */
-  #swapOut(flavour: KernelFlavour): boolean {
-    const victim =
+  #victim(flavour: KernelFlavour): Slot | undefined {
+    return (
       this.#slots.find(
         (s) => !s.busy && !s.session.abandoned && s.flavour.digest !== flavour.digest,
-      ) ?? this.#slots.find((s) => !s.busy && s.flavour.digest !== flavour.digest);
-    if (!victim) return false;
-    this.#options.log(
-      `budget reached and no kernel for environment ${flavour.digest}; retiring an idle ` +
-        `kernel for ${victim.flavour.digest} to make room`,
+      ) ?? this.#slots.find((s) => !s.busy && s.flavour.digest !== flavour.digest)
     );
-    this.#retire(victim, "a session with a different environment needed the seat");
-    return true;
   }
 
   /**
@@ -347,37 +350,63 @@ export class KernelPool {
    * session from a kernel that is not its own kind. While the flavour's server
    * would not start, only the first applies, to running kernels only, and a
    * request it cannot serve is refused before any other (#101).
+   *
+   * The one place the tiers are written down: `#acquire` and the waiter drain
+   * each wrote them out by hand, so a change to when a tier applies had to be
+   * made twice, and #113's first head missed the same case in both (#114). It
+   * decides and changes nothing; `#act` carries the decision out.
    */
-  async #acquire(flavour: KernelFlavour, signal?: AbortSignal): Promise<Slot> {
+  #plan(flavour: KernelFlavour): Plan {
     const window = this.#window(flavour.digest);
     const free = this.#slots.find((s) => this.#servable(s, flavour, window !== null));
-    if (free) {
-      free.busy = true;
-      return free;
-    }
+    if (free) return { tier: "take", slot: free };
     // Turned away before anything below starts a kernel, or retires another
     // session's to make room. Waiting instead for a running kernel of its own
     // was tried in #113 and reverted (#115): queued in the window, a request
     // could wait out its ceiling behind an abandoned call, or hold up every
     // other flavour's waiter behind it.
-    if (window) throw this.#refusal(window);
-
+    if (window) return { tier: "refuse", window };
     // A fresh kernel beats stopping one that may still be finishing something.
-    if (this.#slots.length < this.#budget) return this.#grow(flavour);
-
+    if (this.#slots.length < this.#budget) return { tier: "grow" };
     // Nothing of ours is free and the budget is spent, so a seat has to come
     // from somewhere. An idle kernel of another flavour is the cheapest loss.
-    if (this.#swapOut(flavour)) return this.#grow(flavour);
-
+    const victim = this.#victim(flavour);
+    if (victim) return { tier: "swap", victim };
     const spent = this.#idle(flavour);
-    if (spent) {
-      this.#options.log(
-        `budget reached; reusing a kernel that holds an abandoned call, which ` +
-          `stops it — no other kernel can serve this request`,
-      );
-      spent.busy = true;
-      return spent;
+    if (spent) return { tier: "reuse", slot: spent };
+    return { tier: "wait" };
+  }
+
+  /** Carry out any decision of `#plan`'s but waiting, which is the caller's. */
+  #act(plan: Exclude<Plan, { tier: "wait" }>, flavour: KernelFlavour): Slot | Promise<Slot> {
+    switch (plan.tier) {
+      case "take":
+        plan.slot.busy = true;
+        return plan.slot;
+      case "refuse":
+        throw this.#refusal(plan.window);
+      case "grow":
+        return this.#grow(flavour);
+      case "swap":
+        this.#options.log(
+          `budget reached and no kernel for environment ${flavour.digest}; retiring an idle ` +
+            `kernel for ${plan.victim.flavour.digest} to make room`,
+        );
+        this.#retire(plan.victim, "a session with a different environment needed the seat");
+        return this.#grow(flavour);
+      case "reuse":
+        this.#options.log(
+          `budget reached; reusing a kernel that holds an abandoned call, which ` +
+            `stops it — no other kernel can serve this request`,
+        );
+        plan.slot.busy = true;
+        return plan.slot;
     }
+  }
+
+  async #acquire(flavour: KernelFlavour, signal?: AbortSignal): Promise<Slot> {
+    const plan = this.#plan(flavour);
+    if (plan.tier !== "wait") return this.#act(plan, flavour);
 
     this.#options.log(
       `all ${this.#slots.length} kernel(s) busy and budget reached; queueing ` +
@@ -463,9 +492,9 @@ export class KernelPool {
   /**
    * Drop a kernel that could not answer for itself, or whose seat is needed.
    *
-   * `#draining` guards the waiter drain because `#swapOut` retires from inside
-   * `#drainWaiters`: without it the drain re-enters itself, and the head waiter
-   * it is part-way through serving is handed a slot twice.
+   * `#draining` guards the waiter drain because `#act`'s swap retires from
+   * inside `#drainWaiters`: without it the drain re-enters itself, and the head
+   * waiter it is part-way through serving is handed a slot twice.
    */
   #retire(slot: Slot, reason: string): void {
     const at = this.#slots.indexOf(slot);
@@ -489,54 +518,20 @@ export class KernelPool {
 
   #drain(): void {
     // Strictly the head of the queue, so a stream of one flavour cannot starve a
-    // session of another. The tiers below are #acquire's, applied to whatever the
-    // head waiter needs — including the swap, which is why a waiter for a flavour
+    // session of another. The tiers are #plan's, applied to whatever the head
+    // waiter needs — including the swap, which is why a waiter for a flavour
     // with no kernel at all still gets served rather than waiting forever.
     while (this.#waiters.length > 0) {
       const head = this.#waiters[0];
       if (!head) return;
-      const { flavour } = head;
-
-      const take = (slot: Slot): void => {
-        this.#waiters.shift();
-        slot.busy = true;
-        head.resolve(slot);
-      };
-
-      // As in #acquire: inside the window only a running kernel serves, and
-      // with none free the waiter is turned away before any tier below can
-      // start a kernel or retire another session's for it (#101).
-      const window = this.#window(flavour.digest);
-      const fresh = this.#slots.find((s) => this.#servable(s, flavour, window !== null));
-      if (fresh) {
-        take(fresh);
-        continue;
+      const plan = this.#plan(head.flavour);
+      if (plan.tier === "wait") return;
+      this.#waiters.shift();
+      try {
+        head.resolve(this.#act(plan, head.flavour));
+      } catch (err) {
+        head.reject(err);
       }
-      if (window) {
-        this.#waiters.shift();
-        head.reject(this.#refusal(window));
-        continue;
-      }
-      if (this.#slots.length < this.#budget) {
-        this.#waiters.shift();
-        void this.#grow(flavour).then(head.resolve);
-        continue;
-      }
-      if (this.#swapOut(flavour)) {
-        this.#waiters.shift();
-        void this.#grow(flavour).then(head.resolve);
-        continue;
-      }
-      const spent = this.#idle(flavour);
-      if (spent) {
-        this.#options.log(
-          `budget reached; a waiter is reusing a kernel that holds an abandoned ` +
-            `call, which stops it`,
-        );
-        take(spent);
-        continue;
-      }
-      return;
     }
   }
 
