@@ -17,14 +17,14 @@ import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { KernelFlavour } from "./flavour.js";
 import {
-  isKernelStartFailed,
   isServerNotResolved,
   KernelSession,
   RequestDropped,
+  RequestExpired,
   ServerNotResolved,
   type RunOptions,
 } from "./kernel.js";
-import { timerDelay } from "./config.js";
+import { deadlineDelay, timerDelay } from "./config.js";
 import { baseDirectoryEnv, type KernelFacts } from "./inspect.js";
 import { errorText, type Logger } from "./log.js";
 import { elapsedText, waitText } from "./duration.js";
@@ -309,6 +309,11 @@ export class KernelPool {
       flavour,
       log: (message) => log(`kernel ${index}: ${message}`),
       onFacts: (facts, chosen) => this.#learn(facts, chosen),
+      // A start that fails after its caller's ceiling passed reaches no
+      // caller, so it is recorded here, as the start fails: answered "expired"
+      // instead, it left no window, and each later request started the kernel
+      // that would not start (#80).
+      onStartFailed: (err) => this.#recordFailedStart(flavour.digest, err),
       onReady: async (client: Client, late?: AbortSignal) => {
         // Proven: what its held requests were waiting to learn (#19).
         this.#proven.add(flavour.digest);
@@ -491,7 +496,8 @@ export class KernelPool {
     }
   }
 
-  async #acquire(flavour: KernelFlavour, signal?: AbortSignal): Promise<Slot> {
+  async #acquire(flavour: KernelFlavour, options: RunOptions): Promise<Slot> {
+    const { signal, expiresAt } = options;
     const plan = this.#plan(flavour);
     if (plan.tier === "hold") {
       this.#options.log(`holding a request for environment ${flavour.digest} for its own kernel`);
@@ -503,21 +509,34 @@ export class KernelPool {
     } else {
       return this.#act(plan, flavour);
     }
-    return new Promise<Slot>((resolve, reject) => {
+    let expiry: NodeJS.Timeout | undefined;
+    const acquired = new Promise<Slot>((resolve, reject) => {
       const waiter: Waiter = { flavour, resolve, reject, seq: ++this.#arrivals };
       if (plan.tier === "hold") this.#hold(waiter);
       else this.#queue(waiter);
-      // Cancelled while it waits, it leaves, held or queued: left in, it was
-      // served like any other, by a kernel grown or another session's retired.
-      signal?.addEventListener(
-        "abort",
-        () => {
-          if (!this.#unqueue(waiter)) return; // already served; `session.run` drops it
-          reject(new RequestDropped(signal.reason));
-        },
-        { once: true },
-      );
+      // Cancelled, or past its ceiling, while it waits, it leaves, held or
+      // queued: left in, it was served like any other, by a kernel grown or
+      // another session's retired, and sent after its caller was answered.
+      // Leaving frees no seat — a request waits only while none is free — so
+      // nobody behind it is owed a look.
+      const leave = (err: Error): void => {
+        if (!this.#unqueue(waiter)) return; // already served; `session.run` drops it
+        waiter.reject(err);
+      };
+      signal?.addEventListener("abort", () => leave(new RequestDropped(signal.reason)), {
+        once: true,
+      });
+      if (expiresAt != null) {
+        expiry = setTimeout(
+          () => leave(new RequestExpired(options.deadlineMs ?? 0)),
+          deadlineDelay(Math.max(0, expiresAt - Date.now())),
+        );
+        expiry.unref?.();
+      }
     });
+    const disarm = (): void => clearTimeout(expiry);
+    acquired.then(disarm, disarm);
+    return acquired;
   }
 
   /**
@@ -758,7 +777,12 @@ export class KernelPool {
     // it could grow a kernel, or retire another session's idle one, for a
     // request `session.run` then dropped.
     if (options.signal?.aborted) throw new RequestDropped(options.signal.reason);
-    const slot = await this.#acquire(flavour, options.signal);
+    // Past its ceiling already, the same: let in, it retired another session's
+    // idle kernel to make room for a request that was then never sent.
+    if (options.expiresAt != null && Date.now() >= options.expiresAt) {
+      throw new RequestExpired(options.deadlineMs ?? 0);
+    }
+    const slot = await this.#acquire(flavour, options);
     try {
       const result = await slot.session.run(fn, options);
       this.#release(slot);
@@ -770,7 +794,7 @@ export class KernelPool {
         this.#release(slot);
         throw err;
       }
-      if (isKernelStartFailed(err)) this.#recordFailedStart(flavour.digest, err);
+      // A start that failed is already recorded, by the session's `onStartFailed`.
       this.#quarantine(slot, errorText(err));
       throw err;
     }

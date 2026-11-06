@@ -38,7 +38,7 @@ import { PKG } from "./version.js";
  * once. An old broker that cannot answer a new op is the lesser problem, and
  * `ping` is built to read that refusal as the proof of life it is.
  */
-export const BROKER_PROTOCOL = 7;
+export const BROKER_PROTOCOL = 8;
 
 /**
  * `sockaddr_un.sun_path`, its terminating NUL included: 108 bytes on Linux, 104
@@ -100,6 +100,18 @@ export interface BrokerRequest {
   params?: unknown;
   /** Per-request ceiling, for callTool, getPrompt and readResource. */
   timeoutMs?: number;
+  /**
+   * When that ceiling passes, as the proxy's `Date.now()` where the request
+   * arrived, or `null` for none: the broker shares the proxy's clock. The pool
+   * answers a request still waiting for a kernel then, and never starts it.
+   * Without it the broker counted `timeoutMs` from when its pool ran the
+   * request, so a request a busy broker queued was sent after its caller had
+   * been answered, and a private kernel, counting from arrival, answered the
+   * same request differently (#80). A change of shape, so `BROKER_PROTOCOL`
+   * moved to 8 with it: an older broker would ignore the field, and count
+   * from the run again.
+   */
+  expiresAt?: number | null;
   /** For `cancel`: the id of the in-flight request to abandon. */
   target?: number;
 }

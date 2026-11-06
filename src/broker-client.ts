@@ -675,6 +675,7 @@ export class BrokerBackend implements KernelBackend {
     timeoutMs?: number,
     signal?: AbortSignal,
     onprogress?: (progress: Progress) => void,
+    expiresAt?: number | null,
   ): Promise<T> {
     if (this.#closed || !this.#socket.writable) {
       return Promise.reject(new Error("the Wolfram broker is not connected"));
@@ -697,12 +698,14 @@ export class BrokerBackend implements KernelBackend {
       op,
       ...(params === undefined ? {} : { params }),
       ...(sent === undefined ? {} : { timeoutMs: sent }),
+      ...(expiresAt === undefined ? {} : { expiresAt }),
     };
-    const ceiling = brokerCeilingMs(
-      op,
-      sent,
-      this.#options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS,
-    );
+    // From the arrival, as the broker counts it, so a request a busy broker
+    // answers at its ceiling is heard then, and not a whole ceiling later.
+    const ceiling =
+      expiresAt != null
+        ? Math.max(0, expiresAt - Date.now()) + REQUEST_GRACE_MS
+        : brokerCeilingMs(op, sent, this.#options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS);
     const answer = new Promise<T>((resolve, reject) => {
       // No timer at all when there is no ceiling, so this waits exactly as long
       // as a private kernel would.
@@ -718,8 +721,9 @@ export class BrokerBackend implements KernelBackend {
                 new Error(`the Wolfram broker did not answer ${op} within ${budgetText(ceiling)}`),
               );
               // The caller is answered; whether the broker is gone is another
-              // question (`#stillAnswering`). How long a queued request may
-              // wait, on either path, is #80.
+              // question (`#stillAnswering`). A request still queued there at
+              // its ceiling the broker answers itself (#80), so only a broker
+              // that answers nothing gets here.
               void this.#stillAnswering(`${op} ran out`);
             }, timerDelay(ceiling));
       timer?.unref?.();
@@ -792,7 +796,14 @@ export class BrokerBackend implements KernelBackend {
     params: GetPromptRequest["params"],
     options?: EvaluationOptions,
   ): Promise<GetPromptResult> {
-    return this.#request<GetPromptResult>("getPrompt", params, options?.timeoutMs, options?.signal);
+    return this.#request<GetPromptResult>(
+      "getPrompt",
+      params,
+      options?.timeoutMs,
+      options?.signal,
+      undefined,
+      options?.expiresAt,
+    );
   }
   listResources(params?: ListResourcesRequest["params"]): Promise<ListResourcesResult> {
     return this.#request<ListResourcesResult>("listResources", params);
@@ -806,6 +817,8 @@ export class BrokerBackend implements KernelBackend {
       params,
       options?.timeoutMs,
       options?.signal,
+      undefined,
+      options?.expiresAt,
     );
   }
   callTool(params: CallToolRequest["params"], options: CallOptions): Promise<CallToolResult> {
@@ -815,6 +828,7 @@ export class BrokerBackend implements KernelBackend {
       options.timeoutMs,
       options.signal,
       options.onprogress,
+      options.expiresAt,
     );
   }
   /**

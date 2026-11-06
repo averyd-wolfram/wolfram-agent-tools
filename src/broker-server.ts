@@ -392,6 +392,11 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
     // returning it to the pool.
     const cancel = EVALUATIONS.has(request.op) ? new AbortController() : null;
     if (cancel) inFlight.set(request.id, cancel);
+    // A number or null as the frame says; anything else counts from the run.
+    const expiresAt =
+      typeof request.expiresAt === "number" || request.expiresAt === null
+        ? request.expiresAt
+        : undefined;
     try {
       // The first request may arrive before the licence is known; it waits here
       // rather than the proxy waiting to attach.
@@ -423,6 +428,7 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
           return reply(
             await pool.run(flavour, (c, options) => c.getPrompt(request.params as never, options), {
               deadlineMs: request.timeoutMs,
+              expiresAt,
               signal: cancel?.signal,
             }),
           );
@@ -439,6 +445,7 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
               (c, options) => c.readResource(request.params as never, options),
               {
                 deadlineMs: request.timeoutMs,
+                expiresAt,
                 signal: cancel?.signal,
               },
             ),
@@ -460,7 +467,7 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
                 }),
               // The deadline belongs to the session, not to the SDK request:
               // see LocalBackend.callTool.
-              { deadlineMs: request.timeoutMs ?? 300_000, signal: cancel?.signal },
+              { deadlineMs: request.timeoutMs ?? 300_000, expiresAt, signal: cancel?.signal },
             ),
           );
         case "status":
