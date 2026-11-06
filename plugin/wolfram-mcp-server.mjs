@@ -8208,7 +8208,7 @@ var init_version = __esm({
   "dist/version.js"() {
     "use strict";
     here = dirname(fileURLToPath(import.meta.url));
-    PKG = true ? JSON.parse('{"name":"wolfram-mcp-server","version":"0.1.9","description":"MCP server that drives a locally installed Wolfram kernel, with lazy start and idle shutdown."}') : JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8"));
+    PKG = true ? JSON.parse('{"name":"wolfram-mcp-server","version":"0.1.10","description":"MCP server that drives a locally installed Wolfram kernel, with lazy start and idle shutdown."}') : JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8"));
   }
 });
 
@@ -8477,7 +8477,7 @@ var init_broker_protocol = __esm({
     init_cache();
     init_flavour();
     init_version();
-    BROKER_PROTOCOL = 7;
+    BROKER_PROTOCOL = 8;
     SUN_PATH_BYTES = process.platform === "linux" ? 108 : 104;
     DIGEST_CHARS = 12;
     SOCKET_MODE = 384;
@@ -18641,10 +18641,11 @@ var init_log = __esm({
 function requestOptions(signal) {
   return { timeout: SDK_REQUEST_TIMEOUT_MS, ...signal ? { signal } : {} };
 }
-async function drainPages(page) {
+async function drainPages(page, stop) {
   const all = [];
   let cursor;
   for (let guard = 0; guard < 50; guard++) {
+    stopIfLate(stop);
     const result = await page(cursor);
     all.push(...result.items);
     cursor = result.nextCursor;
@@ -18653,11 +18654,16 @@ async function drainPages(page) {
   }
   return all;
 }
-function listAllTools(client, options) {
+function listAllTools(client, options, stop) {
   return drainPages(async (cursor) => {
     const page = await client.listTools(cursor ? { cursor } : void 0, options);
     return { items: page.tools ?? [], nextCursor: page.nextCursor };
-  });
+  }, stop);
+}
+function stopIfLate(late) {
+  if (late?.aborted) {
+    throw new Error("the post-start refresh outlived the start's wait for it, so nothing more is asked of the kernel");
+  }
 }
 function isRequestTimeout(err) {
   return err instanceof McpError && err.code === REQUEST_TIMEOUT;
@@ -18671,6 +18677,13 @@ function isServerNotResolved(err) {
 }
 function chosenShaping(flavour) {
   return SHAPING_VARS.filter((name) => Boolean((flavour ? flavour.env[name] : process.env[name])?.trim()));
+}
+function isStartStopped(err) {
+  for (let e = err; e instanceof Error; e = e.cause) {
+    if (e instanceof StartStopped)
+      return true;
+  }
+  return false;
 }
 function isKernelStartFailed(err) {
   for (let e = err; e instanceof Error; e = e.cause) {
@@ -18691,7 +18704,7 @@ function withKernelOutput(err, output) {
 Last output from the kernel:
 ${tail}${hint}`, err);
 }
-var PACLET_KERNEL_ARGS, LOAD_AGENTTOOLS, KERNEL_ARGS, DeadlineExceeded, HandshakeTimeout, SDK_REQUEST_TIMEOUT_MS, DEFAULT_DEADLINE_MS, RelayClient, REQUEST_TIMEOUT, RequestDropped, SERVER_NOT_FOUND, ServerNotResolved, HANDSHAKE_SDK_GRACE_MS, NOT_ACTIVATED, SHAPING_VARS, KernelStartFailed, SessionClosed, KernelSession;
+var PACLET_KERNEL_ARGS, LOAD_AGENTTOOLS, KERNEL_ARGS, DeadlineExceeded, HandshakeTimeout, SDK_REQUEST_TIMEOUT_MS, DEFAULT_DEADLINE_MS, RelayClient, REQUEST_TIMEOUT, RequestDropped, RequestExpired, SERVER_NOT_FOUND, ServerNotResolved, HANDSHAKE_SDK_GRACE_MS, NOT_ACTIVATED, SHAPING_VARS, KernelStartFailed, SessionClosed, StartStopped, KernelSession;
 var init_kernel = __esm({
   "dist/kernel.js"() {
     "use strict";
@@ -18798,6 +18811,13 @@ var init_kernel = __esm({
         this.name = "RequestDropped";
       }
     };
+    RequestExpired = class extends RequestDropped {
+      constructor(budgetMs) {
+        super("its ceiling passed first");
+        this.message = `no answer from the Wolfram kernel within ${budgetText(budgetMs)}: the request had not been sent to a kernel by then, and it will not be`;
+        this.name = "RequestExpired";
+      }
+    };
     SERVER_NOT_FOUND = /StartMCPServer::InvalidArguments|MCPServerNotFound|No MCPServerObject found for name/;
     ServerNotResolved = class extends Error {
       constructor(message) {
@@ -18826,6 +18846,8 @@ var init_kernel = __esm({
         this.name = "SessionClosed";
       }
     };
+    StartStopped = class extends Error {
+    };
     KernelSession = class {
       #options;
       #client = null;
@@ -18843,6 +18865,8 @@ var init_kernel = __esm({
       #queue = Promise.resolve();
       /** Calls handed to `run`, numbered as they queue. */
       #queued = 0;
+      /** Calls handed to `run` and not yet settled: what arms an idle shutdown. */
+      #inRun = 0;
       /**
        * The last start that failed inside `run`, and the last call queued by then:
        * those calls share its failure rather than each starting a kernel to fail
@@ -18953,10 +18977,19 @@ var init_kernel = __esm({
         client.setNotificationHandler(ToolListChangedNotificationSchema, () => refresh("tool list"));
         client.setNotificationHandler(PromptListChangedNotificationSchema, () => refresh("prompt list"));
         if (this.#options.onReady) {
-          try {
-            await this.#options.onReady(client);
-          } catch (err) {
-            log(`post-start refresh failed, continuing: ${errorText(err)}`);
+          const onReady = this.#options.onReady;
+          const stopAsking = new AbortController();
+          const refresh2 = (async () => onReady(client, stopAsking.signal))().catch((err) => log(`post-start refresh failed, continuing: ${errorText(err)}`));
+          let timer2;
+          const late = new Promise((resolve) => {
+            timer2 = setTimeout(() => resolve("late"), timerDelay(DEFAULT_DEADLINE_MS));
+            timer2.unref?.();
+          });
+          const outcome = await Promise.race([refresh2, late]);
+          clearTimeout(timer2);
+          if (outcome === "late") {
+            stopAsking.abort();
+            log(`post-start refresh not answered within ${budgetText(DEFAULT_DEADLINE_MS)}; continuing, and taking its answer when it comes`);
           }
         }
         return client;
@@ -18976,7 +19009,10 @@ var init_kernel = __esm({
         this.#starting ??= this.#spawn(startTimeoutMs).finally(() => {
           this.#starting = null;
         });
-        return this.#starting;
+        const client = await this.#starting;
+        if (this.#inRun === 0)
+          this.#scheduleIdle();
+        return client;
       }
       /**
        * Run `fn` with the kernel guaranteed up, serialized against other work.
@@ -18988,7 +19024,30 @@ var init_kernel = __esm({
        */
       async run(fn, options = {}) {
         const ticket = ++this.#queued;
+        this.#inRun++;
+        const { expiresAt } = options;
+        const budget = options.deadlineMs ?? (expiresAt != null ? Math.max(0, expiresAt - Date.now()) : 0);
+        let expired = null;
+        const expire = () => expired ??= new RequestExpired(budget);
+        const pastDeadline = () => expiresAt != null && Date.now() >= expiresAt;
+        let sent = false;
+        let expiryTimer;
+        let expiry = null;
+        if (expiresAt != null) {
+          expiry = new Promise((_, reject) => {
+            expiryTimer = setTimeout(() => {
+              if (sent)
+                return;
+              reject(expire());
+            }, deadlineDelay(Math.max(0, expiresAt - Date.now())));
+            expiryTimer.unref?.();
+          });
+          void expiry.catch(() => {
+          });
+        }
         const task = this.#queue.then(async () => {
+          if (expired || pastDeadline())
+            throw expire();
           const failed = this.#failedStart;
           if (failed && ticket <= failed.upTo)
             throw failed.err;
@@ -18996,10 +19055,11 @@ var init_kernel = __esm({
             throw new RequestDropped(options.signal.reason);
           this.#clearIdle();
           const dropIfCancelled = () => {
-            if (!options.signal?.aborted)
+            const gone = expired ?? (pastDeadline() ? expire() : null) ?? (options.signal?.aborted ? new RequestDropped(options.signal.reason) : null);
+            if (!gone)
               return;
             this.#scheduleIdle();
-            throw new RequestDropped(options.signal.reason);
+            throw gone;
           };
           await this.#reclaim();
           dropIfCancelled();
@@ -19007,14 +19067,21 @@ var init_kernel = __esm({
           try {
             client = await this.ensure();
           } catch (err) {
-            if (isKernelStartFailed(err))
+            if (isKernelStartFailed(err)) {
               this.#failedStart = { err, upTo: this.#queued };
+              if (!isStartStopped(err))
+                this.#options.onStartFailed?.(err);
+            }
             throw err;
           }
           dropIfCancelled();
+          sent = true;
+          clearTimeout(expiryTimer);
           const work = fn(client, requestOptions(options.signal));
+          const waitMs = expiresAt === void 0 ? options.deadlineMs ?? DEFAULT_DEADLINE_MS : expiresAt === null ? 0 : Math.max(1, expiresAt - Date.now());
+          const budgetMs = expiresAt == null ? waitMs : options.deadlineMs ?? waitMs;
           try {
-            return await this.#awaitWithin(work, options.deadlineMs ?? DEFAULT_DEADLINE_MS);
+            return await this.#awaitWithin(work, waitMs, budgetMs);
           } catch (err) {
             this.#deciding = this.#fate(work, err, options);
             throw err;
@@ -19023,7 +19090,12 @@ var init_kernel = __esm({
           }
         });
         this.#queue = task.then(() => void 0, () => this.#deciding ?? void 0);
-        return task;
+        const settled = () => {
+          this.#inRun--;
+          clearTimeout(expiryTimer);
+        };
+        task.then(settled, settled);
+        return expiry ? Promise.race([task, expiry]) : task;
       }
       /**
        * Wait for `work`, but not past the caller's deadline.
@@ -19034,12 +19106,12 @@ var init_kernel = __esm({
        * this server can ever get that the kernel is alive. Keeping the request
        * outstanding is what makes `#fate` able to tell "still working" from "hung".
        */
-      async #awaitWithin(work, deadlineMs) {
+      async #awaitWithin(work, deadlineMs, budgetMs = deadlineMs) {
         if (deadlineMs === void 0 || deadlineMs <= 0)
           return work;
         let timer;
         const expiry = new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new DeadlineExceeded(deadlineMs)), deadlineDelay(deadlineMs));
+          timer = setTimeout(() => reject(new DeadlineExceeded(budgetMs ?? deadlineMs)), deadlineDelay(deadlineMs));
           timer.unref?.();
         });
         void expiry.catch(() => {
@@ -19200,7 +19272,7 @@ var init_kernel = __esm({
         const handshaking = this.#handshaking;
         this.#handshaking = null;
         if (handshaking) {
-          handshaking.abort(new Error("the kernel was stopped during its handshake"));
+          handshaking.abort(new StartStopped("the kernel was stopped during its handshake"));
           await handshaking.transport.close().catch(() => {
           });
         }
@@ -19641,7 +19713,7 @@ var init_broker_client = __esm({
       usable() {
         return !this.#closed && this.#socket.writable;
       }
-      #request(op, params, timeoutMs, signal, onprogress) {
+      #request(op, params, timeoutMs, signal, onprogress, expiresAt) {
         if (this.#closed || !this.#socket.writable) {
           return Promise.reject(new Error("the Wolfram broker is not connected"));
         }
@@ -19651,16 +19723,18 @@ var init_broker_client = __esm({
           id,
           op,
           ...params === void 0 ? {} : { params },
-          ...sent === void 0 ? {} : { timeoutMs: sent }
+          ...sent === void 0 ? {} : { timeoutMs: sent },
+          ...expiresAt === void 0 ? {} : { expiresAt }
         };
-        const ceiling = brokerCeilingMs(op, sent, this.#options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS);
+        const ceiling = expiresAt === null ? 0 : brokerCeilingMs(op, sent, this.#options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS);
+        const waitMs = typeof expiresAt === "number" ? Math.max(0, expiresAt - Date.now()) + REQUEST_GRACE_MS : ceiling;
         const answer = new Promise((resolve, reject) => {
-          const timer = ceiling === 0 ? void 0 : setTimeout(() => {
+          const timer = waitMs === 0 ? void 0 : setTimeout(() => {
             this.#pending.delete(id);
             this.#progress.delete(id);
-            reject(new Error(`the Wolfram broker did not answer ${op} within ${budgetText(ceiling)}`));
+            reject(new Error(`the Wolfram broker did not answer ${op} within ${budgetText(ceiling || waitMs)}`));
             void this.#stillAnswering(`${op} ran out`);
-          }, timerDelay(ceiling));
+          }, timerDelay(waitMs));
           timer?.unref?.();
           const settle2 = {
             resolve: (v) => {
@@ -19719,16 +19793,16 @@ var init_broker_client = __esm({
         return this.#request("listPrompts", cursor ? { cursor } : void 0);
       }
       getPrompt(params, options) {
-        return this.#request("getPrompt", params, options?.timeoutMs, options?.signal);
+        return this.#request("getPrompt", params, options?.timeoutMs, options?.signal, void 0, options?.expiresAt);
       }
       listResources(params) {
         return this.#request("listResources", params);
       }
       readResource(params, options) {
-        return this.#request("readResource", params, options?.timeoutMs, options?.signal);
+        return this.#request("readResource", params, options?.timeoutMs, options?.signal, void 0, options?.expiresAt);
       }
       callTool(params, options) {
-        return this.#request("callTool", params, options.timeoutMs, options.signal, options.onprogress);
+        return this.#request("callTool", params, options.timeoutMs, options.signal, options.onprogress, options.expiresAt);
       }
       /**
        * Wait for the broker's own preparation — reading what its kernels need from
@@ -20911,20 +20985,34 @@ var init_backend = __esm({
       kind = "local";
       #session;
       #onReady;
+      #onStartFailed;
       constructor(options) {
         this.#session = new KernelSession({
           ...options,
-          onReady: async (client) => {
+          onStartFailed: (err) => this.#onStartFailed?.(err),
+          onReady: async (client, late) => {
             await this.#onReady?.({
               capabilities: async () => client.getServerCapabilities() ?? {},
-              listTools: (cursor) => client.listTools(cursor ? { cursor } : void 0),
-              listPrompts: (cursor) => client.listPrompts(cursor ? { cursor } : void 0)
+              // This server's request options, as `run` gives every other request:
+              // with the SDK's own, a slow list was cancelled at 60 s (#70). And
+              // nothing new once the start has stopped waiting for this.
+              listTools: async (cursor) => {
+                stopIfLate(late);
+                return client.listTools(cursor ? { cursor } : void 0, requestOptions());
+              },
+              listPrompts: async (cursor) => {
+                stopIfLate(late);
+                return client.listPrompts(cursor ? { cursor } : void 0, requestOptions());
+              }
             });
           }
         });
       }
       onKernelReady(handler) {
         this.#onReady = handler;
+      }
+      onStartFailed(handler) {
+        this.#onStartFailed = handler;
       }
       /**
        * Start the kernel within what the deadline has left. Its own handshake
@@ -20965,6 +21053,7 @@ var init_backend = __esm({
       async getPrompt(params, options) {
         return this.#session.run((c, request) => c.getPrompt(params, request), {
           deadlineMs: options?.timeoutMs,
+          expiresAt: options?.expiresAt,
           signal: options?.signal
         });
       }
@@ -20974,6 +21063,7 @@ var init_backend = __esm({
       async readResource(params, options) {
         return this.#session.run((c, request) => c.readResource(params, request), {
           deadlineMs: options?.timeoutMs,
+          expiresAt: options?.expiresAt,
           signal: options?.signal
         });
       }
@@ -20981,7 +21071,7 @@ var init_backend = __esm({
         return this.#session.run((c, request) => c.callTool(params, void 0, {
           ...request,
           ...options.onprogress ? { onprogress: options.onprogress } : {}
-        }), { deadlineMs: options.timeoutMs, signal: options.signal });
+        }), { deadlineMs: options.timeoutMs, expiresAt: options.expiresAt, signal: options.signal });
       }
       /**
        * For good: a backend is stopped only by its owner, giving it up, and a call
@@ -21006,6 +21096,10 @@ var init_backend = __esm({
        * preparation that succeeds.
        */
       #slow = null;
+      /** Start failures already recorded, so one told twice is recorded once. */
+      #startFailures = /* @__PURE__ */ new WeakSet();
+      /** Start failures a caller has already been given in the kernel's words. */
+      #toldFailures = /* @__PURE__ */ new WeakSet();
       #resolved = null;
       #resolving = null;
       /**
@@ -21109,19 +21203,63 @@ The failure was: ${waiting.reason}`);
        * backend given up, the next call meets the back-off, and after it a fresh
        * preparation. A broker's start failures arrive as text and are its pool's.
        */
-      async #use(fn) {
-        const backend = await this.#get();
+      async #use(fn, by) {
+        if (by?.expiresAt != null && Date.now() >= by.expiresAt) {
+          throw new RequestExpired(by.timeoutMs);
+        }
+        const backend = await this.#beforeExpiry(this.#get(), by);
         try {
           return await fn(backend);
         } catch (err) {
-          if (backend === this.#resolved && isKernelStartFailed(err)) {
-            this.#recordFailure("restarting the kernel", err);
-            this.#resolved = null;
-            this.#retire(backend);
+          if (isKernelStartFailed(err) && this.#startFailedOn(backend, err)) {
+            if (this.#toldFailures.has(err))
+              return this.#use(fn, by);
+            this.#toldFailures.add(err);
           } else if (backend !== this.#resolved && (err instanceof SessionClosed || isKernelStartFailed(err))) {
-            return this.#use(fn);
+            return this.#use(fn, by);
           }
           throw err;
+        }
+      }
+      /**
+       * A start of the chosen backend's kernel that failed, recorded once as a
+       * failed preparation, the backend given up so the next call meets the
+       * back-off (#20). Told as it fails (`onStartFailed`) as well as through the
+       * call that saw it, since a call whose ceiling passed first never sees it.
+       * True when this error is that failure.
+       */
+      #startFailedOn(backend, err) {
+        if (typeof err === "object" && err !== null && this.#startFailures.has(err))
+          return true;
+        if (backend !== this.#resolved)
+          return false;
+        if (typeof err === "object" && err !== null)
+          this.#startFailures.add(err);
+        this.#recordFailure("restarting the kernel", err);
+        this.#resolved = null;
+        this.#retire(backend);
+        return true;
+      }
+      /**
+       * The backend, unless the caller's ceiling passes first: a preparation can
+       * outlast it — a kernel's start, a broker's — and a request that waited it
+       * out was sent once it was done, after its caller had been answered (#80).
+       * The preparation goes on for the calls after; this one is answered at its
+       * ceiling and never sent.
+       */
+      async #beforeExpiry(preparing, by) {
+        const expiresAt = by?.expiresAt;
+        if (expiresAt == null)
+          return preparing;
+        let timer;
+        const expiry = new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new RequestExpired(by?.timeoutMs ?? 0)), deadlineDelay(Math.max(0, expiresAt - Date.now())));
+          timer.unref?.();
+        });
+        try {
+          return await Promise.race([preparing, expiry]);
+        } finally {
+          clearTimeout(timer);
         }
       }
       #backoffWindow() {
@@ -21166,6 +21304,7 @@ The failure was: ${waiting.reason}`);
             throw new PreparationStopped();
           if (this.#onReady)
             backend.onKernelReady(this.#onReady);
+          backend.onStartFailed?.((err) => this.#startFailedOn(backend, err));
           await backend.prepare?.(deadline);
           if (this.#stopped)
             throw new PreparationStopped();
@@ -21192,16 +21331,16 @@ The failure was: ${waiting.reason}`);
         return this.#use((backend) => backend.listPrompts(cursor));
       }
       async getPrompt(params, options) {
-        return this.#use((backend) => backend.getPrompt(params, options));
+        return this.#use((backend) => backend.getPrompt(params, options), options);
       }
       async listResources(params) {
         return this.#use((backend) => backend.listResources(params));
       }
       async readResource(params, options) {
-        return this.#use((backend) => backend.readResource(params, options));
+        return this.#use((backend) => backend.readResource(params, options), options);
       }
       async callTool(params, options) {
-        return this.#use((backend) => backend.callTool(params, options));
+        return this.#use((backend) => backend.callTool(params, options), options);
       }
       async stop() {
         this.#stopped = true;
@@ -21685,10 +21824,15 @@ var init_pool = __esm({
           flavour,
           log: (message) => log(`kernel ${index}: ${message}`),
           onFacts: (facts, chosen) => this.#learn(facts, chosen),
-          onReady: async (client) => {
+          // A start that fails after its caller's ceiling passed reaches no
+          // caller, so it is recorded here, as the start fails: answered "expired"
+          // instead, it left no window, and each later request started the kernel
+          // that would not start (#80).
+          onStartFailed: (err) => this.#recordFailedStart(flavour.digest, err),
+          onReady: async (client, late) => {
             this.#proven.add(flavour.digest);
             this.#schedule();
-            await this.#options.onKernelReady?.(client, flavour.digest);
+            await this.#options.onKernelReady?.(client, flavour.digest, late);
           }
         });
         const slot = { session, busy: true, flavour };
@@ -21814,7 +21958,8 @@ var init_pool = __esm({
             return plan.slot;
         }
       }
-      async #acquire(flavour, signal) {
+      async #acquire(flavour, options) {
+        const { signal, expiresAt } = options;
         const plan = this.#plan(flavour);
         if (plan.tier === "hold") {
           this.#options.log(`holding a request for environment ${flavour.digest} for its own kernel`);
@@ -21823,18 +21968,29 @@ var init_pool = __esm({
         } else {
           return this.#act(plan, flavour);
         }
-        return new Promise((resolve, reject) => {
+        let expiry;
+        const acquired = new Promise((resolve, reject) => {
           const waiter = { flavour, resolve, reject, seq: ++this.#arrivals };
           if (plan.tier === "hold")
             this.#hold(waiter);
           else
             this.#queue(waiter);
-          signal?.addEventListener("abort", () => {
+          const leave = (err) => {
             if (!this.#unqueue(waiter))
               return;
-            reject(new RequestDropped(signal.reason));
-          }, { once: true });
+            waiter.reject(err);
+          };
+          signal?.addEventListener("abort", () => leave(new RequestDropped(signal.reason)), {
+            once: true
+          });
+          if (expiresAt != null) {
+            expiry = setTimeout(() => leave(new RequestExpired(options.deadlineMs ?? 0)), deadlineDelay(Math.max(0, expiresAt - Date.now())));
+            expiry.unref?.();
+          }
         });
+        const disarm = () => clearTimeout(expiry);
+        acquired.then(disarm, disarm);
+        return acquired;
       }
       /**
        * Hold a request on its own flavour, apart from the FIFO queue, so it blocks
@@ -22048,7 +22204,10 @@ var init_pool = __esm({
       async run(flavour, fn, options = {}) {
         if (options.signal?.aborted)
           throw new RequestDropped(options.signal.reason);
-        const slot = await this.#acquire(flavour, options.signal);
+        if (options.expiresAt != null && Date.now() >= options.expiresAt) {
+          throw new RequestExpired(options.deadlineMs ?? 0);
+        }
+        const slot = await this.#acquire(flavour, options);
         try {
           const result = await slot.session.run(fn, options);
           this.#release(slot);
@@ -22058,8 +22217,6 @@ var init_pool = __esm({
             this.#release(slot);
             throw err;
           }
-          if (isKernelStartFailed(err))
-            this.#recordFailedStart(flavour.digest, err);
           this.#quarantine(slot, errorText(err));
           throw err;
         }
@@ -22252,26 +22409,26 @@ async function startBroker(options) {
         if (options.allowInspect)
           recordFacts(options.bin, facts, chosen, log);
       },
-      onKernelReady: (client, flavour) => announceKernel(client, flavour)
+      onKernelReady: (client, flavour, late) => announceKernel(client, flavour, late)
     });
   })();
   preparing.catch(() => {
   });
-  async function announceKernel(client, flavour) {
+  async function announceKernel(client, flavour, late) {
     const audience = [...connections.values()].filter((s) => s.flavour?.digest === flavour);
     if (audience.length === 0)
       return;
     try {
       const capabilities = client.getServerCapabilities() ?? {};
-      const tools = await listAllTools(client);
+      const tools = await listAllTools(client, requestOptions(), late);
       let prompts = null;
       let promptsError;
       if (capabilities.prompts) {
         try {
           prompts = await drainPages(async (cursor) => {
-            const page = await client.listPrompts(cursor ? { cursor } : void 0);
+            const page = await client.listPrompts(cursor ? { cursor } : void 0, requestOptions());
             return { items: page.prompts ?? [], nextCursor: page.nextCursor };
-          });
+          }, late);
         } catch (err) {
           promptsError = errorText(err);
           log(`could not read the new kernel's prompts; sessions keep theirs: ${promptsError}`);
@@ -22314,6 +22471,7 @@ async function startBroker(options) {
     const cancel = EVALUATIONS.has(request.op) ? new AbortController() : null;
     if (cancel)
       inFlight.set(request.id, cancel);
+    const expiresAt = typeof request.expiresAt === "number" || request.expiresAt === null ? request.expiresAt : void 0;
     try {
       const pool = await preparing;
       switch (request.op) {
@@ -22340,6 +22498,7 @@ async function startBroker(options) {
         case "getPrompt":
           return reply(await pool.run(flavour, (c, options2) => c.getPrompt(request.params, options2), {
             deadlineMs: request.timeoutMs,
+            expiresAt,
             signal: cancel?.signal
           }));
         case "listResources":
@@ -22347,6 +22506,7 @@ async function startBroker(options) {
         case "readResource":
           return reply(await pool.run(flavour, (c, options2) => c.readResource(request.params, options2), {
             deadlineMs: request.timeoutMs,
+            expiresAt,
             signal: cancel?.signal
           }));
         case "callTool":
@@ -22363,7 +22523,7 @@ async function startBroker(options) {
             }),
             // The deadline belongs to the session, not to the SDK request:
             // see LocalBackend.callTool.
-            { deadlineMs: request.timeoutMs ?? 3e5, signal: cancel?.signal }
+            { deadlineMs: request.timeoutMs ?? 3e5, expiresAt, signal: cancel?.signal }
           ));
         case "status":
           return reply({
@@ -23403,6 +23563,9 @@ function drainPrompts(ops) {
 var KERNEL_TIME_CONSTRAINT_S = 60;
 var EVALUATOR_DEFAULT_TEXT = `${budgetText(KERNEL_TIME_CONSTRAINT_S * 1e3)} (TimeConstraint ${KERNEL_TIME_CONSTRAINT_S})`;
 var TIME_CONSTRAINT_HEADROOM_MS = 3e4;
+function expiryOf(ceilingMs, arrivedAt = Date.now()) {
+  return ceilingMs > 0 ? arrivedAt + ceilingMs : null;
+}
 function evaluationCeilingMs(configuredMs, args) {
   const requested = Number(args?.["timeConstraint"]);
   const ceiling = Number.isNaN(requested) || requested <= 0 ? configuredMs : Math.max(configuredMs, requested * 1e3 + TIME_CONSTRAINT_HEADROOM_MS);
@@ -23637,6 +23800,7 @@ function createWolframServer(config2, log, makeBackend) {
     return { tools: [...live.tools ?? [], STATUS_TOOL] };
   });
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    const arrivedAt = Date.now();
     const { name, arguments: args } = request.params;
     if (name === STATUS_TOOL.name) {
       const served = toolCache && toolCachedAt !== null ? { tools: toolCache, cachedAt: toolCachedAt } : null;
@@ -23655,6 +23819,7 @@ function createWolframServer(config2, log, makeBackend) {
       let relayed2 = Promise.resolve();
       const result = await backend.callTool({ name, arguments: args ?? {} }, {
         timeoutMs,
+        expiresAt: expiryOf(timeoutMs, arrivedAt),
         signal: extra.signal,
         ...progressToken === void 0 ? {} : {
           onprogress: (progress) => {
@@ -23686,12 +23851,17 @@ function createWolframServer(config2, log, makeBackend) {
         return { prompts: promptCache };
       return backend.listPrompts();
     });
-    fromKernel(GetPromptRequestSchema, async (request, extra) => backend.getPrompt(request.params, { timeoutMs: config2.callTimeoutMs, signal: extra.signal }));
+    fromKernel(GetPromptRequestSchema, async (request, extra) => backend.getPrompt(request.params, {
+      timeoutMs: config2.callTimeoutMs,
+      expiresAt: expiryOf(config2.callTimeoutMs),
+      signal: extra.signal
+    }));
   }
   if (capabilities.resources) {
     fromKernel(ListResourcesRequestSchema, async (request) => backend.listResources(request.params));
     fromKernel(ReadResourceRequestSchema, async (request, extra) => backend.readResource(request.params, {
       timeoutMs: config2.callTimeoutMs,
+      expiresAt: expiryOf(config2.callTimeoutMs),
       signal: extra.signal
     }));
   }
