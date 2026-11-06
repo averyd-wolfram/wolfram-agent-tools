@@ -100,6 +100,9 @@
  * FAKE_LSP_LAST_WORDS as LSPServer, answer a hover with a large reply and exit at
  *                     once, as a kernel that dies right after replying does
  *
+ * A tools/call whose code is Exit[] ends the process mid-call, answering
+ * nothing, as a real kernel evaluating it does: a busy kernel that dies.
+ *
  * A tools/call carrying _meta.progressToken gets two progress notifications
  * before its result. A real kernel sends none — measured, which is why the
  * call timeout is a deadline for the caller — so these exist only to tell
@@ -531,6 +534,9 @@ function run() {
         });
         return;
       }
+      // Evaluating Exit[] ends a real kernel mid-call, answering nothing: the
+      // way to have a busy kernel die rather than be released.
+      if (msg.params?.arguments?.code === "Exit[]") process.exit(0);
       // A server that gains a tool while a session is running: the list changes
       // and it says so, which is what tools.listChanged means.
       if (process.env.FAKE_ANNOUNCE_TOOL && !announced) {

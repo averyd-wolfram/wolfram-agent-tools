@@ -5569,7 +5569,10 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
 
     // And a request of a flavour whose first kernel is still starting is served
     // once the start succeeds, not when the request that made it finishes: a
-    // hold for #19, tried and reverted, kept it waiting for the whole call.
+    // hold for #19, tried and reverted, kept it waiting for the whole call. The
+    // hold that landed (#19's design) waits for the start alone: at the budget
+    // the request is held, woken when the flavour's kernel is ready, and only
+    // then retires the other flavour's idle kernel to start its own.
     // Each flavour carries its own fake timings, declared so the pool starts
     // its kernel with them.
     const timed = (server, timings) =>
@@ -5609,6 +5612,37 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
       "a request held for its flavour's first start is served when the start succeeds, not when its call ends",
       listedMs < 6_000,
       `${listedMs}ms for a tool list behind a 1s start and an 8s call (held for it, 9s)`,
+    );
+
+    // A kernel that reports more seats than the pool assumed raises the budget,
+    // and the requests held for an unproven flavour's first start are planned
+    // again then: only the queue was drained, so a held request ignored the new
+    // seat until the first start had finished, and only then started its own.
+    const learning = new lib.KernelPool({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 2, type: null },
+      learnFromKernels: true,
+    });
+    const twoSeats = timed("WolframAlpha", { FAKE_MAX_LICENSE: "2" });
+    await Promise.all([learning.run(twoSeats, evaluate), learning.run(twoSeats, evaluate)]);
+    // Slow to start, and reporting three seats as it does.
+    const threeSeats = timed("WolframLanguage", { FAKE_INIT_DELAY_MS: "2000", FAKE_MAX_LICENSE: "3" });
+    const learnAt = Date.now();
+    const firstStart = learning.run(threeSeats, evaluate); // retires an idle kernel to start
+    const heldForIt = learning.run(threeSeats, evaluate).then(() => Date.now() - learnAt); // held for that start
+    const heldMs = await heldForIt;
+    await firstStart;
+    await learning.stop();
+    check(
+      "a budget raised by a kernel's licence lets a held request start at once, not after the start it waits for",
+      heldMs < 3_200,
+      `${heldMs}ms behind a 2s start (planned again only once that start had finished: about 4s)`,
     );
 
   } finally {
@@ -5677,16 +5711,20 @@ heading("The pool's refusal window spares a flavour's idle kernel, and is report
       /^failed/.test(extra) && /^evaluated/.test(served),
       `extra start: ${extra.replace(/\s+/g, " ").slice(0, 60)}; then: ${served.replace(/\s+/g, " ").slice(0, 80)}`,
     );
-    // What would start a kernel is still turned away, inside the window.
+    // Inside the window, a request its own busy kernel will serve waits for
+    // that kernel. It was refused, with advice to repair a server that resolves
+    // fine on the kernel it was waiting for (#115).
     const again = hold();
     await until(again.running, 10_000);
-    const refused = await outcome(pool.run(flavour, evaluate));
+    const waiting = outcome(pool.run(flavour, evaluate));
+    await new Promise((r) => setTimeout(r, 200));
     again.release();
     await again.done;
+    const waited = await waiting;
     check(
-      "and one that would start a kernel is still refused",
-      /none was started for this request/.test(refused),
-      refused.replace(/\s+/g, " ").slice(0, 100),
+      "and one its own busy kernel can serve waits for that kernel, rather than being refused",
+      /^evaluated/.test(waited),
+      waited.replace(/\s+/g, " ").slice(0, 100),
     );
   } finally {
     await pool.stop();
@@ -5724,6 +5762,507 @@ heading("The pool's refusal window spares a flavour's idle kernel, and is report
     else process.env.FAKE_MODE = savedMode;
     if (savedMarker === undefined) delete process.env.FAKE_MARKER;
     else process.env.FAKE_MARKER = savedMarker;
+  }
+
+  // A burst for a flavour that has not shown it can start, at a full budget:
+  // each request found no seat, retired another session's idle kernel, and
+  // started one of its own to fail, one eviction per request (#19).
+  {
+    const burstMarker = join(home, "starts-unproven-burst");
+    process.env.FAKE_MARKER = burstMarker;
+    const burstPool = poolOf(60_000);
+    const other = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage", MCP_APPS_ENABLED: "false" });
+    try {
+      delete process.env.FAKE_MODE;
+      // Two idle kernels of another session fill the budget.
+      await Promise.all([outcome(burstPool.run(other, evaluate)), outcome(burstPool.run(other, evaluate))]);
+      const before = starts(burstMarker);
+      process.env.FAKE_MODE = "unactivated";
+      const burst = await Promise.all([1, 2, 3].map(() => outcome(burstPool.run(flavour, evaluate))));
+      delete process.env.FAKE_MODE;
+      const burstStarts = starts(burstMarker) - before;
+      const afterBurst = starts(burstMarker);
+      await Promise.all([outcome(burstPool.run(other, evaluate)), outcome(burstPool.run(other, evaluate))]);
+      const evicted = starts(burstMarker) - afterBurst;
+      check(
+        "a burst for a flavour that will not start starts one kernel and retires one other session's, not one per request",
+        burstStarts === 1 && evicted === 1 && burst.every((r) => /^failed/.test(r)),
+        `${burstStarts} start(s), ${evicted} of the other session's retired: ` +
+          burst.map((r) => r.replace(/\s+/g, " ").slice(8, 40)).join(" | "),
+      );
+    } finally {
+      await burstPool.stop();
+      if (savedMode === undefined) delete process.env.FAKE_MODE;
+      else process.env.FAKE_MODE = savedMode;
+      if (savedMarker === undefined) delete process.env.FAKE_MARKER;
+      else process.env.FAKE_MARKER = savedMarker;
+    }
+  }
+
+  // Held inside the window behind a long call, a request gets a second look
+  // when the window ends, which no release brings: then it may start a kernel
+  // of its own. The pool's clock is moved, so the window ends in a moment
+  // rather than fifteen seconds.
+  {
+    let poolNow = 5_000_000;
+    const clockPool = new lib.KernelPool({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 2, type: null },
+      learnFromKernels: false,
+      clock: () => poolNow,
+    });
+    try {
+      delete process.env.FAKE_MODE;
+      const long = hold(clockPool);
+      await until(long.running, 10_000);
+      process.env.FAKE_MODE = "no-such-server";
+      await outcome(clockPool.run(flavour, evaluate)); // an extra start fails: the window opens
+      delete process.env.FAKE_MODE;
+      poolNow += 15_000 - 300; // 300ms of it left
+      const heldAt = Date.now();
+      const late = outcome(clockPool.run(flavour, evaluate)); // held behind the long call
+      poolNow += 1_000; // and the window over, by the pool's clock
+      const served = await Promise.race([
+        late,
+        new Promise((r) => setTimeout(() => r("(still held after 5s)"), 5_000)),
+      ]);
+      const heldMs = Date.now() - heldAt;
+      long.release();
+      await long.done;
+      await late;
+      check(
+        "a request held inside the window is looked at again when the window ends, and served",
+        /^evaluated/.test(served),
+        `after ${heldMs}ms: ${String(served).replace(/\s+/g, " ").slice(0, 80)}`,
+      );
+    } finally {
+      await clockPool.stop();
+      if (savedMode === undefined) delete process.env.FAKE_MODE;
+      else process.env.FAKE_MODE = savedMode;
+    }
+  }
+
+  // Held before any window, behind an unproven flavour's starts: when one of
+  // them died, opening a window, the request had no timed look, and stayed
+  // held past the window's end though a seat was free.
+  {
+    let poolNow = 15_000_000;
+    const startsPool = new lib.KernelPool({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 3, type: null },
+      learnFromKernels: false,
+      clock: () => poolNow,
+    });
+    const slow = lib.kernelFlavour({
+      MCP_SERVER_NAME: "WolframLanguage",
+      FAKE_INIT_DELAY_MS: "1500",
+      WOLFRAM_MCP_KERNEL_ENV: "FAKE_INIT_DELAY_MS",
+    });
+    const idleOther = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage", MCP_APPS_ENABLED: "false" });
+    let release;
+    const held = new Promise((resolve) => (release = resolve));
+    let running = false;
+    try {
+      delete process.env.FAKE_MODE;
+      await outcome(startsPool.run(idleOther, evaluate)); // idle: a kernel a start could retire
+      const first = outcome(
+        startsPool.run(slow, async (client) => {
+          running = true;
+          await held;
+          return evaluate(client);
+        }),
+      ); // starts, slowly, then stays busy
+      await new Promise((r) => setTimeout(r, 300));
+      process.env.FAKE_MODE = "unactivated";
+      const dying = outcome(startsPool.run(slow, evaluate)); // a second start, which dies
+      const late = outcome(startsPool.run(slow, evaluate)); // held behind both: no window yet
+      await dying; // and now there is one
+      delete process.env.FAKE_MODE;
+      await until(() => running, 10_000); // the first start succeeded, and is busy
+      poolNow += 600_001; // a kernel that died: the full window, over, with a seat free
+      const endedAt = Date.now();
+      const served = await Promise.race([
+        late,
+        new Promise((r) => setTimeout(() => r("(still held after 6s)"), 6_000)),
+      ]);
+      const heldMs = Date.now() - endedAt;
+      release();
+      await first;
+      await late;
+      check(
+        "and so is one held before any window, behind starts of which one then died",
+        /^evaluated/.test(served),
+        `after ${heldMs}ms: ${String(served).replace(/\s+/g, " ").slice(0, 80)}`,
+      );
+    } finally {
+      release();
+      await startsPool.stop();
+      if (savedMode === undefined) delete process.env.FAKE_MODE;
+      else process.env.FAKE_MODE = savedMode;
+    }
+  }
+
+  // And when the window ends only after the first look: the look was armed
+  // once, so a request still held then was never looked at again.
+  {
+    let poolNow = 13_000_000;
+    const tickPool = new lib.KernelPool({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 2, type: null },
+      learnFromKernels: false,
+      clock: () => poolNow,
+    });
+    try {
+      delete process.env.FAKE_MODE;
+      const long = hold(tickPool);
+      await until(long.running, 10_000);
+      process.env.FAKE_MODE = "no-such-server";
+      await outcome(tickPool.run(flavour, evaluate)); // an extra start fails: 15s of window
+      delete process.env.FAKE_MODE;
+      const late = outcome(tickPool.run(flavour, evaluate)); // held behind the long call
+      await new Promise((r) => setTimeout(r, 1_500)); // past the first look, still inside
+      poolNow += 16_000; // and now the window is over
+      const endedAt = Date.now();
+      const served = await Promise.race([
+        late,
+        new Promise((r) => setTimeout(() => r("(still held after 4s)"), 4_000)),
+      ]);
+      const heldMs = Date.now() - endedAt;
+      long.release();
+      await long.done;
+      await late;
+      check(
+        "and so is one still held at the first look, when the window ends later",
+        /^evaluated/.test(served),
+        `after ${heldMs}ms: ${String(served).replace(/\s+/g, " ").slice(0, 80)}`,
+      );
+    } finally {
+      await tickPool.stop();
+      if (savedMode === undefined) delete process.env.FAKE_MODE;
+      else process.env.FAKE_MODE = savedMode;
+    }
+  }
+
+  // A held request does not jump the queue: woken first on every release of
+  // its flavour's kernel, held requests kept an older queued request of
+  // another flavour from its seat for as long as their window ran.
+  {
+    const fifoPool = poolOf(60_000);
+    const third = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage", LLMKIT_ENABLED: "false" });
+    const fourth = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage", MCP_APPS_ENABLED: "false" });
+    const holdFor = (on, fl) => {
+      let release;
+      const held = new Promise((resolve) => (release = resolve));
+      let running = false;
+      const done = outcome(
+        on.run(fl, async (client) => {
+          running = true;
+          await held;
+          return evaluate(client);
+        }),
+      );
+      return { release: () => release(), running: () => running, done };
+    };
+    try {
+      delete process.env.FAKE_MODE;
+      const own = holdFor(fifoPool, flavour);
+      await until(own.running, 10_000);
+      process.env.FAKE_MODE = "unactivated";
+      await outcome(fifoPool.run(flavour, evaluate)); // an extra start dies: the window opens
+      delete process.env.FAKE_MODE;
+      const otherBusy = holdFor(fifoPool, fourth); // the budget is full, nothing idle
+      await until(otherBusy.running, 10_000);
+      const queued = outcome(fifoPool.run(third, evaluate)); // waits for a seat
+      await new Promise((r) => setTimeout(r, 100));
+      // Held for its own kernel, and long once it has one, as a stream of them is.
+      const heldLater = holdFor(fifoPool, flavour);
+      await new Promise((r) => setTimeout(r, 100));
+      own.release();
+      await own.done;
+      const first = await Promise.race([
+        queued,
+        new Promise((r) => setTimeout(() => r("(still queued after 3s)"), 3_000)),
+      ]);
+      heldLater.release();
+      otherBusy.release();
+      await Promise.all([otherBusy.done, queued, heldLater.done]);
+      check(
+        "a request held for its own kernel does not take it ahead of an older queued request",
+        /^evaluated/.test(first),
+        String(first).replace(/\s+/g, " ").slice(0, 80),
+      );
+    } finally {
+      await fifoPool.stop();
+      if (savedMode === undefined) delete process.env.FAKE_MODE;
+      else process.env.FAKE_MODE = savedMode;
+    }
+  }
+
+  // Nor when the kernel it is held for dies rather than being released: the
+  // retirement woke the held request first, and once the window had ended it
+  // grew a kernel into the freed seat ahead of the older queued request.
+  {
+    let poolNow = 7_000_000;
+    const diePool = new lib.KernelPool({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 2, type: null },
+      learnFromKernels: false,
+      clock: () => poolNow,
+    });
+    const third = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage", LLMKIT_ENABLED: "false" });
+    const fourth = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage", MCP_APPS_ENABLED: "false" });
+    // A call held open until released, then evaluating `code`.
+    const holdFor = (fl, code = "1+1") => {
+      let release;
+      const held = new Promise((resolve) => (release = resolve));
+      let running = false;
+      const done = outcome(
+        diePool.run(fl, async (client) => {
+          running = true;
+          await held;
+          return client.callTool({ name: "WolframLanguageEvaluator", arguments: { code } });
+        }),
+      );
+      return { release: () => release(), running: () => running, done };
+    };
+    try {
+      delete process.env.FAKE_MODE;
+      const doomed = holdFor(flavour, "Exit[]");
+      await until(doomed.running, 10_000);
+      process.env.FAKE_MODE = "no-such-server";
+      await outcome(diePool.run(flavour, evaluate)); // an extra start fails: the window opens
+      delete process.env.FAKE_MODE;
+      const otherBusy = holdFor(fourth); // the budget is full, nothing idle
+      await until(otherBusy.running, 10_000);
+      const queued = outcome(diePool.run(third, evaluate)); // waits for a seat
+      await new Promise((r) => setTimeout(r, 100));
+      const heldLater = holdFor(flavour); // held for its own kernel, long once it has one
+      await new Promise((r) => setTimeout(r, 100));
+      poolNow += 16_000; // the window over, by the pool's clock
+      doomed.release(); // and its kernel dies mid-call, retired, not released
+      const first = await Promise.race([
+        queued,
+        new Promise((r) => setTimeout(() => r("(still queued after 3s)"), 3_000)),
+      ]);
+      heldLater.release();
+      otherBusy.release();
+      await Promise.all([doomed.done, otherBusy.done, queued, heldLater.done]);
+      check(
+        "and a kernel that dies rather than being released goes to the older queued request too",
+        /^evaluated/.test(first),
+        String(first).replace(/\s+/g, " ").slice(0, 80),
+      );
+    } finally {
+      await diePool.stop();
+      if (savedMode === undefined) delete process.env.FAKE_MODE;
+      else process.env.FAKE_MODE = savedMode;
+    }
+  }
+
+  // A swap's retirement wakes the requests held for the retired kernel's
+  // flavour; with that flavour's window just over, one grew a kernel into the
+  // freed seat before the swap grew its own: three kernels on two seats.
+  {
+    let poolNow = 11_000_000;
+    const seatPool = new lib.KernelPool({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 2, type: null },
+      learnFromKernels: false,
+      clock: () => poolNow,
+    });
+    const third = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage", LLMKIT_ENABLED: "false" });
+    const fourth = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage", MCP_APPS_ENABLED: "false" });
+    const holdFor = (fl) => {
+      let release;
+      const held = new Promise((resolve) => (release = resolve));
+      let running = false;
+      const done = outcome(
+        seatPool.run(fl, async (client) => {
+          running = true;
+          await held;
+          return evaluate(client);
+        }),
+      );
+      return { release: () => release(), running: () => running, done };
+    };
+    try {
+      delete process.env.FAKE_MODE;
+      const own = holdFor(flavour);
+      await until(own.running, 10_000);
+      process.env.FAKE_MODE = "no-such-server";
+      await outcome(seatPool.run(flavour, evaluate)); // an extra start fails: the window opens
+      delete process.env.FAKE_MODE;
+      const otherBusy = holdFor(fourth); // the budget is full, nothing idle
+      await until(otherBusy.running, 10_000);
+      const queued = holdFor(third); // older, waiting for a seat
+      await new Promise((r) => setTimeout(r, 50));
+      const heldLater = holdFor(flavour); // newer, held for its own kernel
+      await new Promise((r) => setTimeout(r, 50));
+      poolNow += 16_000; // the window over, before the held request's next look
+      own.release(); // the queued request retires this kernel to make room
+      await own.done;
+      const most = seatPool.size;
+      queued.release();
+      heldLater.release();
+      otherBusy.release();
+      await Promise.all([otherBusy.done, queued.done, heldLater.done]);
+      check(
+        "a swap's retirement lets no held request grow past the budget",
+        most <= seatPool.budget,
+        `${most} kernel(s) on a budget of ${seatPool.budget}`,
+      );
+    } finally {
+      await seatPool.stop();
+      if (savedMode === undefined) delete process.env.FAKE_MODE;
+      else process.env.FAKE_MODE = savedMode;
+    }
+  }
+
+  // A held request that comes to need a seat joins the queue where it came,
+  // not at its tail: appended, it fell behind a later request, which took the
+  // kernel it had been held for.
+  {
+    let poolNow = 9_000_000;
+    const orderPool = new lib.KernelPool({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 2, type: null },
+      learnFromKernels: false,
+      clock: () => poolNow,
+    });
+    const third = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage", LLMKIT_ENABLED: "false" });
+    const fourth = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage", MCP_APPS_ENABLED: "false" });
+    const holdFor = (fl) => {
+      let release;
+      const held = new Promise((resolve) => (release = resolve));
+      let running = false;
+      const done = outcome(
+        orderPool.run(fl, async (client) => {
+          running = true;
+          await held;
+          return evaluate(client);
+        }),
+      );
+      return { release: () => release(), running: () => running, done };
+    };
+    try {
+      delete process.env.FAKE_MODE;
+      const own = holdFor(flavour);
+      await until(own.running, 10_000);
+      process.env.FAKE_MODE = "no-such-server";
+      await outcome(orderPool.run(flavour, evaluate)); // an extra start fails: the window opens
+      delete process.env.FAKE_MODE;
+      const otherBusy = holdFor(fourth); // the budget is full, nothing idle
+      await until(otherBusy.running, 10_000);
+      const older = outcome(orderPool.run(flavour, evaluate)); // held for its own kernel
+      await new Promise((r) => setTimeout(r, 100));
+      const later = holdFor(third); // queued for a seat, and long once it has one
+      await new Promise((r) => setTimeout(r, 100));
+      poolNow += 16_000; // the window over: the held request now needs a seat too
+      await new Promise((r) => setTimeout(r, 1_500)); // its next look puts it in the queue
+      own.release(); // the kernel it was held for, free
+      const first = await Promise.race([
+        older,
+        new Promise((r) => setTimeout(() => r("(still waiting after 3s)"), 3_000)),
+      ]);
+      later.release();
+      otherBusy.release();
+      await Promise.all([own.done, otherBusy.done, older, later.done]);
+      check(
+        "a held request that comes to need a seat is queued where it came, ahead of later ones",
+        /^evaluated/.test(first),
+        String(first).replace(/\s+/g, " ").slice(0, 80),
+      );
+    } finally {
+      await orderPool.stop();
+      if (savedMode === undefined) delete process.env.FAKE_MODE;
+      else process.env.FAKE_MODE = savedMode;
+    }
+  }
+
+  // The window ends early when the kernel binary changes, which nothing
+  // announces: held behind a long call, a request waited out the old window,
+  // ten minutes for a kernel that died on launch, though the installation had
+  // been repaired.
+  {
+    const repairable = join(home, "pool-kernel-repairable.mjs");
+    writeFileSync(repairable, readFileSync(fakeKernel, "utf8"));
+    chmodSync(repairable, 0o755);
+    const repairPool = new lib.KernelPool({
+      bin: repairable,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 2, type: null },
+      learnFromKernels: false,
+    });
+    try {
+      delete process.env.FAKE_MODE;
+      const long = hold(repairPool);
+      await until(long.running, 10_000);
+      process.env.FAKE_MODE = "unactivated";
+      await outcome(repairPool.run(flavour, evaluate)); // an extra start dies: ten minutes
+      delete process.env.FAKE_MODE;
+      const late = outcome(repairPool.run(flavour, evaluate)); // held behind the long call
+      await new Promise((r) => setTimeout(r, 200));
+      writeFileSync(repairable, `${readFileSync(fakeKernel, "utf8")}\n// repaired\n`);
+      const repairedAt = Date.now();
+      const served = await Promise.race([
+        late,
+        new Promise((r) => setTimeout(() => r("(still held after 5s)"), 5_000)),
+      ]);
+      const heldMs = Date.now() - repairedAt;
+      long.release();
+      await long.done;
+      await late;
+      check(
+        "and when the kernel binary changes, though the long call it is held behind runs on",
+        /^evaluated/.test(served),
+        `after ${heldMs}ms: ${String(served).replace(/\s+/g, " ").slice(0, 80)}`,
+      );
+    } finally {
+      await repairPool.stop();
+      if (savedMode === undefined) delete process.env.FAKE_MODE;
+      else process.env.FAKE_MODE = savedMode;
+    }
   }
 
   // Any failed start is remembered, not only a server name that did not
