@@ -292,7 +292,7 @@ export class KernelPool {
         `reported (${facts.maxLicenseProcesses}, reserving ${this.#options.reserveSeats})`,
     );
     this.#budget = next;
-    this.#drainWaiters();
+    this.#schedule();
   }
 
   async #grow(flavour: KernelFlavour): Promise<Slot> {
@@ -311,7 +311,7 @@ export class KernelPool {
       onReady: async (client: Client) => {
         // Proven: what its held requests were waiting to learn (#19).
         this.#proven.add(flavour.digest);
-        this.#wake(flavour.digest);
+        this.#schedule();
         await this.#options.onKernelReady?.(client, flavour.digest);
       },
     });
@@ -477,7 +477,7 @@ export class KernelPool {
         // could: three kernels on two seats.
         this.#retire(plan.victim, "a session with a different environment needed the seat", false);
         const replacement = this.#grow(flavour);
-        this.#reseat(plan.victim.flavour.digest);
+        this.#schedule();
         return replacement;
       }
       case "reuse":
@@ -535,18 +535,29 @@ export class KernelPool {
     const held = this.#held.get(digest) ?? [];
     held.push(waiter);
     this.#held.set(digest, held);
+    this.#recheck(digest);
+  }
+
+  /**
+   * The timed look for a flavour's held requests while its window stands, armed
+   * again after each look for as long as any stay held inside it. Armed once
+   * only, a request still held at the first look — a window with more than a
+   * second left — was never looked at again, and stayed held past the window's
+   * end, or a repaired binary, until something unrelated woke the pool.
+   */
+  #recheck(digest: string): void {
+    if (this.#windowTimers.has(digest) || !this.#held.get(digest)?.length) return;
     const window = this.#window(digest);
-    if (window && !this.#windowTimers.has(digest)) {
-      const timer = setTimeout(
-        () => {
-          this.#windowTimers.delete(digest);
-          this.#wake(digest);
-        },
-        timerDelay(Math.min(window.remainingMs + 1, HELD_RECHECK_MS)),
-      );
-      timer.unref?.();
-      this.#windowTimers.set(digest, timer);
-    }
+    if (!window) return;
+    const timer = setTimeout(
+      () => {
+        this.#windowTimers.delete(digest);
+        this.#schedule(); // which arms the next look, if any stay held inside
+      },
+      timerDelay(Math.min(window.remainingMs + 1, HELD_RECHECK_MS)),
+    );
+    timer.unref?.();
+    this.#windowTimers.set(digest, timer);
   }
 
   /**
@@ -578,51 +589,9 @@ export class KernelPool {
     return false;
   }
 
-  /** Plan again for the requests held on a flavour, in the order they came. */
-  #wake(digest: string): void {
-    const held = this.#held.get(digest);
-    if (!held?.length) return;
-    this.#held.delete(digest);
-    for (const waiter of held) {
-      const plan = this.#plan(waiter.flavour);
-      if (plan.tier === "hold") this.#hold(waiter);
-      else if (plan.tier === "wait") this.#queue(waiter);
-      else {
-        try {
-          waiter.resolve(this.#act(plan, waiter.flavour));
-        } catch (err) {
-          waiter.reject(err);
-        }
-      }
-    }
-  }
-
-  /**
-   * A kernel free again goes to whoever came first: the head of the queue, or
-   * a request held for this kernel's flavour. Woken first always, held
-   * requests took every release of their flavour's kernel, so a stream of them
-   * inside a window kept an older queued request of another flavour from the
-   * seat it was owed, for as long as the window ran (#147's review).
-   */
   #release(slot: Slot): void {
     slot.busy = false;
-    this.#reseat(slot.flavour.digest);
-  }
-
-  /**
-   * After a kernel of this flavour is released or retired, serve whoever came
-   * first: the queue's head, or the requests held for this flavour. One
-   * decision for both, so a kernel that dies, rather than being released, does
-   * not hand its seat to a newer held request either (#147's review). The drain
-   * guards itself against re-entry, from a swap's retirement inside it.
-   */
-  #reseat(digest: string): void {
-    const head = this.#waiters[0];
-    const held = this.#held.get(digest) ?? [];
-    const queueFirst = head !== undefined && held.every((waiter) => head.seq < waiter.seq);
-    if (queueFirst) this.#drainWaiters();
-    this.#wake(digest);
-    if (!queueFirst) this.#drainWaiters();
+    this.#schedule();
   }
 
   /**
@@ -679,54 +648,97 @@ export class KernelPool {
     );
   }
 
-  /**
-   * Drop a kernel that could not answer for itself, or whose seat is needed.
-   *
-   * `#draining` guards the waiter drain because `#act`'s swap retires from
-   * inside `#drainWaiters`: without it the drain re-enters itself, and the head
-   * waiter it is part-way through serving is handed a slot twice.
-   */
-  #retire(slot: Slot, reason: string, reseat = true): void {
+  /** Drop a kernel that could not answer for itself, or whose seat is needed. */
+  #retire(slot: Slot, reason: string, reschedule = true): void {
     const at = this.#slots.indexOf(slot);
     if (at !== -1) this.#slots.splice(at, 1);
     this.#options.log(`retiring kernel after ${reason}; pool now ${this.#slots.length} kernel(s)`);
     void slot.session.stop().catch(() => {});
-    if (reseat) this.#reseat(slot.flavour.digest);
+    if (reschedule) this.#schedule();
   }
 
-  #draining = false;
+  #scheduling = false;
+  #rescheduled = false;
 
-  #drainWaiters(): void {
-    if (this.#draining) return;
-    this.#draining = true;
+  /**
+   * Serve every waiting request that can be served now, one at a time, oldest
+   * first, queued or held, planning everything again after each. Called on
+   * anything that frees capacity or changes a plan: a release, a retirement, a
+   * raised budget, a start that succeeds, a window's end.
+   *
+   * One scheduler, because the pool had one per event — wake the held, drain
+   * the queue — and each ordered whole groups: a flavour's held requests before
+   * or after the queue. A release or a retirement handed a seat to a newer held
+   * request over an older queued one, a raised budget gave the queue its seats
+   * first, and where several seats came at once a flavour's held requests took
+   * them all ahead of a queued request older than some of them (#147's review).
+   * Re-entered from inside — a swap retires a kernel — it only notes that it
+   * must look again.
+   */
+  #schedule(): void {
+    if (this.#scheduling) {
+      this.#rescheduled = true;
+      return;
+    }
+    this.#scheduling = true;
     try {
-      this.#drain();
+      do {
+        this.#rescheduled = false;
+        while (this.#serveOldest());
+      } while (this.#rescheduled);
     } finally {
-      this.#draining = false;
+      this.#scheduling = false;
     }
+    // Whoever is still held gets its timed look, whenever a window has opened
+    // since it was held: held behind an unproven flavour's starts, with no
+    // window, a request had no timer, and when one start then failed it stayed
+    // held past the window it opened (#147's review).
+    for (const digest of this.#held.keys()) this.#recheck(digest);
   }
 
-  #drain(): void {
-    // Strictly the head of the queue, so a stream of one flavour cannot starve a
-    // session of another. The tiers are #plan's, applied to whatever the head
-    // waiter needs — including the swap, which is why a waiter for a flavour
-    // with no kernel at all still gets served rather than waiting forever.
-    while (this.#waiters.length > 0) {
-      const head = this.#waiters[0];
-      if (!head) return;
-      const plan = this.#plan(head.flavour);
-      if (plan.tier === "wait") return;
-      this.#waiters.shift();
+  /**
+   * Serve the oldest waiting request that can be served now; false when none
+   * can. The queue keeps its strict order — only its head is a candidate, so
+   * a stream of one flavour cannot starve another — while held requests each
+   * wait on their own flavour. Once the head must wait there is no seat, so
+   * a younger request may still be refused or held, but takes nothing.
+   */
+  #serveOldest(): boolean {
+    const head = this.#waiters[0];
+    const held = [...this.#held.values()].flat();
+    const candidates = (head ? [head, ...held] : held).sort((a, b) => a.seq - b.seq);
+    let noSeat = false;
+    for (const waiter of candidates) {
+      const plan = this.#plan(waiter.flavour);
+      const queued = waiter === head;
+      if (plan.tier === "wait") {
+        if (queued) {
+          noSeat = true;
+          continue;
+        }
+        // Held, it now needs a seat: into the queue, where it came.
+        this.#unqueue(waiter);
+        this.#queue(waiter);
+        return true;
+      }
       if (plan.tier === "hold") {
-        this.#hold(head);
-        continue;
+        if (!queued) continue;
+        this.#unqueue(waiter);
+        this.#hold(waiter);
+        return true;
       }
+      // Seats go in the queue's order: nothing younger than a head that must
+      // wait takes one ahead of it. A refusal takes none.
+      if (noSeat && plan.tier !== "refuse") continue;
+      this.#unqueue(waiter);
       try {
-        head.resolve(this.#act(plan, head.flavour));
+        waiter.resolve(this.#act(plan, waiter.flavour));
       } catch (err) {
-        head.reject(err);
+        waiter.reject(err);
       }
+      return true;
     }
+    return false;
   }
 
   /**

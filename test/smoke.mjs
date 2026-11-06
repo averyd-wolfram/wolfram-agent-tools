@@ -5614,6 +5614,37 @@ heading("A server name we do not recognise belongs to the user, not to a typo");
       `${listedMs}ms for a tool list behind a 1s start and an 8s call (held for it, 9s)`,
     );
 
+    // A kernel that reports more seats than the pool assumed raises the budget,
+    // and the requests held for an unproven flavour's first start are planned
+    // again then: only the queue was drained, so a held request ignored the new
+    // seat until the first start had finished, and only then started its own.
+    const learning = new lib.KernelPool({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 2, type: null },
+      learnFromKernels: true,
+    });
+    const twoSeats = timed("WolframAlpha", { FAKE_MAX_LICENSE: "2" });
+    await Promise.all([learning.run(twoSeats, evaluate), learning.run(twoSeats, evaluate)]);
+    // Slow to start, and reporting three seats as it does.
+    const threeSeats = timed("WolframLanguage", { FAKE_INIT_DELAY_MS: "2000", FAKE_MAX_LICENSE: "3" });
+    const learnAt = Date.now();
+    const firstStart = learning.run(threeSeats, evaluate); // retires an idle kernel to start
+    const heldForIt = learning.run(threeSeats, evaluate).then(() => Date.now() - learnAt); // held for that start
+    const heldMs = await heldForIt;
+    await firstStart;
+    await learning.stop();
+    check(
+      "a budget raised by a kernel's licence lets a held request start at once, not after the start it waits for",
+      heldMs < 3_200,
+      `${heldMs}ms behind a 2s start (planned again only once that start had finished: about 4s)`,
+    );
+
   } finally {
     for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key];
     Object.assign(process.env, savedEnv);
@@ -5812,6 +5843,119 @@ heading("The pool's refusal window spares a flavour's idle kernel, and is report
       );
     } finally {
       await clockPool.stop();
+      if (savedMode === undefined) delete process.env.FAKE_MODE;
+      else process.env.FAKE_MODE = savedMode;
+    }
+  }
+
+  // Held before any window, behind an unproven flavour's starts: when one of
+  // them died, opening a window, the request had no timed look, and stayed
+  // held past the window's end though a seat was free.
+  {
+    let poolNow = 15_000_000;
+    const startsPool = new lib.KernelPool({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 3, type: null },
+      learnFromKernels: false,
+      clock: () => poolNow,
+    });
+    const slow = lib.kernelFlavour({
+      MCP_SERVER_NAME: "WolframLanguage",
+      FAKE_INIT_DELAY_MS: "1500",
+      WOLFRAM_MCP_KERNEL_ENV: "FAKE_INIT_DELAY_MS",
+    });
+    const idleOther = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage", MCP_APPS_ENABLED: "false" });
+    let release;
+    const held = new Promise((resolve) => (release = resolve));
+    let running = false;
+    try {
+      delete process.env.FAKE_MODE;
+      await outcome(startsPool.run(idleOther, evaluate)); // idle: a kernel a start could retire
+      const first = outcome(
+        startsPool.run(slow, async (client) => {
+          running = true;
+          await held;
+          return evaluate(client);
+        }),
+      ); // starts, slowly, then stays busy
+      await new Promise((r) => setTimeout(r, 300));
+      process.env.FAKE_MODE = "unactivated";
+      const dying = outcome(startsPool.run(slow, evaluate)); // a second start, which dies
+      const late = outcome(startsPool.run(slow, evaluate)); // held behind both: no window yet
+      await dying; // and now there is one
+      delete process.env.FAKE_MODE;
+      await until(() => running, 10_000); // the first start succeeded, and is busy
+      poolNow += 600_001; // a kernel that died: the full window, over, with a seat free
+      const endedAt = Date.now();
+      const served = await Promise.race([
+        late,
+        new Promise((r) => setTimeout(() => r("(still held after 6s)"), 6_000)),
+      ]);
+      const heldMs = Date.now() - endedAt;
+      release();
+      await first;
+      await late;
+      check(
+        "and so is one held before any window, behind starts of which one then died",
+        /^evaluated/.test(served),
+        `after ${heldMs}ms: ${String(served).replace(/\s+/g, " ").slice(0, 80)}`,
+      );
+    } finally {
+      release();
+      await startsPool.stop();
+      if (savedMode === undefined) delete process.env.FAKE_MODE;
+      else process.env.FAKE_MODE = savedMode;
+    }
+  }
+
+  // And when the window ends only after the first look: the look was armed
+  // once, so a request still held then was never looked at again.
+  {
+    let poolNow = 13_000_000;
+    const tickPool = new lib.KernelPool({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 20_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 2, type: null },
+      learnFromKernels: false,
+      clock: () => poolNow,
+    });
+    try {
+      delete process.env.FAKE_MODE;
+      const long = hold(tickPool);
+      await until(long.running, 10_000);
+      process.env.FAKE_MODE = "no-such-server";
+      await outcome(tickPool.run(flavour, evaluate)); // an extra start fails: 15s of window
+      delete process.env.FAKE_MODE;
+      const late = outcome(tickPool.run(flavour, evaluate)); // held behind the long call
+      await new Promise((r) => setTimeout(r, 1_500)); // past the first look, still inside
+      poolNow += 16_000; // and now the window is over
+      const endedAt = Date.now();
+      const served = await Promise.race([
+        late,
+        new Promise((r) => setTimeout(() => r("(still held after 4s)"), 4_000)),
+      ]);
+      const heldMs = Date.now() - endedAt;
+      long.release();
+      await long.done;
+      await late;
+      check(
+        "and so is one still held at the first look, when the window ends later",
+        /^evaluated/.test(served),
+        `after ${heldMs}ms: ${String(served).replace(/\s+/g, " ").slice(0, 80)}`,
+      );
+    } finally {
+      await tickPool.stop();
       if (savedMode === undefined) delete process.env.FAKE_MODE;
       else process.env.FAKE_MODE = savedMode;
     }
