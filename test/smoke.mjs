@@ -2858,6 +2858,72 @@ heading("On a broker too a request's ceiling counts from its arrival, and one an
     );
   }
 
+  // Timed from the arrival, the client's own wait for a broker that answers
+  // nothing named what was left of it: a 2 s call with 2 s of grace read
+  // "within 3.9s" or "within 4s" by when it happened to be sent. It names the
+  // whole ceiling, as a private kernel's error does, and still ends on time.
+  if (socketsHere("a call to a broker that answers nothing")) {
+    const address = join(privateDir(join(home, "broker-deaf-ceiling")), "broker.sock");
+    const server = createServer((socket) => {
+      socket.setEncoding("utf8");
+      socket.on("error", () => socket.destroy());
+      let buffered = "";
+      socket.on("data", (chunk) => {
+        buffered += chunk;
+        for (let at; (at = buffered.indexOf("\n")) !== -1; buffered = buffered.slice(at + 1)) {
+          const frame = JSON.parse(buffered.slice(0, at));
+          // Attaches and answers ping, so it stays chosen; never answers a call.
+          if (frame.op === "hello") {
+            socket.write(`${JSON.stringify({ id: frame.id, ok: true, result: { flavours: true, flavour: frame.params?.digest } })}\n`);
+          } else if (frame.op === "ping") {
+            socket.write(`${JSON.stringify({ id: frame.id, ok: true, result: {} })}\n`);
+          }
+        }
+      });
+    });
+    await listening(server, address);
+    const backend = await lib.BrokerBackend.attachIfRunning({
+      address,
+      flavour,
+      spawnCommand: join(home, "definitely-not-a-binary"),
+      spawnArgs: [],
+      spawnEnv: {},
+      log: () => {},
+    });
+    // Arrived 300 ms before it is sent, as a preparation would have spent.
+    const sentAt = Date.now();
+    const said = backend
+      ? await backend
+          .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, { timeoutMs: 1_000, expiresAt: sentAt + 700 })
+          .then(() => "answered", (e) => e.message)
+      : "could not attach";
+    const tookMs = Date.now() - sentAt;
+    // An expiry with no timeoutMs of its own, as a library caller may send:
+    // the expiry still bounds the wait, as it bounds a private kernel's.
+    const bareAt = Date.now();
+    const bare = backend
+      ? await Promise.race([
+          backend
+            .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, { timeoutMs: 0, expiresAt: bareAt + 500 })
+            .then(() => "answered", (e) => e.message),
+          new Promise((r) => setTimeout(() => r("still waiting at 6s"), 6_000)),
+        ])
+      : "could not attach";
+    const bareMs = Date.now() - bareAt;
+    await backend?.stop();
+    server.close();
+    check(
+      "a call a broker never answers is given up from its arrival, and named by its whole ceiling",
+      /did not answer callTool within 3s\b/.test(said) && tookMs >= 2_600 && tookMs < 3_000,
+      `${tookMs}ms: ${said.slice(0, 80)}`,
+    );
+    check(
+      "and one with an expiry but no timeoutMs is given up at that expiry",
+      /did not answer callTool/.test(bare) && bareMs >= 2_400 && bareMs < 3_000,
+      `${bareMs}ms: ${bare.slice(0, 80)}`,
+    );
+  }
+
   if (socketsHere("a call made while the broker starts its kernel")) {
     wipeCache();
     const runtime = privateDir(join(home, "run-expires-starting"));
