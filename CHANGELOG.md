@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.10](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.9...v0.1.10) (2026-11-06)
+
+
+### Bug Fixes
+
+* count a request's ceiling from its arrival on a private kernel, and never send one its caller was answered for ([#151](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/151)) ([8178165](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/81781650ceb85bb2b74edd30db0d37dc0dd04634))
+* give the lists read after a kernel starts this server's deadline, rather than the SDK's minute that forgets them ([#149](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/149)) ([ae561a0](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/ae561a0aba7062b62beb901d4a7d9f471dd7e762))
+
 ## [0.1.9](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.8...v0.1.9) (2026-11-06)
 
 
