@@ -98,10 +98,15 @@ export class HandshakeTimeout extends Error {
     super(
       `The Wolfram kernel did not complete MCP initialization within ` +
         `${budgetText(timeoutMs)}. Common causes: the ` +
-        `Wolfram/AgentTools paclet is missing or is being downloaded, the ` +
-        `selected kernel predates AgentTools support, or an unactivated ` +
-        `Wolfram Engine is waiting for credentials on stdin, which cannot ` +
-        `be answered here.`,
+        `Wolfram/AgentTools paclet is missing or is being downloaded; ` +
+        // #105: AgentTools answers initialize only once these are fetched, so a
+        // fresh user base timed out with nothing to say why, or what to raise.
+        `on a first start, AgentTools downloads the databases its context ` +
+        `tools need into a user base that lacks them, which needs network ` +
+        `access and can take longer than WOLFRAM_MCP_START_TIMEOUT_SECONDS ` +
+        `allows; the selected kernel predates AgentTools support; or an ` +
+        `unactivated Wolfram Engine is waiting for credentials on stdin, ` +
+        `which cannot be answered here.`,
     );
     this.name = "HandshakeTimeout";
     this.timeoutMs = timeoutMs;

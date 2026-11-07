@@ -8235,22 +8235,22 @@ heading("Preparation has one deadline, and names the stage it ran out in");
     );
     return { s, result, elapsed: Date.now() - started, text: result.content?.[0]?.text ?? "" };
   };
-  const stageCheck = async (label, env, stage) => {
-    const { s, result, elapsed, text } = await firstCall(env);
-    check(
-      label,
-      result.isError === true && text.includes(`time ran out while ${stage}`) && elapsed < 7_000,
-      `${elapsed}ms: ${text.slice(0, 110)}`,
-    );
-    return s;
-  };
-
   const slowHandshake = { FAKE_INIT_DELAY_MS: "20000" };
+  // #105: a first start into a fresh user base waits on AgentTools fetching its
+  // context tools' databases, and the timeout said neither that nor what to raise.
+  const namesFirstStart = (text) =>
+    text.includes("databases its context tools need") && text.includes("WOLFRAM_MCP_START_TIMEOUT_SECONDS");
 
-  const s = await stageCheck(
+  const { s, result: slowResult, elapsed: slowElapsed, text: slowText } = await firstCall(slowHandshake);
+  check(
     "a slow handshake spends the deadline, and is named",
-    slowHandshake,
-    "starting the kernel",
+    slowResult.isError === true && slowText.includes("time ran out while starting the kernel") && slowElapsed < 7_000,
+    `${slowElapsed}ms: ${slowText.slice(0, 110)}`,
+  );
+  check(
+    "and says a first start may be fetching AgentTools' databases, and what to raise",
+    namesFirstStart(slowText),
+    slowText.slice(slowText.indexOf("Common causes"), slowText.indexOf("Common causes") + 140),
   );
 
   // The back-off: a failed preparation is not retried by the very next call,
@@ -8295,6 +8295,11 @@ heading("Preparation has one deadline, and names the stage it ran out in");
       "a slow handshake in the broker is bounded by the start timeout there",
       result.isError === true && /did not complete MCP initialization within 3s/.test(text) && elapsed < 9_000,
       `${elapsed}ms: ${text.slice(0, 100)}`,
+    );
+    check(
+      "and says there too that a first start may be fetching AgentTools' databases, and what to raise",
+      namesFirstStart(text),
+      text.slice(text.indexOf("Common causes"), text.indexOf("Common causes") + 140),
     );
     await s.client.close();
     signalOwnBrokers("SIGTERM", runtime);
