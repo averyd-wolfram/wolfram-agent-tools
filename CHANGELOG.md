@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.11](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.10...v0.1.11) (2026-11-07)
+
+
+### Bug Fixes
+
+* relay what a kernel lists and answers as it sent it, for the client to judge ([#155](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/155)) ([92ad977](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/92ad9776ec0efd9c78115699a1a9ee74abca8853))
+* say a first start may be fetching AgentTools' databases when it times out, and what to raise ([#157](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/157)) ([e7b1187](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/e7b11875203968fc6bd5fb2d5f226565d9b21752))
+
 ## [0.1.10](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.9...v0.1.10) (2026-11-06)
 
 
