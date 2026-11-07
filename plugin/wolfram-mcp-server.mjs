@@ -8208,7 +8208,7 @@ var init_version = __esm({
   "dist/version.js"() {
     "use strict";
     here = dirname(fileURLToPath(import.meta.url));
-    PKG = true ? JSON.parse('{"name":"wolfram-mcp-server","version":"0.1.10","description":"MCP server that drives a locally installed Wolfram kernel, with lazy start and idle shutdown."}') : JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8"));
+    PKG = true ? JSON.parse('{"name":"wolfram-mcp-server","version":"0.1.11","description":"MCP server that drives a locally installed Wolfram kernel, with lazy start and idle shutdown."}') : JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8"));
   }
 });
 
@@ -18737,7 +18737,7 @@ var init_kernel = __esm({
     HandshakeTimeout = class extends Error {
       timeoutMs;
       constructor(timeoutMs) {
-        super(`The Wolfram kernel did not complete MCP initialization within ${budgetText(timeoutMs)}. Common causes: the Wolfram/AgentTools paclet is missing or is being downloaded, the selected kernel predates AgentTools support, or an unactivated Wolfram Engine is waiting for credentials on stdin, which cannot be answered here.`);
+        super(`The Wolfram kernel did not complete MCP initialization within ${budgetText(timeoutMs)}. Common causes: the Wolfram/AgentTools paclet is missing or is being downloaded; on a first start, AgentTools downloads the databases its context tools need into a user base that lacks them, which needs network access and can take longer than WOLFRAM_MCP_START_TIMEOUT_SECONDS allows; the selected kernel predates AgentTools support; or an unactivated Wolfram Engine is waiting for credentials on stdin, which cannot be answered here.`);
         this.name = "HandshakeTimeout";
         this.timeoutMs = timeoutMs;
       }
@@ -18752,13 +18752,7 @@ var init_kernel = __esm({
       }
       async listTools(params, options) {
         const result = await this.request({ method: "tools/list", params }, PaginatedResultSchema, options);
-        const tools = this.#judge(result, "tool", (tool) => {
-          const { outputSchema, ...rest } = tool;
-          const parsed = ToolSchema.safeParse(rest);
-          if (!parsed.success || outputSchema === void 0)
-            return parsed;
-          return { success: true, data: { ...parsed.data, outputSchema } };
-        });
+        const tools = this.#judge(result, "tool", ({ outputSchema: _, ...rest }) => ToolSchema.safeParse(rest));
         return { ...result, tools };
       }
       async listPrompts(params, options) {
@@ -18770,6 +18764,18 @@ var init_kernel = __esm({
         const result = await this.request({ method: "resources/list", params }, PaginatedResultSchema, options);
         const resources = this.#judge(result, "resource", (resource) => ResourceSchema.safeParse(resource));
         return { ...result, resources };
+      }
+      /**
+       * A tool's result as the kernel sent it, for the client to judge (#117). The
+       * SDK's `CallToolResultSchema` would refuse a `structuredContent` that is not
+       * an object, and strip what it does not know from the rest. Nothing here
+       * reads a result's shape, and the SDK checks it against a tool's output
+       * schema only once it has cached one from `Client.listTools`, which this
+       * client never calls.
+       */
+      async callTool(params, _resultSchema, options) {
+        const result = await this.request({ method: "tools/call", params }, ResultSchema, options);
+        return result;
       }
       /**
        * Each item of one page of a kernel's list, on its own: one that `parse`
@@ -18790,7 +18796,7 @@ var init_kernel = __esm({
           const fields = typeof item === "object" && item !== null ? item : {};
           const parsed = parse4(fields);
           if (parsed.success) {
-            kept.push(parsed.data);
+            kept.push(fields);
             return;
           }
           const named = [fields["name"], fields["uri"]].find((v) => typeof v === "string" && v !== "");
@@ -23531,6 +23537,7 @@ var Server = class extends Protocol {
 };
 
 // dist/proxy.js
+init_protocol();
 init_types();
 init_cache();
 init_config();
@@ -23799,7 +23806,8 @@ function createWolframServer(config2, log, makeBackend) {
     const live = await backend.listTools();
     return { tools: [...live.tools ?? [], STATUS_TOOL] };
   });
-  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+  const relayCalls = Protocol.prototype.setRequestHandler.bind(server);
+  relayCalls(CallToolRequestSchema, async (request, extra) => {
     const arrivedAt = Date.now();
     const { name, arguments: args } = request.params;
     if (name === STATUS_TOOL.name) {
