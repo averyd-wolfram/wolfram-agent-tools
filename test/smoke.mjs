@@ -2048,6 +2048,53 @@ if (socketsHere("a kernel's reported directories")) {
   wipeCache();
 }
 
+heading("At a budget of one, an upgrade swaps out the kernel started before it, and says why (#3)");
+if (socketsHere("a stale kernel swapped out")) {
+  wipeCache();
+  const bench = pacletBench("stale-swap");
+  const runtime = privateDir(join(home, "run-stale-swap"));
+  const brokerLog = join(home, "stale-swap-broker.log");
+  // Licence 2 less a reserved seat: the stale kernel holds the only seat.
+  const env = {
+    ...bench.env,
+    WOLFRAM_MCP_SHARE: "1",
+    XDG_RUNTIME_DIR: runtime,
+    WOLFRAM_MCP_IDLE_MINUTES: "5",
+    WOLFRAM_MCP_LICENSE_LIMIT: "2",
+    WOLFRAM_MCP_RESERVE_SEATS: "1",
+    WOLFRAM_MCP_LOG: brokerLog,
+  };
+  const evaluate = (client) =>
+    client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
+  bench.install("Demo-1.0.0", "Demo");
+  bench.declare("DemoOne");
+  const a = await connect(env);
+  await evaluate(a.client);
+  bench.uninstall("Demo-1.0.0");
+  bench.install("Demo-1.1.0", "Demo");
+  bench.declare("DemoTwo");
+  const b = await connect(env);
+  const answer = await evaluate(b.client);
+  const offered = (await b.client.listTools()).tools.map((tool) => tool.name);
+  const said = existsSync(brokerLog) ? readFileSync(brokerLog, "utf8") : "";
+  const swap = said.split("\n").filter((l) => /make room|retiring kernel/.test(l));
+  check(
+    "the new session is served the new tools within the one seat",
+    answer.isError !== true && offered.includes("DemoTwo") && !/pool grew to [2-9] kernel/.test(said),
+    `${offered.join(", ")}; ${(said.match(/pool grew to \d+ kernel/g) ?? []).join(", ")}`,
+  );
+  // It used to say it retired a kernel of this environment because a session
+  // of a different one needed the seat: the same digest on both sides.
+  check(
+    "and the broker says the kernel went because its paclets changed, not for another environment",
+    swap.some((l) => /paclets changed/.test(l)) && !swap.some((l) => /different environment|kernel for [0-9a-f]+ to make room/.test(l)),
+    swap.map((l) => l.replace(/^\S+ \[wolfram-broker\] /, "")).join(" | ").slice(0, 160),
+  );
+  for (const s of [a, b]) await s.client.close();
+  signalOwnBrokers("SIGTERM", runtime);
+  await new Promise((r) => setTimeout(r, 300));
+}
+
 heading("A failed start's back-off ends once the paclets change (#3, #6)");
 {
   // A paclet whose server cannot start: the fake, given a tools file it cannot
