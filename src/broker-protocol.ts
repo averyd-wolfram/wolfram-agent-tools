@@ -38,7 +38,7 @@ import { PKG } from "./version.js";
  * once. An old broker that cannot answer a new op is the lesser problem, and
  * `ping` is built to read that refusal as the proof of life it is.
  */
-export const BROKER_PROTOCOL = 8;
+export const BROKER_PROTOCOL = 9;
 
 /**
  * `sockaddr_un.sun_path`, its terminating NUL included: 108 bytes on Linux, 104
@@ -142,6 +142,16 @@ export interface BrokerResponse {
    * older broker met then would drop the data again.
    */
   data?: unknown;
+  /**
+   * What the kernel that answered was started from (`KernelSession.source`),
+   * for an op a kernel answered. A session compares it with what its own lists
+   * came from, and re-reads them when a paclet upgrade has put it on a kernel
+   * serving another definition — a session that attached only for its first
+   * call reuses a kernel another started, and hears no `kernelReady` (#3). And
+   * a list is cached under it rather than under what the session read as it
+   * began (#6). A change of shape: `BROKER_PROTOCOL` 9.
+   */
+  source?: string;
 }
 
 /**
@@ -171,6 +181,14 @@ export type BrokerEvent =
        * for `BrokerResponse.data`.
        */
       promptsError?: string;
+      /**
+       * What the kernel was started from, so its lists are cached under that:
+       * written under what the session read as it began, a list from a kernel
+       * started after an upgrade sat under the old source, and undoing the
+       * install brought that source, and those tools, back (#6). With
+       * `BrokerResponse.source`, `BROKER_PROTOCOL` 9.
+       */
+      source?: string;
     }
   | {
       /** The kernel's progress on one in-flight call, relabelled by the proxy. */

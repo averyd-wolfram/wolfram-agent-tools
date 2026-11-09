@@ -150,6 +150,9 @@ built-ins, which is the bug it exists for.
     directories, the paclet version that loaded — which every MCP kernel reports as it starts
     (`KERNEL_ARGS`), cached. No kernel of its own
   - `cache.ts`: the capability/tool-list cache and the cache directory
+  - `server-source.ts`: what a server is served from, read off the disk without a kernel —
+    the installed paclets that mention AgentTools and the user's own server file, by inode
+    and ctime — which the cache key carries and each kernel records as it starts (#6)
   - `config.ts`: every knob, all environment-driven, plus `MCP_SERVERS`, the cold-start
     capability table — the paclet's *built-in* servers, never the whole name space
   - `flavour.ts`: which environment values decide whether two sessions may share a kernel.
@@ -293,7 +296,7 @@ smoke suite depends on this — and an older kernel named that way starts and th
 
 | What | Where |
 |---|---|
-| Capability and tool-list cache | `$XDG_CACHE_HOME` or `~/.cache` → `wolfram-mcp-server/capabilities/<digest>.json`, one per kernel×server name (`LOCALAPPDATA` on Windows) |
+| Capability and tool-list cache | `$XDG_CACHE_HOME` or `~/.cache` → `wolfram-mcp-server/capabilities/<digest>.json`, one per kernel×server name×flavour×what the server is served from (`LOCALAPPDATA` on Windows) |
 | Per-installation reported facts | same directory → `installations/<digest>.json` |
 | Broker socket | `$WOLFRAM_MCP_RUNTIME_DIR`, else `$XDG_RUNTIME_DIR`, else `tmpdir()` if only you can write to it, else the cache directory's `run/` (`brokerDirectory`) → `wolfram-mcp-<uid>-<digest>.sock`, one per installation per user — the digest is protocol, package version, the running code's own digest (a bundle and a clone of one version are two programs), kernel binary, uid and, when set, `WOLFRAMINIT` (an entitlement's broker is its own), deliberately *not* the server name; Windows `\\.\pipe\wolfram-mcp-<digest>` |
 | Kernel preference | Wolfram's own `WolframScript.conf`, read never written |

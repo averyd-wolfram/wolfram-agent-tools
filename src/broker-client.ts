@@ -224,6 +224,8 @@ export class BrokerBackend implements KernelBackend {
    */
   readonly #liveness = new Map<number, (alive: boolean) => void>();
   #onKernelReady: KernelReadyHandler | undefined;
+  /** `servedFrom`: the source the latest answer from a kernel carried. */
+  #served: string | undefined;
   /** No new work goes out on this connection; the next call chooses again. */
   #closed = false;
   /** The session has chosen again, and left this connection to drain (`retire`). */
@@ -610,8 +612,9 @@ export class BrokerBackend implements KernelBackend {
         // Answer from what the broker sent. Calling back through #request here
         // would re-enter the pool while the slot that raised the event is still
         // held, which grew the pool to the whole licence budget on one call.
-        const { capabilities, tools, prompts, promptsError } = frame;
+        const { capabilities, tools, prompts, promptsError, source } = frame;
         void this.#onKernelReady?.({
+          source,
           capabilities: async () => capabilities,
           listTools: async (cursor) => (cursor ? this.listTools(cursor) : { tools }),
           listPrompts: async (cursor) => {
@@ -638,6 +641,8 @@ export class BrokerBackend implements KernelBackend {
     const waiter = this.#pending.get(response.id);
     if (!waiter) return;
     this.#pending.delete(response.id);
+    // A refusal from a kernel says which kernel too.
+    if (response.source !== undefined) this.#served = response.source;
     if (response.ok) waiter.resolve(response.result);
     else waiter.reject(brokerError(response));
   }
@@ -793,6 +798,10 @@ export class BrokerBackend implements KernelBackend {
 
   onKernelReady(handler: KernelReadyHandler): void {
     this.#onKernelReady = handler;
+  }
+
+  servedFrom(): string | undefined {
+    return this.#served;
   }
 
   capabilities(): Promise<ServerCapabilities> {

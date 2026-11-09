@@ -61,8 +61,15 @@ import type { KernelInstall } from "./locate.js";
 import { errorText, type Logger } from "./log.js";
 import { PKG } from "./version.js";
 
-export type ToolPage = ListToolsResult;
-export type PromptPage = ListPromptsResult;
+/**
+ * A list as a backend answers it, with what the kernel that listed it was
+ * started from (`KernelSession.source`) where that is known: a session re-reading
+ * its lists asks for each separately, and on a broker each may reach another
+ * kernel, so the source has to come with the list rather than from whichever
+ * answer arrived last (#6).
+ */
+export type ToolPage = ListToolsResult & { source?: string | undefined };
+export type PromptPage = ListPromptsResult & { source?: string | undefined };
 
 /**
  * Read-only upstream access for use *inside* a kernel-ready hook.
@@ -75,6 +82,13 @@ export interface DirectOps {
   capabilities(): Promise<ServerCapabilities>;
   listTools(cursor?: string): Promise<ToolPage>;
   listPrompts(cursor?: string): Promise<PromptPage>;
+  /**
+   * What the kernel these reach was started from (`KernelSession.source`), so
+   * its lists are cached under that and not under what the session read as it
+   * began: a kernel started after an upgrade lists the new tools, and one that
+   * began before it the old (#6). Undefined where it is not known.
+   */
+  source?: string | undefined;
 }
 
 export type KernelReadyHandler = (ops: DirectOps) => void | Promise<void>;
@@ -148,6 +162,13 @@ export interface KernelBackend {
   /** Told of a kernel start that failed while serving a request, as it fails. */
   onStartFailed?(handler: (err: unknown) => void): void;
   /**
+   * What the kernel that answered this backend's latest request was started
+   * from (`KernelSession.source`), undefined where unknown. The proxy compares
+   * it with what its lists came from: a broker hands a session whichever kernel
+   * is current, which after a paclet upgrade serves another definition (#3).
+   */
+  servedFrom?(): string | undefined;
+  /**
    * False once this backend can never serve again — a broker whose socket has
    * closed, or which stopped answering. `DeferredBackend` drops a backend that
    * says this and decides again, which is what makes "sharing is an
@@ -205,6 +226,7 @@ export class LocalBackend implements KernelBackend {
     log: Logger;
     extraEnv?: Record<string, string> | undefined;
     onFacts?: ((facts: KernelFacts, chosen: string[]) => void) | undefined;
+    sourceFromFacts?: boolean | undefined;
   }) {
     this.#session = new KernelSession({
       ...options,
@@ -212,6 +234,7 @@ export class LocalBackend implements KernelBackend {
       onReady: async (client: Client, late?: AbortSignal) => {
         // The raw client, deliberately: this runs inside the queue.
         await this.#onReady?.({
+          source: this.#session.source,
           capabilities: async () => client.getServerCapabilities() ?? {},
           // This server's request options, as `run` gives every other request:
           // with the SDK's own, a slow list was cancelled at 60 s (#70). And
@@ -235,6 +258,10 @@ export class LocalBackend implements KernelBackend {
 
   onStartFailed(handler: (err: unknown) => void): void {
     this.#onStartFailed = handler;
+  }
+
+  servedFrom(): string | undefined {
+    return this.#session.source;
   }
 
   /**
@@ -276,17 +303,24 @@ export class LocalBackend implements KernelBackend {
    * complete lists and neither ever returns a `nextCursor`.
    */
   async listTools(): Promise<ToolPage> {
-    return { tools: await this.#session.run((c, request) => listAllTools(c, request)) };
+    let source: string | undefined;
+    const tools = await this.#session.run((c, request, served) => {
+      source = served;
+      return listAllTools(c, request);
+    });
+    return { tools, source };
   }
 
   async listPrompts(): Promise<PromptPage> {
-    const prompts = await this.#session.run((c, request) =>
-      drainPages(async (cursor) => {
+    let source: string | undefined;
+    const prompts = await this.#session.run((c, request, served) => {
+      source = served;
+      return drainPages(async (cursor) => {
         const page = await c.listPrompts(cursor ? { cursor } : undefined, request);
         return { items: page.prompts ?? [], nextCursor: page.nextCursor };
-      }),
-    );
-    return { prompts };
+      });
+    });
+    return { prompts, source };
   }
 
   async getPrompt(
@@ -434,6 +468,10 @@ export class DeferredBackend implements KernelBackend {
 
   #identity(): CandidateIdentity | null {
     return this.#bin === undefined ? null : candidateIdentity(this.#bin);
+  }
+
+  servedFrom(): string | undefined {
+    return this.#resolved?.servedFrom?.();
   }
 
   backoff(): BackoffState | null {
@@ -820,6 +858,7 @@ export async function createBackend(
       onFacts: (facts, chosen) => {
         if (config.inspect) recordFacts(install.bin, facts, chosen, log);
       },
+      sourceFromFacts: config.inspect,
     });
   };
 

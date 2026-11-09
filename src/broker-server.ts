@@ -9,6 +9,7 @@
  * falls back to its own kernel, so a broker failure degrades rather than breaks.
  */
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import { McpError, type Prompt } from "@modelcontextprotocol/sdk/types.js";
 import { createServer, type Server, type Socket } from "node:net";
 import { randomBytes } from "node:crypto";
@@ -29,7 +30,7 @@ import {
   SOCKET_MODE,
 } from "./broker-protocol.js";
 import { settingValue, type KernelFlavour } from "./flavour.js";
-import { drainPages, listAllTools, requestOptions } from "./kernel.js";
+import { drainPages, listAllTools, requestOptions, type RunOptions } from "./kernel.js";
 import { errorText, type Logger } from "./log.js";
 
 /** How long to linger with no connections before exiting. */
@@ -275,7 +276,8 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
       onFacts: (facts, chosen) => {
         if (options.allowInspect) recordFacts(options.bin, facts, chosen, log);
       },
-      onKernelReady: (client, flavour, late) => announceKernel(client, flavour, late),
+      onKernelReady: (client, flavour, late, source) =>
+        announceKernel(client, flavour, late, source),
     });
   })();
   // Nothing may reject unhandled while nobody is awaiting it yet.
@@ -290,7 +292,8 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
   async function announceKernel(
     client: Client,
     flavour: string,
-    late?: AbortSignal,
+    late: AbortSignal | undefined,
+    source: string | undefined,
   ): Promise<void> {
     // Only the sessions this kernel can serve. Telling the others would put one
     // flavour's tool list into another's cache entry, under a key that exists to
@@ -331,6 +334,7 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
           tools,
           prompts,
           ...(promptsError === undefined ? {} : { promptsError }),
+          ...(source === undefined ? {} : { source }),
         },
         flavour,
       );
@@ -364,7 +368,14 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
     inFlight: Map<number, AbortController>,
     emit: (frame: BrokerEvent) => void,
   ): Promise<BrokerResponse> {
-    const reply = (result: unknown): BrokerResponse => ({ id: request.id, ok: true, result });
+    // What the kernel that answered was started from, set by `run` below.
+    let source: string | undefined;
+    const reply = (result: unknown): BrokerResponse => ({
+      id: request.id,
+      ok: true,
+      result,
+      ...(source === undefined ? {} : { source }),
+    });
     // Every op below needs a kernel, and a kernel needs to be the right kind.
     // A session that never said is refused rather than guessed at; the proxy
     // declares at attach, so reaching this means a peer that cannot be served.
@@ -401,32 +412,50 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
       // The first request may arrive before the licence is known; it waits here
       // rather than the proxy waiting to attach.
       const pool = await preparing;
+      // Every op a kernel answers says which source that kernel was started
+      // from, so the session can tell when an upgrade has moved it (#3).
+      const run = <T>(
+        fn: (client: Client, options: RequestOptions) => Promise<T>,
+        runOptions?: RunOptions,
+      ): Promise<T> =>
+        pool.run(
+          flavour,
+          (client, options, served) => {
+            source = served;
+            return fn(client, options);
+          },
+          runOptions,
+        );
       switch (request.op) {
         case "capabilities":
-          return reply(await pool.run(flavour, async (c) => c.getServerCapabilities() ?? {}));
+          return reply(await run(async (c) => c.getServerCapabilities() ?? {}));
         // Drained inside the one slot, and answered as a complete list. A cursor
         // is paging state belonging to one kernel, and the pool hands out
         // whichever is free — so relaying a cursor could ask page 2 of a kernel
         // that never issued page 1. Nothing outside this process ever sees one.
         case "listTools":
+          // With the source in the list itself as well, since a session asks
+          // for each list apart and each may reach another kernel (#6).
           return reply({
-            tools: await pool.run(flavour, (c, options) => listAllTools(c, options)),
+            tools: await run((c, options) => listAllTools(c, options)),
+            source,
           });
         case "listPrompts":
           return reply({
-            prompts: await pool.run(flavour, (c, options) =>
+            prompts: await run((c, options) =>
               drainPages(async (cursor) => {
                 const page = await c.listPrompts(cursor ? { cursor } : undefined, options);
                 return { items: page.prompts ?? [], nextCursor: page.nextCursor };
               }),
             ),
+            source,
           });
         // The session's own call ceiling, and its cancel, as for a tool call: a
         // prompt runs its function in the kernel. Without a ceiling, the kernel
         // session's default.
         case "getPrompt":
           return reply(
-            await pool.run(flavour, (c, options) => c.getPrompt(request.params as never, options), {
+            await run((c, options) => c.getPrompt(request.params as never, options), {
               deadlineMs: request.timeoutMs,
               expiresAt,
               signal: cancel?.signal,
@@ -434,26 +463,19 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
           );
         case "listResources":
           return reply(
-            await pool.run(flavour, (c, options) =>
-              c.listResources(request.params as never, options),
-            ),
+            await run((c, options) => c.listResources(request.params as never, options)),
           );
         case "readResource":
           return reply(
-            await pool.run(
-              flavour,
-              (c, options) => c.readResource(request.params as never, options),
-              {
-                deadlineMs: request.timeoutMs,
-                expiresAt,
-                signal: cancel?.signal,
-              },
-            ),
+            await run((c, options) => c.readResource(request.params as never, options), {
+              deadlineMs: request.timeoutMs,
+              expiresAt,
+              signal: cancel?.signal,
+            }),
           );
         case "callTool":
           return reply(
-            await pool.run(
-              flavour,
+            await run(
               (c, options) =>
                 c.callTool(request.params as never, undefined, {
                   // The session's: the signal below, and an SDK timeout that
@@ -497,6 +519,9 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
         ...(err instanceof McpError
           ? { code: err.code, ...(err.data === undefined ? {} : { data: err.data }) }
           : {}),
+        // A kernel that refused the request answered it all the same: a call to
+        // a tool an upgrade removed is how a session on the old list finds out.
+        ...(source === undefined ? {} : { source }),
       };
     } finally {
       if (cancel) inFlight.delete(request.id);

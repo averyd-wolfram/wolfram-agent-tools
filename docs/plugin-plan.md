@@ -782,7 +782,11 @@ are *traced* in this tree on 2026-10-05 unless marked otherwise.
    a running session corrects itself, but a session that starts from a stale cache serves the old
    schemas until a kernel runs. *Work:* key a paclet-declared server's entry on its paclet's
    version, read without a kernel — from the installed paclet's `PacletInfo` on disk — and fall
-   back to today's key when that cannot be read.
+   back to today's key when that cannot be read. *Done* (#6), wider than planned: the key carries what
+   the server is served from (`server-source.ts`) — every installed paclet whose `PacletInfo`
+   mentions AgentTools, AgentTools' own included, and the user's own server file, by inode and
+   ctime, since a reinstall at the same version keeps the version — and a list is written
+   under the source of the kernel that produced it. A broker's warm kernels are #3.
 5. **`structuredContent` and `outputSchema` intact.** *Done* (#31): this server passes tool
    definitions and results through without rebuilding them, on both paths and through the cache,
    and judges none of them — a kernel's client lists tools as a plain request, not as the SDK's

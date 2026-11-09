@@ -105,10 +105,17 @@ export interface KernelPoolOptions {
    *
    * The client is passed deliberately: this runs inside the queue, while the
    * slot is still held, so anything the caller needs from the new kernel has to
-   * be read here rather than by going back through `run`.
+   * be read here rather than by going back through `run`. `source` is what
+   * the kernel was started from, so its lists can be cached under that (#6).
    */
   onKernelReady?:
-    ((client: Client, flavour: string, late?: AbortSignal) => void | Promise<void>) | undefined;
+    | ((
+        client: Client,
+        flavour: string,
+        late: AbortSignal | undefined,
+        source: string | undefined,
+      ) => void | Promise<void>)
+    | undefined;
   /** For the suite, which cannot wait out a window of real time. */
   clock?: (() => number) | undefined;
 }
@@ -209,6 +216,8 @@ export class KernelPool {
   #arrivals = 0;
   /** A second look for a flavour's held requests when its window ends. */
   readonly #windowTimers = new Map<string, NodeJS.Timeout>();
+  /** `#replaced`, for the rest of this turn of the event loop. */
+  readonly #changed = new Map<Slot, boolean>();
 
   constructor(options: KernelPoolOptions) {
     this.#options = options;
@@ -309,6 +318,7 @@ export class KernelPool {
       flavour,
       log: (message) => log(`kernel ${index}: ${message}`),
       onFacts: (facts, chosen) => this.#learn(facts, chosen),
+      sourceFromFacts: this.#options.learnFromKernels,
       // A start that fails after its caller's ceiling passed reaches no
       // caller, so it is recorded here, as the start fails: answered "expired"
       // instead, it left no window, and each later request started the kernel
@@ -318,7 +328,7 @@ export class KernelPool {
         // Proven: what its held requests were waiting to learn (#19).
         this.#proven.add(flavour.digest);
         this.#schedule();
-        await this.#options.onKernelReady?.(client, flavour.digest, late);
+        await this.#options.onKernelReady?.(client, flavour.digest, late, session.source);
       },
     });
     const slot: Slot = { session, busy: true, flavour };
@@ -346,9 +356,8 @@ export class KernelPool {
    */
   #victim(flavour: KernelFlavour): Slot | undefined {
     return (
-      this.#slots.find(
-        (s) => !s.busy && !s.session.abandoned && s.flavour.digest !== flavour.digest,
-      ) ?? this.#slots.find((s) => !s.busy && s.flavour.digest !== flavour.digest)
+      this.#slots.find((s) => !s.busy && !s.session.abandoned && !this.#mine(s, flavour)) ??
+      this.#slots.find((s) => !s.busy && !this.#mine(s, flavour))
     );
   }
 
@@ -364,7 +373,7 @@ export class KernelPool {
     return (
       !slot.busy &&
       !slot.session.abandoned &&
-      slot.flavour.digest === flavour.digest &&
+      this.#mine(slot, flavour) &&
       (!refusing || slot.session.running)
     );
   }
@@ -382,8 +391,37 @@ export class KernelPool {
   #idle(flavour: KernelFlavour): Slot | undefined {
     return (
       this.#slots.find((s) => this.#servable(s, flavour, false)) ??
-      this.#slots.find((s) => !s.busy && s.flavour.digest === flavour.digest)
+      this.#slots.find((s) => !s.busy && this.#mine(s, flavour))
     );
+  }
+
+  /**
+   * Whether a slot's kernel can serve this flavour: one of it whose running
+   * kernel's source has not changed on disk since it started
+   * (`KernelSession.sourceChanged`). One started before a paclet upgrade serves
+   * the old definition, so it is treated as another flavour's: never handed
+   * out, and retired as one is (#3).
+   * Decided as a slot is chosen, so a request queued before an upgrade and
+   * served after it gets a kernel started after it. A slot whose kernel stopped
+   * for idleness reads the source again as it restarts, so it is still this
+   * flavour's.
+   */
+  #mine(slot: Slot, flavour: KernelFlavour): boolean {
+    return slot.flavour.digest === flavour.digest && !this.#replaced(slot);
+  }
+
+  /**
+   * `KernelSession.sourceChanged`, read once per turn of the event loop and
+   * slot, since one plan looks at every slot; a later turn reads the disk again.
+   */
+  #replaced(slot: Slot): boolean {
+    let changed = this.#changed.get(slot);
+    if (changed === undefined) {
+      if (this.#changed.size === 0) setImmediate(() => this.#changed.clear());
+      changed = slot.session.sourceChanged();
+      this.#changed.set(slot, changed);
+    }
+    return changed;
   }
 
   /**
@@ -435,16 +473,12 @@ export class KernelPool {
    * request waited out its own ceiling (#115).
    */
   #ownBusy(flavour: KernelFlavour): boolean {
-    return this.#slots.some(
-      (s) => s.busy && !s.session.abandoned && s.flavour.digest === flavour.digest,
-    );
+    return this.#slots.some((s) => s.busy && !s.session.abandoned && this.#mine(s, flavour));
   }
 
   /** A kernel of this flavour whose start is under way. */
   #starting(flavour: KernelFlavour): boolean {
-    return this.#slots.some(
-      (s) => s.busy && !s.session.running && s.flavour.digest === flavour.digest,
-    );
+    return this.#slots.some((s) => s.busy && !s.session.running && this.#mine(s, flavour));
   }
 
   /**
@@ -770,7 +804,7 @@ export class KernelPool {
    */
   async run<T>(
     flavour: KernelFlavour,
-    fn: (client: Client, request: RequestOptions) => Promise<T>,
+    fn: (client: Client, request: RequestOptions, source: string | undefined) => Promise<T>,
     options: RunOptions = {},
   ): Promise<T> {
     // Cancelled before it reached the pool, so no room is made for it: let in,

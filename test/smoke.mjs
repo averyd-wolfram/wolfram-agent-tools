@@ -100,6 +100,9 @@ const suiteKey = lib.cacheKey(
   null,
   "WolframLanguage",
   lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" }).digest,
+  // What a session here reads its server's source from: its HOME is `home`,
+  // and inspection is off, so the platform defaults under it.
+  lib.serverSource("WolframLanguage", lib.sourceDirs({}, {}, home)).digest,
 );
 
 const marker = join(home, "starts.log");
@@ -232,6 +235,54 @@ const warmCache = async (env = {}) => {
     undefined, { timeout: 20_000 });
   await warm.client.close();
   await new Promise((r) => setTimeout(r, 300));
+};
+
+/**
+ * A user base of a section's own, whose paclets change as installs change them,
+ * and a tools file the fake lists from as each kernel starts: what the paclets
+ * declare. Every step changes both, as an install does, and every session gets
+ * the same environment, so only the disk can tell them apart (#3, #6).
+ */
+const pacletBench = (tag, { userBase = join(home, `ub-${tag}`), base = join(home, `base-${tag}`) } = {}) => {
+  const repository = join(userBase, "Paclets", "Repository");
+  const toolsFile = join(home, `tools-${tag}.json`);
+  // Both directories named, so a kernel's are the ones a session reads, and
+  // nothing here reads the machine's own base directory.
+  const dirs = { WOLFRAM_USERBASE: userBase, WOLFRAM_BASE: base };
+  return {
+    userBase,
+    env: { ...dirs, FAKE_TOOLS_FILE: toolsFile },
+    declare: (...names) =>
+      writeFileSync(
+        toolsFile,
+        JSON.stringify(
+          names.map((name) => ({
+            name,
+            description: `${name}, from a paclet`,
+            inputSchema: { type: "object", properties: {} },
+          })),
+        ),
+      ),
+    install: (entry, name, { agentTools = true } = {}) => {
+      mkdirSync(join(repository, entry), { recursive: true });
+      writeFileSync(
+        join(repository, entry, "PacletInfo.wl"),
+        `PacletObject[<|"Name" -> "${name}", "Version" -> "${entry.split("-").pop()}"` +
+          (agentTools ? `, "Extensions" -> {{"AgentTools", "MCPServers" -> {"Server"}}}` : "") +
+          "|>]\n",
+      );
+    },
+    uninstall: (entry) => rmSync(join(repository, entry), { recursive: true, force: true }),
+    /** The cache key a session here reads, for what is on disk now. */
+    key: () =>
+      lib.cacheKey(
+        fakeKernel,
+        null,
+        "WolframLanguage",
+        lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage", ...dirs }).digest,
+        lib.serverSource("WolframLanguage", lib.sourceDirs(dirs, {}, home)).digest,
+      ),
+  };
 };
 
 /** The `sharing` line of a session's wolfram_status, which says which path it took. */
@@ -1483,6 +1534,136 @@ heading("Regression — a stale cache must be corrected on kernel start");
 }
 
 // ---------------------------------------------------------------------------
+heading("A paclet upgrade is a new cache entry, read off the disk without a kernel (#6)");
+{
+  const { userBase, env, declare, install, uninstall } = pacletBench("source");
+  // What a new session is offered, and whether offering it started a kernel. A
+  // cold list starts one, which rewrites the cache before the session closes.
+  const offered = async () => {
+    const before = startCount();
+    const s = await connect(env);
+    const { tools } = await s.client.listTools();
+    await new Promise((r) => setTimeout(r, 300));
+    await s.client.close();
+    return { names: tools.map((t) => t.name), started: startCount() - before };
+  };
+
+  wipeCache();
+  install("Wolfram__AgentTools-2.2.0", "Wolfram/AgentTools");
+  install("Demo-1.0.0", "Demo");
+  declare("DemoOne");
+  await warmCache(env);
+  const warm = await offered();
+  check(
+    "with nothing changed on disk, a session is offered the cached list and starts no kernel",
+    warm.names.includes("DemoOne") && warm.started === 0,
+    `${warm.names.join(", ")}; ${warm.started} start(s)`,
+  );
+
+  uninstall("Demo-1.0.0");
+  install("Demo-1.1.0", "Demo");
+  declare("DemoTwo");
+  const upgraded = await offered();
+  check(
+    "after a paclet upgrade, a session is not offered the old tools from the cache",
+    upgraded.names.includes("DemoTwo") && !upgraded.names.includes("DemoOne"),
+    upgraded.names.join(", "),
+  );
+
+  // #3's repro: ForceVersionInstall can keep the version, so the version alone
+  // cannot be the key.
+  uninstall("Demo-1.1.0");
+  install("Demo-1.1.0", "Demo");
+  declare("DemoThree");
+  const reinstalled = await offered();
+  check(
+    "nor after a reinstall at the same version",
+    reinstalled.names.includes("DemoThree") && !reinstalled.names.includes("DemoTwo"),
+    reinstalled.names.join(", "),
+  );
+
+  // A built-in server's tools are AgentTools' own.
+  uninstall("Wolfram__AgentTools-2.2.0");
+  install("Wolfram__AgentTools-2.3.0", "Wolfram/AgentTools");
+  declare("DemoFour");
+  const agentTools = await offered();
+  check(
+    "nor after an AgentTools upgrade, for a built-in server",
+    agentTools.names.includes("DemoFour") && !agentTools.names.includes("DemoThree"),
+    agentTools.names.join(", "),
+  );
+
+  install("Other-1.0.0", "Other", { agentTools: false });
+  const unrelated = await offered();
+  check(
+    "a paclet with no AgentTools in its PacletInfo changes nothing: the cache still serves",
+    unrelated.names.includes("DemoFour") && unrelated.started === 0,
+    `${unrelated.names.join(", ")}; ${unrelated.started} start(s)`,
+  );
+
+  // An install undone brings the earlier source back exactly, so whatever was
+  // written under it has to be what a kernel of that source lists — not the
+  // last list anyone wrote.
+  install("Extra-1.0.0", "Extra");
+  declare("DemoFour", "DemoFive");
+  const extra = await offered();
+  uninstall("Extra-1.0.0");
+  declare("DemoFour");
+  const undone = await offered();
+  check(
+    "an install undone is offered the list from before it, from the cache",
+    extra.names.includes("DemoFive") &&
+      undone.names.includes("DemoFour") &&
+      !undone.names.includes("DemoFive") &&
+      undone.started === 0,
+    `with it: ${extra.names.join(", ")}; undone: ${undone.names.join(", ")}; ${undone.started} start(s)`,
+  );
+
+  // A server of the user's own is looked for before anything else, so creating
+  // one for this name changes what a kernel serves.
+  const servers = join(userBase, "ApplicationData", "Wolfram", "AgentTools", "Servers");
+  mkdirSync(join(servers, "WolframLanguage"), { recursive: true });
+  writeFileSync(join(servers, "WolframLanguage", "Metadata.wxf"), "8:");
+  declare("DemoSix");
+  const own = await offered();
+  check(
+    "nor after a server of the user's own is created under the name",
+    own.names.includes("DemoSix") && !own.names.includes("DemoFour"),
+    own.names.join(", "),
+  );
+
+  // Before the paclet first resolves a name it copies the old root across, and
+  // serves what it copied, so a server there counts while the new root is absent.
+  rmSync(join(userBase, "ApplicationData"), { recursive: true, force: true });
+  declare("DemoSeven");
+  await warmCache(env);
+  const old = join(userBase, "ApplicationData", "Wolfram", "MCPServer", "Servers", "WolframLanguage");
+  mkdirSync(old, { recursive: true });
+  writeFileSync(join(old, "Metadata.wxf"), "8:");
+  declare("DemoEight");
+  const migrating = await offered();
+  check(
+    "nor after one is created under the old MCPServer root, which the paclet migrates",
+    migrating.names.includes("DemoEight") && !migrating.names.includes("DemoSeven"),
+    migrating.names.join(", "),
+  );
+
+  // Entries are decoded, so a name the paclet URL-encodes is still found.
+  const encoded = join(home, "ub-encoded");
+  const before = lib.serverSource("Demo/Server", lib.sourceDirs({ WOLFRAM_USERBASE: encoded }, {}, home));
+  const named = join(encoded, "ApplicationData", "Wolfram", "AgentTools", "Servers", "Demo%2FServer");
+  mkdirSync(named, { recursive: true });
+  writeFileSync(join(named, "Metadata.wxf"), "8:");
+  const after = lib.serverSource("Demo/Server", lib.sourceDirs({ WOLFRAM_USERBASE: encoded }, {}, home));
+  check(
+    "a user server whose directory name is URL-encoded is found under its name",
+    before.digest !== after.digest && after.found.some((line) => line.includes("Demo%2FServer")),
+    after.found.join(" | "),
+  );
+  wipeCache();
+}
+
+// ---------------------------------------------------------------------------
 heading("Regression — a startup failure must report what the kernel said");
 {
   wipeCache();
@@ -1678,6 +1859,192 @@ if (socketsHere()) {
   );
 
   for (const s of [a, b, c, d]) await s.client.close();
+  await new Promise((r) => setTimeout(r, 300));
+}
+
+// ---------------------------------------------------------------------------
+heading("A broker hands out no kernel started before a paclet upgrade (#3)");
+if (socketsHere("a broker across a paclet upgrade")) {
+  const call = (client, code = "1+1") =>
+    client.callTool({ name: "WolframLanguageEvaluator", arguments: { code } }, undefined, {
+      timeout: 30_000,
+    });
+  const names = async (client) => (await client.listTools()).tools.map((tool) => tool.name);
+
+  wipeCache();
+  const bench = pacletBench("broker-source");
+  const runtime = privateDir(join(home, "run-source"));
+  const env = {
+    ...bench.env,
+    WOLFRAM_MCP_SHARE: "1",
+    XDG_RUNTIME_DIR: runtime,
+    WOLFRAM_MCP_IDLE_MINUTES: "5",
+    WOLFRAM_MCP_LICENSE_LIMIT: "3",
+    WOLFRAM_MCP_RESERVE_SEATS: "0",
+  };
+  bench.install("Wolfram__AgentTools-2.2.0", "Wolfram/AgentTools");
+  bench.install("Demo-1.0.0", "Demo");
+  bench.declare("DemoOne");
+
+  // A session's kernel lists DemoOne, which warms the cache; a second session
+  // starts from that cache and never makes a call, so it has not attached.
+  const a = await connect(env);
+  await call(a.client);
+  const warmed = await until(async () => lib.readCache(bench.key())?.tools?.some((tool) => tool.name === "DemoOne"), 5_000);
+  const idle = await connect(env);
+  const idleBefore = await names(idle.client);
+  const refused = await connect(env);
+
+  const before = startCount();
+  bench.uninstall("Demo-1.0.0");
+  bench.install("Demo-1.1.0", "Demo");
+  bench.declare("DemoTwo");
+  const b = await connect(env);
+  const offered = await names(b.client);
+  await call(b.client);
+  check(
+    "a session started after an upgrade is offered the new tools, from a new kernel, not the warm one",
+    warmed &&
+      offered.includes("DemoTwo") &&
+      !offered.includes("DemoOne") &&
+      startCount() - before === 1,
+    `${offered.join(", ")}; ${startCount() - before} start(s)`,
+  );
+
+  // It started from the cache and attached only for this call, to a kernel
+  // another session started: it hears no kernelReady, so the answer itself has
+  // to say the kernel serves another definition.
+  let changed = false;
+  idle.client.setNotificationHandler(lib.ToolListChangedNotificationSchema, async () => {
+    changed = true;
+  });
+  await call(idle.client);
+  const followed = await until(async () => (await names(idle.client)).includes("DemoTwo"), 5_000);
+  check(
+    "a session from before the upgrade, attaching only for its first call, re-reads its list and says so",
+    idleBefore.includes("DemoOne") && followed && changed && startCount() - before === 1,
+    `before: ${idleBefore.join(", ")}; after: ${(await names(idle.client)).join(", ")}; list_changed: ${changed}`,
+  );
+
+  // The same, when that first call is to a tool the upgrade removed: the kernel
+  // refuses it, and the refusal has to say which kernel it was just the same.
+  let refusal = null;
+  try {
+    await refused.client.callTool({ name: "DemoOne", arguments: {} }, undefined, { timeout: 30_000 });
+  } catch (err) {
+    refusal = err;
+  }
+  const corrected = await until(async () => (await names(refused.client)).includes("DemoTwo"), 5_000);
+  check(
+    "and so does one whose first call is to a tool the upgrade removed, which is refused",
+    refusal !== null && corrected,
+    `${refusal ? `refused (${refusal.code})` : "not refused"}; now: ${(await names(refused.client)).join(", ")}`,
+  );
+
+  // A kernel the upgrade lands in the start of may have loaded either side of
+  // it — the fake, like the paclet, resolves its tools as it answers
+  // initialize — so its list belongs under neither source.
+  const oldKey = bench.key();
+  const slow = await connect({ ...env, XDG_RUNTIME_DIR: privateDir(join(home, "run-source-slow")), FAKE_INIT_DELAY_MS: "1500" });
+  const starting = call(slow.client);
+  await until(() => startCount() - before === 2, 5_000);
+  bench.uninstall("Demo-1.1.0");
+  bench.install("Demo-1.2.0", "Demo");
+  bench.declare("DemoFour");
+  await starting;
+  await new Promise((r) => setTimeout(r, 500));
+  const underOld = lib.readCache(oldKey)?.tools?.map((tool) => tool.name) ?? [];
+  const underNew = lib.readCache(bench.key())?.tools?.map((tool) => tool.name) ?? [];
+  check(
+    "a kernel an upgrade landed in the start of has its list cached under neither source",
+    !underOld.includes("DemoFour") && !underNew.includes("DemoFour"),
+    `old: ${underOld.join(", ") || "nothing"}; new: ${underNew.join(", ") || "nothing"}`,
+  );
+
+  for (const s of [a, b, idle, refused, slow]) await s.client.close();
+  signalOwnBrokers("SIGTERM", runtime);
+  signalOwnBrokers("SIGTERM", join(home, "run-source-slow"));
+  await new Promise((r) => setTimeout(r, 300));
+}
+
+heading("A kernel watches the directories it reports, not the ones guessed before it started (#3)");
+if (socketsHere("a kernel's reported directories")) {
+  // A cold machine: no facts yet, and nothing names the directories, so the
+  // first kernel's are Wolfram's defaults, guessed — and a Wolfram Engine's user
+  // base is not the desktop's. The fake reports its own, under FAKE_BASE.
+  wipeCache();
+  const engine = join(home, "engine-base");
+  const bench = pacletBench("reported", { userBase: join(engine, "userbase") });
+  const runtime = privateDir(join(home, "run-source-reported"));
+  const env = {
+    FAKE_TOOLS_FILE: bench.env.FAKE_TOOLS_FILE,
+    FAKE_BASE: engine,
+    // What a kernel reports is taken only with inspection on, as everywhere.
+    WOLFRAM_MCP_INSPECT: "1",
+    WOLFRAM_MCP_SHARE: "1",
+    XDG_RUNTIME_DIR: runtime,
+    WOLFRAM_MCP_IDLE_MINUTES: "5",
+    WOLFRAM_MCP_LICENSE_LIMIT: "3",
+    WOLFRAM_MCP_RESERVE_SEATS: "0",
+  };
+  bench.install("Demo-1.0.0", "Demo");
+  bench.declare("DemoOne");
+  const a = await connect(env);
+  await a.client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
+  const before = startCount();
+  bench.uninstall("Demo-1.0.0");
+  bench.install("Demo-1.1.0", "Demo");
+  bench.declare("DemoTwo");
+  const b = await connect(env);
+  const offered = (await b.client.listTools()).tools.map((tool) => tool.name);
+  check(
+    "an upgrade where the kernel said its paclets are is seen, though they were not where they were guessed",
+    offered.includes("DemoTwo") && !offered.includes("DemoOne") && startCount() - before === 1,
+    `${offered.join(", ")}; ${startCount() - before} start(s)`,
+  );
+  for (const s of [a, b]) await s.client.close();
+  signalOwnBrokers("SIGTERM", runtime);
+  await new Promise((r) => setTimeout(r, 300));
+  // The facts its kernels recorded name a base no other section has.
+  wipeCache();
+}
+
+heading("A request queued across a paclet upgrade runs on a kernel started after it (#3)");
+if (socketsHere("a queued request across a paclet upgrade")) {
+  wipeCache();
+  const bench = pacletBench("broker-queue");
+  const runtime = privateDir(join(home, "run-source-queue"));
+  const env = {
+    ...bench.env,
+    WOLFRAM_MCP_SHARE: "1",
+    XDG_RUNTIME_DIR: runtime,
+    WOLFRAM_MCP_IDLE_MINUTES: "5",
+    WOLFRAM_MCP_MAX_KERNELS: "1",
+    // One kernel, busy for a while, so the next request has to queue for it.
+    FAKE_CALL_DELAY_MS: "1500",
+    FAKE_DELAY_FIRST_ONLY: "1",
+  };
+  bench.install("Demo-1.0.0", "Demo");
+  bench.declare("DemoOne");
+  const x = await connect(env);
+  const y = await connect(env);
+  const before = startCount();
+  const busy = x.client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
+  await until(() => startCount() - before === 1, 5_000);
+  await new Promise((r) => setTimeout(r, 300));
+  const queued = y.client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "2+2" } }, undefined, { timeout: 30_000 });
+  await new Promise((r) => setTimeout(r, 200));
+  bench.uninstall("Demo-1.0.0");
+  bench.install("Demo-1.1.0", "Demo");
+  bench.declare("DemoTwo");
+  const [first, second] = await Promise.all([busy, queued]);
+  check(
+    "a request waiting for a busy kernel across an upgrade is served by a new kernel, not that one",
+    !first.isError && !second.isError && startCount() - before === 2,
+    `${startCount() - before} start(s)`,
+  );
+  for (const s of [x, y]) await s.client.close();
+  signalOwnBrokers("SIGTERM", runtime);
   await new Promise((r) => setTimeout(r, 300));
 }
 
