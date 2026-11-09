@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.12...v0.2.0) (2026-11-09)
+
+
+### Features
+
+* clear-cache --server &lt;name&gt; forgets one server's cached tool lists ([#161](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/161)) ([a098d48](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/a098d48a9662f62c1a369a711490c6c47ea225fd))
+
 ## [0.1.12](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.11...v0.1.12) (2026-11-09)
 
 
