@@ -45,7 +45,9 @@ A user never builds from source. They pick one of:
    config at (`node /path/to/wolfram-mcp-server.mjs`).
 
 `SHA256SUMS.txt` covers both, so the `archive` source can pin its download and a user can
-verify one.
+verify one. Each of the three files also carries a signed build-provenance attestation (#47),
+which says what the checksums cannot: that `release-build.yml` built it, from which commit.
+`gh attestation verify <file> --repo averyd-wolfram/wolfram-agent-tools` checks one.
 
 ## What runs, and where
 
@@ -167,9 +169,13 @@ the stamped archive with Claude Code at 2.1.289 and at the 2.1.75 floor. That jo
 holds no token that can write. `npm ci` runs every dependency's install scripts, and the
 validator is fetched from outside the lockfile. On one runner, any of them could rewrite a
 script or put a command on `$GITHUB_PATH` for a later step, so a write token anywhere in that
-job would be theirs too (#84). The files go on as an artifact to `publish`, a fresh job with
-no checkout that runs no repository code: one action, `download-artifact` pinned to a commit,
-then `gh` and `git ls-remote`. It is the one job that can write, and it publishes:
+job would be theirs too (#84). The files go on as an artifact to `attest`, a fresh job with
+no checkout that signs a build-provenance attestation for each (#47), holding only `id-token`
+and `attestations` write, and so do the two `release-please.yml` jobs that call this, since a
+called workflow's jobs get no more than its caller grants. Then to `publish`, another fresh job
+with no checkout that runs no repository code: one action, `download-artifact` pinned to a
+commit, then `gh` and `git ls-remote`. It is the one job that can write the repository, and it
+publishes:
 
 - **release-please's branch** becomes a GitHub pre-release, `v<x.y.z>-pre.<n>`, where `x.y.z`
   is the version release-please computed and `n` is one past the highest `-pre.` tag that
@@ -434,7 +440,8 @@ those is on the real repo:
 - **The release PR** exercises all of it: merge a `fix:` or `feat:` into `main`;
   release-please opens or updates its PR, the PR's branch builds the next pre-release, and
   merging the PR makes the draft, the tag, and the published release. Check a build with
-  `gh release download <tag> -D <dir>` and `shasum -a 256 -c SHA256SUMS.txt`.
+  `gh release download <tag> -D <dir>` and `shasum -a 256 -c SHA256SUMS.txt`, then
+  `gh attestation verify <file> --repo averyd-wolfram/wolfram-agent-tools` for each file.
 - **`actionlint`** (`brew install actionlint`) statically checks the workflow syntax and the
   `${{ }}` expressions without running anything, and **zizmor** (`brew install zizmor`, or
   `uvx zizmor@<version>` for CI's exact one) checks them for security, as CI's `workflows`

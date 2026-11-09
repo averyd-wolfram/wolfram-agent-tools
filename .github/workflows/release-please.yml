@@ -78,9 +78,13 @@ jobs:
   prerelease:
     needs: release-please
     if: ${{ needs.release-please.outputs.pr_branch }}
+    # A called workflow's jobs get no more than this: id-token and
+    # attestations are its attest job's, and only that job's (#47).
     permissions:
       contents: write
       statuses: write
+      id-token: write
+      attestations: write
     uses: ./.github/workflows/release-build.yml
     with:
       ref: ${{ needs.release-please.outputs.pr_branch }}
@@ -151,9 +155,13 @@ jobs:
       max-parallel: 1
       matrix:
         tag: ${{ fromJSON(needs.pending.outputs.finish) }}
+    # A called workflow's jobs get no more than this: id-token and
+    # attestations are its attest job's, and only that job's (#47).
     permissions:
       contents: write
       statuses: write
+      id-token: write
+      attestations: write
     uses: ./.github/workflows/release-build.yml
     with:
       ref: ${{ matrix.tag }}
