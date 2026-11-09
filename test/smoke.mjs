@@ -1946,8 +1946,10 @@ if (socketsHere("a broker across a paclet upgrade")) {
   // initialize — so its list belongs under neither source.
   const oldKey = bench.key();
   const slow = await connect({ ...env, XDG_RUNTIME_DIR: privateDir(join(home, "run-source-slow")), FAKE_INIT_DELAY_MS: "1500" });
+  // Counted from here: how many kernels the checks above started is theirs.
+  const slowBefore = startCount();
   const starting = call(slow.client);
-  await until(() => startCount() - before === 2, 5_000);
+  const spawned = await until(() => startCount() > slowBefore, 5_000);
   bench.uninstall("Demo-1.1.0");
   bench.install("Demo-1.2.0", "Demo");
   bench.declare("DemoFour");
@@ -1957,7 +1959,7 @@ if (socketsHere("a broker across a paclet upgrade")) {
   const underNew = lib.readCache(bench.key())?.tools?.map((tool) => tool.name) ?? [];
   check(
     "a kernel an upgrade landed in the start of has its list cached under neither source",
-    !underOld.includes("DemoFour") && !underNew.includes("DemoFour"),
+    spawned && !underOld.includes("DemoFour") && !underNew.includes("DemoFour"),
     `old: ${underOld.join(", ") || "nothing"}; new: ${underNew.join(", ") || "nothing"}`,
   );
 
