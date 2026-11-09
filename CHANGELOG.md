@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.12](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.11...v0.1.12) (2026-11-09)
+
+
+### Bug Fixes
+
+* serve and cache what the installed paclets declare now, not what a kernel loaded before an upgrade ([#158](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/158)) ([12f28e8](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/12f28e8d65d7931b5ce02d6aa904282ef3822bb2))
+
 ## [0.1.11](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.10...v0.1.11) (2026-11-07)
 
 
