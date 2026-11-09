@@ -30,6 +30,7 @@ import { brokerAddress } from "./broker-protocol.js";
 import { deadlineDelay, DEFAULT_START_TIMEOUT_MS, type Config } from "./config.js";
 import { doctorCommand } from "./doctor.js";
 import { installationEnv, recordFacts, type KernelFacts } from "./inspect.js";
+import { sessionSourceRead, sourceChanged, type SourceRead } from "./server-source.js";
 import {
   Backoff,
   candidateIdentity,
@@ -61,8 +62,23 @@ import type { KernelInstall } from "./locate.js";
 import { errorText, type Logger } from "./log.js";
 import { PKG } from "./version.js";
 
-export type ToolPage = ListToolsResult;
-export type PromptPage = ListPromptsResult;
+/**
+ * A list as a backend answers it, with what the kernel that listed it was
+ * started from (`KernelSession.source`) where that is known: a session re-reading
+ * its lists asks for each separately, and on a broker each may reach another
+ * kernel, so the source has to come with the list rather than from whichever
+ * answer arrived last (#6).
+ */
+export type ToolPage = ListToolsResult & {
+  source?: string | undefined;
+  /**
+   * The capabilities of the kernel that listed the tools, read in the same hold
+   * on it: asked for apart, they could come from another kernel, and its flags
+   * be cached beside these tools (#6).
+   */
+  capabilities?: ServerCapabilities | undefined;
+};
+export type PromptPage = ListPromptsResult & { source?: string | undefined };
 
 /**
  * Read-only upstream access for use *inside* a kernel-ready hook.
@@ -75,6 +91,13 @@ export interface DirectOps {
   capabilities(): Promise<ServerCapabilities>;
   listTools(cursor?: string): Promise<ToolPage>;
   listPrompts(cursor?: string): Promise<PromptPage>;
+  /**
+   * What the kernel these reach was started from (`KernelSession.source`), so
+   * its lists are cached under that and not under what the session read as it
+   * began: a kernel started after an upgrade lists the new tools, and one that
+   * began before it the old (#6). Undefined where it is not known.
+   */
+  source?: string | undefined;
 }
 
 export type KernelReadyHandler = (ops: DirectOps) => void | Promise<void>;
@@ -148,6 +171,19 @@ export interface KernelBackend {
   /** Told of a kernel start that failed while serving a request, as it fails. */
   onStartFailed?(handler: (err: unknown) => void): void;
   /**
+   * What the kernel that answered this backend's latest request was started
+   * from (`KernelSession.source`), undefined where unknown. The proxy compares
+   * it with what its lists came from: a broker hands a session whichever kernel
+   * is current, which after a paclet upgrade serves another definition (#3).
+   */
+  servedFrom?(): string | undefined;
+  /**
+   * What this backend's latest kernel start began from, and where it was read,
+   * whether or not it succeeded: a failed start is backed off until that
+   * changes, not until whatever is on disk when the failure is recorded does.
+   */
+  attempt?(): readonly SourceRead[];
+  /**
    * False once this backend can never serve again — a broker whose socket has
    * closed, or which stopped answering. `DeferredBackend` drops a backend that
    * says this and decides again, which is what makes "sharing is an
@@ -205,6 +241,7 @@ export class LocalBackend implements KernelBackend {
     log: Logger;
     extraEnv?: Record<string, string> | undefined;
     onFacts?: ((facts: KernelFacts, chosen: string[]) => void) | undefined;
+    sourceFromFacts?: boolean | undefined;
   }) {
     this.#session = new KernelSession({
       ...options,
@@ -212,6 +249,7 @@ export class LocalBackend implements KernelBackend {
       onReady: async (client: Client, late?: AbortSignal) => {
         // The raw client, deliberately: this runs inside the queue.
         await this.#onReady?.({
+          source: this.#session.source,
           capabilities: async () => client.getServerCapabilities() ?? {},
           // This server's request options, as `run` gives every other request:
           // with the SDK's own, a slow list was cancelled at 60 s (#70). And
@@ -235,6 +273,14 @@ export class LocalBackend implements KernelBackend {
 
   onStartFailed(handler: (err: unknown) => void): void {
     this.#onStartFailed = handler;
+  }
+
+  servedFrom(): string | undefined {
+    return this.#session.source;
+  }
+
+  attempt(): readonly SourceRead[] {
+    return this.#session.attempt;
   }
 
   /**
@@ -276,17 +322,26 @@ export class LocalBackend implements KernelBackend {
    * complete lists and neither ever returns a `nextCursor`.
    */
   async listTools(): Promise<ToolPage> {
-    return { tools: await this.#session.run((c, request) => listAllTools(c, request)) };
+    let source: string | undefined;
+    let capabilities: ServerCapabilities | undefined;
+    const tools = await this.#session.run((c, request, served) => {
+      source = served;
+      capabilities = c.getServerCapabilities() ?? {};
+      return listAllTools(c, request);
+    });
+    return { tools, source, capabilities };
   }
 
   async listPrompts(): Promise<PromptPage> {
-    const prompts = await this.#session.run((c, request) =>
-      drainPages(async (cursor) => {
+    let source: string | undefined;
+    const prompts = await this.#session.run((c, request, served) => {
+      source = served;
+      return drainPages(async (cursor) => {
         const page = await c.listPrompts(cursor ? { cursor } : undefined, request);
         return { items: page.prompts ?? [], nextCursor: page.nextCursor };
-      }),
-    );
-    return { prompts };
+      });
+    });
+    return { prompts, source };
   }
 
   async getPrompt(
@@ -354,6 +409,11 @@ export interface DeferredOptions {
   startTimeoutMs?: number;
   /** The kernel binary, whose identity keys the back-off. */
   bin?: string;
+  /**
+   * What the server is served from (`sessionSourceRead`), so a paclet installed
+   * or repaired ends a back-off, as a new binary does.
+   */
+  source?: () => SourceRead;
   /** For the suite, which cannot wait ten minutes for a window to pass. */
   clock?: () => number;
   backoffMs?: number;
@@ -381,6 +441,13 @@ export class DeferredBackend implements KernelBackend {
   readonly #log: Logger | undefined;
   readonly #startTimeoutMs: number;
   readonly #bin: string | undefined;
+  readonly #source: (() => SourceRead) | undefined;
+  /**
+   * What the failure being backed off began from, and what the directories
+   * known by the time it was recorded held: the window stands while each reads
+   * the same where it was read, and ends once a paclet changes one.
+   */
+  #failedFrom: readonly SourceRead[] = [];
   readonly #clock: () => number;
   readonly #backoff: Backoff;
   /**
@@ -423,6 +490,7 @@ export class DeferredBackend implements KernelBackend {
     this.#log = log;
     this.#startTimeoutMs = options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS;
     this.#bin = options.bin;
+    this.#source = options.source;
     this.#clock = options.clock ?? Date.now;
     this.#backoff = new Backoff(options.backoffMs ?? PREPARATION_BACKOFF_MS, this.#clock);
   }
@@ -436,8 +504,22 @@ export class DeferredBackend implements KernelBackend {
     return this.#bin === undefined ? null : candidateIdentity(this.#bin);
   }
 
-  backoff(): BackoffState | null {
+  /**
+   * The back-off in force: none once what the failure began from has changed,
+   * read where it was read — installing or repairing the paclet ends it, as a
+   * new binary does, where before the fix waited out the window (#3).
+   */
+  #current(): BackoffState | null {
+    if (this.#failedFrom.some(sourceChanged)) return null;
     return this.#backoff.current(this.#identity());
+  }
+
+  servedFrom(): string | undefined {
+    return this.#resolved?.servedFrom?.();
+  }
+
+  backoff(): BackoffState | null {
+    return this.#current();
   }
 
   async #get(): Promise<KernelBackend> {
@@ -470,6 +552,8 @@ export class DeferredBackend implements KernelBackend {
           `\n\nThe failure was: ${waiting.reason}`,
       );
     }
+    // What this preparation begins from, for its failure to be backed off under.
+    const before = this.#resolving ? undefined : this.#source?.();
     this.#resolving ??= this.#prepare().then(
       (backend) => {
         this.#resolved = backend;
@@ -482,7 +566,7 @@ export class DeferredBackend implements KernelBackend {
         // failure is recorded first, and that call meets the back-off.
         this.#resolving = null;
         if (err instanceof PreparationStopped) throw err;
-        this.#recordFailure("preparation", err);
+        this.#recordFailure("preparation", err, before ? [before] : []);
         throw err;
       },
     );
@@ -497,7 +581,7 @@ export class DeferredBackend implements KernelBackend {
    * for ten minutes (issue #5); a slow stage has a fresh deadline next time.
    * Neither is the installation, so neither points at doctor.
    */
-  #recordFailure(what: string, err: unknown): void {
+  #recordFailure(what: string, err: unknown, from: readonly SourceRead[] = []): void {
     const failure = preparationFailure(err, this.#startTimeoutMs);
     let repeats = 0;
     if (failure.kind === "slow") {
@@ -511,6 +595,13 @@ export class DeferredBackend implements KernelBackend {
       this.#slow = null;
     }
     const { windowMs, advice } = preparationBackoff(failure, repeats);
+    // What the failed attempt began from, read before it: read after, a paclet
+    // repaired while the start was failing took the failure as its own. And a
+    // read now, from the directories known by now — a cold machine's first
+    // kernel reports its own as it starts — so a repair there counts too,
+    // while having learned them is no repair.
+    const now = this.#source?.();
+    this.#failedFrom = now ? [...from, now] : from;
     this.#backoff.record(this.#identity(), err, windowMs, advice);
     this.#log?.(
       `${what} failed; not retrying for ${waitText(this.#backoffWindow())}: ${errorText(err)}`,
@@ -567,7 +658,7 @@ export class DeferredBackend implements KernelBackend {
     if (typeof err === "object" && err !== null && this.#startFailures.has(err)) return true;
     if (backend !== this.#resolved) return false;
     if (typeof err === "object" && err !== null) this.#startFailures.add(err);
-    this.#recordFailure("restarting the kernel", err);
+    this.#recordFailure("restarting the kernel", err, backend.attempt?.() ?? []);
     this.#resolved = null;
     this.#retire(backend);
     return true;
@@ -602,7 +693,7 @@ export class DeferredBackend implements KernelBackend {
   }
 
   #backoffWindow(): number {
-    return this.#backoff.current(this.#identity())?.remainingMs ?? 0;
+    return this.#current()?.remainingMs ?? 0;
   }
 
   /**
@@ -749,6 +840,7 @@ export function deferredBackend(
     ...overrides,
     startTimeoutMs: config.startTimeoutMs,
     bin: install.bin,
+    source: () => sessionSourceRead(config.serverName, config.flavour, install.bin, config.inspect),
   });
 }
 
@@ -820,6 +912,7 @@ export async function createBackend(
       onFacts: (facts, chosen) => {
         if (config.inspect) recordFacts(install.bin, facts, chosen, log);
       },
+      sourceFromFacts: config.inspect,
     });
   };
 

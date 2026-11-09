@@ -75,6 +75,7 @@ how that is distributed. Not published to npm — it runs from a clone.
 | `wolframscript.ts` | Wolfram's own recorded kernel preference, read from disk |
 | `inspect.ts` | What a kernel reports about its installation, and the cache of it |
 | `cache.ts` | The on-disk capability cache, keyed and atomically written |
+| `server-source.ts` | What a server is served from, read off the disk without a kernel: the cache key's, and each kernel's identity |
 | `doctor.ts` | The diagnostic report |
 | `log.ts` | The stderr logger — the only output channel that is not the protocol |
 | `lib.ts` | Public API for embedding |
@@ -109,10 +110,25 @@ parse, into the log instead of the message stream. It also keeps a ring buffer o
 last 15 such lines, which is what makes startup failures diagnosable.
 
 **Capability cache.** A latency cache, never a source of truth. Keyed on kernel path,
-kernel version, server name, and this package's version; written atomically (temp file plus
-rename) because several clients can run this server concurrently against one kernel.
-Rewritten from the live kernel on *every* kernel start, and `tools/list_changed` is
-emitted when the contents differ.
+kernel version, server name, this package's version, the flavour, and what the server is
+served from; written atomically (temp file plus rename) because several clients can run this
+server concurrently against one kernel. Rewritten from the live kernel on *every* kernel
+start, and `tools/list_changed` is emitted when the contents differ.
+
+*What a server is served from* (`server-source.ts`, #6) is read off the disk without a
+kernel: every paclet in the user and base repositories whose `PacletInfo` mentions
+AgentTools — AgentTools itself, any paclet declaring a server, any paclet whose tools a
+server names — and the user's own server file, each by inode and ctime, since a reinstall
+at the same version writes new files. Without it a paclet upgrade left the key unchanged,
+and every new session advertised the old tools, which a client then held its calls to. A
+session reads it as it starts, for the key it reads; a kernel reads it the moment before it
+spawns, from the environment it spawns with, and again once it is up, from the directories it
+reports when inspection is on (`KernelSession.source`) — changed in between, it has no
+source, and what it lists is cached under none — and the lists it produces are written
+under that, never under a source it does not have. So an entry always says what a kernel of its source
+serves — across an upgrade, or an install undone, which brings an old source back exactly.
+What it cannot see, each marked `shortcut:` there: a paclet edited in place, a disabled
+one, `Applications` directories, remote declarations for a paclet not installed.
 
 **Discovery.** See [environment.md](environment.md) for the full order. Two decisions
 worth the words:
@@ -222,7 +238,8 @@ instead of the server.
   tagged `StartMCPServer::`, since a symbol of that name defined elsewhere warns
   `StartMCPServer::shdw` on a start that then serves. Such a failure starts only a short
   back-off, on both paths: it is fixed by creating the server or installing its paclet,
-  which the full back-off, keyed on the kernel binary, cannot see, but every ask starts a
+  which the full back-off, keyed on the kernel binary, could not see — since #3 a back-off
+  of either length also ends when what the server is served from changes on disk — but every ask starts a
   kernel, so calls that follow it within a few seconds are answered from it. Calls that
   reach a shared broker together, before any failure is recorded, may each start a kernel
   below the budget, but past it only the first retires another session's: the rest are held
@@ -250,6 +267,19 @@ seats rather than kinds, so a pool at its limit retires an idle kernel of anothe
 to make room instead of overrunning the licence. Measured before this existed: two
 sessions on one server name, one asking for a `TimeConstraint` of 600 and the other 10,
 and the second one's calls ran with 600.
+
+What a kernel serves is decided by the disk as well as the environment: the definition
+AgentTools resolves the server name to as the kernel starts. So each kernel records what it
+was started from (`KernelSession.source`, `server-source.ts`), read the moment before it
+spawns, and the pool treats a running kernel whose source is no longer the disk's as another
+flavour's: never handed out, retired as one is (#3). That is decided as a slot is chosen, so
+a request queued before a paclet upgrade and served after it still gets a kernel started
+after it. Every answer a broker sends carries its kernel's source, and so does `kernelReady`:
+a session whose lists came from another source re-reads them and relays `list_changed` —
+the one that attached only for its first call, to a kernel another session started, hears no
+`kernelReady` — and a list is cached under the source of the kernel that produced it.
+Found by the first downstream plugin (#3): a broker about 25 minutes old served a paclet's six
+tools to a session started after the paclet gained two, and the client refused the new ones.
 
 There is no upstream escape hatch. `MCPServerObject` validates a `"Transport"` of
 `"StandardInputOutput" | "HTTP" | "ServerSentEvents"`, but every default server is
@@ -421,7 +451,8 @@ Each of these was decided on evidence; reopening one needs new evidence, not a n
   timeout before, 198 ms after. `SERVER_NOT_FOUND` in `kernel.ts` watches for the paclet's
   own wording, which the `.wlt` pins.
 - **The capability cache is one file per key**, `capabilities/<digest>.json`, keyed on kernel
-  path, kernel version, server name and package version. A single `capabilities.json` held
+  path, kernel version, server name and package version — and since, on the flavour and
+  what the server is served from (#6). A single `capabilities.json` held
   one key at a time, so two projects on different server names evicted each other and every
   launch of either was cold — which is a kernel start, and so a licence seat, at launch. This
   was the audit's finding S1 and had been open since it was written.
@@ -578,7 +609,8 @@ guards the whole design — if dispatch ever becomes concurrent, all of this nee
   call was an MCP error when private and an `isError` result when shared. `BROKER_PROTOCOL`
   went to 5 for the frame to carry the code, and to 6 for it to carry the error's `data` (#62).
   It went to 7 for `kernelReady` to carry why a new kernel's prompts could not be read (#122),
-  and to 8 for a request to carry when its ceiling passes (#80).
+  to 8 for a request to carry when its ceiling passes (#80), and to 9 for an answer and
+  `kernelReady` to carry what their kernel was started from (#3).
 - A doubled `MCP error -32602: MCP error -32602:` prefix on every relayed protocol error — on
   `tools/call` first, and on every other request a kernel answers since #62.
 - `--help` and the "no usable Wolfram" diagnostic told users to run an unpublished

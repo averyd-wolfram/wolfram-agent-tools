@@ -61,6 +61,10 @@
  * FAKE_EMPTY_TOOLS    report zero tools, successfully
  * FAKE_EXTRA_TOOLS    JSON array: tools to list as given, after the others, for a
  *                     list holding a tool this server cannot relay
+ * FAKE_TOOLS_FILE     a JSON array of tools to list after the others, read once,
+ *                     as initialize is answered — when a real kernel has resolved
+ *                     its server, after any FAKE_INIT_DELAY_MS: a paclet whose
+ *                     tools change on disk, which a running kernel does not see
  * FAKE_EXTRA_PROMPTS  the same for prompts/list
  * FAKE_EXTRA_RESOURCES  the same for resources/list, under FAKE_RESOURCES
  * FAKE_OUTPUT_SCHEMA  JSON: serve one more tool, Structured, declaring this as its
@@ -113,7 +117,7 @@
  * call timeout is a deadline for the caller — so these exist only to tell
  * whether the proxy would relay them if a paclet ever did.
  */
-import { appendFileSync, existsSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 
 const mode = process.env.FAKE_MODE ?? "normal";
 const callDelay = Number(process.env.FAKE_CALL_DELAY_MS ?? "0");
@@ -396,6 +400,9 @@ function run() {
     }
     if (msg.method === "initialize") {
       const reply = () => {
+        if (process.env.FAKE_TOOLS_FILE) {
+          tools.push(...JSON.parse(readFileSync(process.env.FAKE_TOOLS_FILE, "utf8")));
+        }
         send({
           jsonrpc: "2.0",
           id: msg.id,

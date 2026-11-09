@@ -109,6 +109,13 @@ export {
   type CacheEntry,
 } from "./cache.js";
 export { createLogger, silentLogger, errorText, type Logger } from "./log.js";
+export {
+  serverSource,
+  sourceDirs,
+  sessionSource,
+  type ServerSource,
+  type SourceDirs,
+} from "./server-source.js";
 export { budgetText, elapsedText, waitText } from "./duration.js";
 export { PKG } from "./version.js";
 // Re-exported so tests and embedders can subscribe without depending on the SDK

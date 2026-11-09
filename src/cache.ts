@@ -35,6 +35,13 @@ export interface CacheEntry {
    * would describe whichever ran last.
    */
   flavour: string;
+  /**
+   * What a kernel would be served from (`serverSource`): which paclets taking
+   * part are installed, and the user's own server file. Without it a paclet
+   * upgrade left the key unchanged, and every session went on advertising the
+   * old tools, which a client then held its calls to (#6).
+   */
+  source: string;
   upstream: UpstreamCapabilities;
   tools: Tool[];
   prompts: Prompt[];
@@ -47,6 +54,7 @@ export interface CacheKey {
   serverName: string;
   serverVersion: string;
   flavour: string;
+  source: string;
 }
 
 export function cacheDir(): string {
@@ -70,8 +78,9 @@ export function cacheKey(
   kernelVersion: string | null,
   serverName: string,
   flavour: string,
+  source: string,
 ): CacheKey {
-  return { kernelPath, kernelVersion, serverName, serverVersion: PKG.version, flavour };
+  return { kernelPath, kernelVersion, serverName, serverVersion: PKG.version, flavour, source };
 }
 
 /** The directory holding one file per key. */
@@ -104,6 +113,7 @@ export function capabilityFile(key: CacheKey): string {
         key.serverName,
         key.serverVersion,
         key.flavour,
+        key.source,
       ].join("\u0000"),
     )
     .digest("hex")
@@ -168,9 +178,9 @@ export function clearCache(): string {
 /**
  * Whether a cache entry describes the kernel and serverName we are about to use.
  *
- * The kernel path, kernel version, serverName and this package's version all
- * change what the upstream tool list looks like, so any of them differing makes
- * the entry unusable.
+ * The kernel path, kernel version, serverName, this package's version, the
+ * flavour and what the server is served from all change what the upstream tool
+ * list looks like, so any of them differing makes the entry unusable.
  */
 export function cacheMatches(entry: CacheEntry | null, key: CacheKey): entry is CacheEntry {
   return (
@@ -179,6 +189,7 @@ export function cacheMatches(entry: CacheEntry | null, key: CacheKey): entry is 
     entry.kernelVersion === key.kernelVersion &&
     entry.serverName === key.serverName &&
     entry.serverVersion === key.serverVersion &&
-    entry.flavour === key.flavour
+    entry.flavour === key.flavour &&
+    entry.source === key.source
   );
 }

@@ -21,7 +21,7 @@ import { timerDelay } from "./config.js";
 import { budgetText } from "./duration.js";
 import { errorText } from "./log.js";
 
-/** How long a failed preparation is not retried, unless the binary changes. */
+/** How long a failed preparation is not retried, unless the binary or the paclets change. */
 export const PREPARATION_BACKOFF_MS = 10 * 60_000;
 
 /**
@@ -30,8 +30,9 @@ export const PREPARATION_BACKOFF_MS = 10 * 60_000;
  * ran out of time. One window for both (#22).
  *
  * Not the full back-off: a server name is fixed by creating the server or
- * installing its paclet, which the back-off, keyed on the kernel binary, cannot
- * see, so ten minutes held the fix off (issue #5); and a slow stage has a fresh
+ * installing its paclet, which the back-off, keyed on the kernel binary, could
+ * not see, so ten minutes held the fix off (issue #5) — since #3 either fix
+ * changes what the server is served from, which ends either window; and a slow stage has a fresh
  * deadline on the next call. Not none either: every attempt may start a kernel
  * and spend a seat, and a client asks several things on connect and may retry
  * in a loop. Long enough that a burst shares one failure; short enough that

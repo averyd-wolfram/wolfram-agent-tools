@@ -34,6 +34,7 @@ import { readFacts } from "./inspect.js";
 import { drainPages } from "./kernel.js";
 import { exampleKernelPath, listKernels, locateKernel, type KernelInstall } from "./locate.js";
 import { bareMcpText, errorText, type Logger } from "./log.js";
+import { sessionSource } from "./server-source.js";
 import { PKG } from "./version.js";
 
 /**
@@ -59,18 +60,39 @@ export interface WolframServer {
 }
 
 /** Follow `nextCursor` so the cache holds a complete list, not just page one. */
-function drainTools(ops: DirectOps): Promise<Tool[]> {
-  return drainPages(async (cursor) => {
+/**
+ * Every page of a list, and what the kernel that listed it was started from:
+ * the page's own word for it, else the ops'. Pages of one drain come from one
+ * kernel, since only `DirectOps` page and they hold it.
+ */
+async function drainTools(
+  ops: DirectOps,
+): Promise<{ tools: Tool[]; source?: string; capabilities?: ServerCapabilities }> {
+  let source: string | undefined;
+  let capabilities: ServerCapabilities | undefined;
+  const tools = await drainPages(async (cursor) => {
     const page = await ops.listTools(cursor);
+    source ??= page.source;
+    capabilities ??= page.capabilities;
     return { items: page.tools ?? [], nextCursor: page.nextCursor };
   });
+  source ??= ops.source;
+  return {
+    tools,
+    ...(source === undefined ? {} : { source }),
+    ...(capabilities === undefined ? {} : { capabilities }),
+  };
 }
 
-function drainPrompts(ops: DirectOps): Promise<Prompt[]> {
-  return drainPages(async (cursor) => {
+async function drainPrompts(ops: DirectOps): Promise<{ prompts: Prompt[]; source?: string }> {
+  let source: string | undefined;
+  const prompts = await drainPages(async (cursor) => {
     const page = await ops.listPrompts(cursor);
+    source ??= page.source;
     return { items: page.prompts ?? [], nextCursor: page.nextCursor };
   });
+  source ??= ops.source;
+  return source === undefined ? { prompts } : { prompts, source };
 }
 
 /**
@@ -424,6 +446,10 @@ export function createWolframServer(
     install?.version ?? null,
     config.serverName,
     config.flavour.digest,
+    // Read now, before `initialize` is answered from it: a few stats, no kernel.
+    install
+      ? sessionSource(config.serverName, config.flavour, install.bin, config.inspect).digest
+      : "",
   );
   // Keyed, so a neighbouring project on another server name has its own entry
   // and cannot evict this one. `readCache` re-checks the key it read, so there
@@ -491,7 +517,7 @@ export function createWolframServer(
   // is the exception: it alone has an `isError` form, and decides for itself.
   const fromKernel: typeof server.setRequestHandler = (schema, handler) =>
     server.setRequestHandler(schema, (request, extra) =>
-      relayed(Promise.resolve(handler(request, extra))),
+      relayed(Promise.resolve(handler(request, extra)).finally(follow)),
     );
 
   let toolCache: Tool[] | null = usableCache?.tools ?? null;
@@ -511,6 +537,13 @@ export function createWolframServer(
   // own first kernel start had warmed the cache a second later, which is
   // exactly when someone reads this line to find out whether it did.
   let toolCachedAt: number | null = usableCache?.cachedAt ?? null;
+  // What the lists above came from (`serverSource`): what this session read as
+  // it began while they are the cache's, then each reload's kernel's. `follow`
+  // re-reads them when a kernel answers from another (#3).
+  let seen: string | undefined = usableCache ? key.source : undefined;
+  // What the prompts above came from, which a failed read leaves behind the
+  // tools' (`reload`).
+  let promptsFrom: string | undefined = usableCache ? key.source : undefined;
 
   /**
    * Re-read the upstream lists from a live kernel and persist them.
@@ -521,11 +554,11 @@ export function createWolframServer(
    * round trip.
    */
   async function reload(ops: DirectOps): Promise<void> {
-    const caps = await ops.capabilities();
-
     let tools: Tool[];
+    let source: string | undefined;
+    let listedCaps: ServerCapabilities | undefined;
     try {
-      tools = await drainTools(ops);
+      ({ tools, source, capabilities: listedCaps } = await drainTools(ops));
     } catch (err) {
       // Keep the last known-good list. Replacing it with an empty array here
       // would advertise a server with no tools, and would persist that.
@@ -543,10 +576,25 @@ export function createWolframServer(
       return;
     }
 
+    // From the kernel that listed the tools where the list says, so its flags
+    // are cached beside its own tools rather than another kernel's (#6).
+    const caps = listedCaps ?? (await ops.capabilities());
     let prompts = promptCache ?? [];
+    let listedFrom = caps.prompts ? promptsFrom : source;
     if (caps.prompts) {
       try {
-        prompts = await drainPrompts(ops);
+        const listed = await drainPrompts(ops);
+        // Asked apart from the tools, so on a broker possibly of a kernel an
+        // upgrade had replaced in between, or of one whose source is unknown:
+        // kept together, one definition's prompts would be cached under the
+        // other's (#6). Asked again on the next answer from a kernel instead.
+        if (listed.source !== source) {
+          log("the lists came from kernels started from different sources; re-reading later");
+          seen = undefined;
+          return;
+        }
+        prompts = listed.prompts;
+        listedFrom = listed.source;
         promptsSeen = true;
       } catch (err) {
         log(`upstream prompts/list failed, keeping the cached list: ${errorText(err)}`);
@@ -562,14 +610,23 @@ export function createWolframServer(
     const promptsChanged = JSON.stringify(prompts) !== JSON.stringify(promptCache);
     toolCache = tools;
     promptCache = prompts;
+    promptsFrom = listedFrom;
     toolCachedAt = Date.now();
+    seen = source ?? seen;
 
-    if (config.cacheEnabled) {
+    // Only under the source of the kernel that listed them: under what this
+    // session read as it began, a list from a kernel started after an upgrade
+    // sat under the old source, and undoing the install served it again (#6).
+    if (config.cacheEnabled && source !== undefined) {
+      // Prompts kept after a failed read are another source's when an upgrade
+      // came between: kept in memory, but cached as unknown here, with none,
+      // and so not offered from the cache — rather than as this source's.
+      const known = listedFrom === source;
       const observed: UpstreamCapabilities = {
-        prompts: Boolean(caps.prompts) && promptsSeen,
+        prompts: Boolean(caps.prompts) && promptsSeen && known,
         resources: Boolean(caps.resources),
       };
-      writeCache({ ...key, upstream: observed, tools, prompts });
+      writeCache({ ...key, source, upstream: observed, tools, prompts: known ? prompts : [] });
     }
 
     if (toolsChanged) {
@@ -586,6 +643,31 @@ export function createWolframServer(
   }
 
   backend.onKernelReady((ops) => reload(ops));
+
+  /**
+   * Re-read the lists when the kernel that just answered was started from
+   * another source than they came from: a broker hands a session whichever
+   * kernel is current, and after a paclet upgrade that kernel serves the new
+   * definition. A session that attached only for its first call reuses a
+   * kernel another session started, and hears no `kernelReady`, so its client
+   * was held to the old tools for good (#3). Once per source, so a read that
+   * fails is not retried by every call; the next kernel start corrects it.
+   */
+  function follow(): void {
+    const served = backend.servedFrom?.();
+    if (served === undefined || served === seen) return;
+    seen = served;
+    log("a kernel started from another server source answered; re-reading the lists");
+    // Each list says which kernel it came from, so nothing is read here from
+    // whichever answer happened to arrive last.
+    void reload({
+      capabilities: () => backend.capabilities(),
+      listTools: (cursor) => backend.listTools(cursor),
+      listPrompts: (cursor) => backend.listPrompts(cursor),
+    }).catch((err: unknown) => {
+      log(`re-reading the lists failed, keeping them: ${errorText(err)}`);
+    });
+  }
 
   fromKernel(ListToolsRequestSchema, async () => {
     // Deliberately no cursor handling, and none advertised: see `fullToolList`.
@@ -687,8 +769,10 @@ export function createWolframServer(
         },
       );
       await relayed;
+      follow();
       return result;
     } catch (err) {
+      follow();
       // The spec draws a line here, and this used to erase it. A failure while
       // *running* a tool belongs in the result as isError, so the model can see
       // it and self-correct; a failure to *find* the tool, or an unsupported or
@@ -713,7 +797,9 @@ export function createWolframServer(
       // drain inside one hold on a kernel and answer complete lists, so there is
       // no upstream paging state for anyone to page through.
       if (promptCache) return { prompts: promptCache };
-      return backend.listPrompts();
+      // The list alone: its source is this server's bookkeeping, not the client's.
+      const { prompts } = await backend.listPrompts();
+      return { prompts };
     });
     // A prompt runs its own function in the kernel, so it waits as long as a
     // tool call would, and a cancel stops it as one does. Given no ceiling, it

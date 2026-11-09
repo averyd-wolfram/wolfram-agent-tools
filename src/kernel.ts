@@ -37,6 +37,14 @@ import { FilteringStdioTransport } from "./transport.js";
 import { applyFlavour, type KernelFlavour } from "./flavour.js";
 import { FACTS_EXPRESSION, isFactsLine, parseFacts, type KernelFacts } from "./inspect.js";
 import { budgetText, elapsedText } from "./duration.js";
+import {
+  readSource,
+  serverSource,
+  sourceChanged,
+  sourceDirs,
+  type SourceDirs,
+  type SourceRead,
+} from "./server-source.js";
 import { errorText, type Logger } from "./log.js";
 
 /**
@@ -549,6 +557,15 @@ export interface KernelSessionOptions {
    * and a pool also re-derives its budget from it.
    */
   onFacts?: (facts: KernelFacts, chosen: string[]) => void;
+  /**
+   * Whether the directories a kernel reports decide where its `source` is read.
+   * Off under `WOLFRAM_MCP_INSPECT=0`, as the facts are everywhere else: a
+   * session then keys the cache on the directories it guesses, and a kernel
+   * reading its reported ones wrote under another key, so nothing was ever
+   * read back where they differ — a Wolfram Engine's user base is not the
+   * desktop's. Default on.
+   */
+  sourceFromFacts?: boolean | undefined;
 }
 
 /**
@@ -678,6 +695,12 @@ export class KernelSession {
    */
   #handshaking: { transport: FilteringStdioTransport; abort: (error: Error) => void } | null = null;
   #queue: Promise<unknown> = Promise.resolve();
+  /** `source`: kept per start, since a restart after idling may load another. */
+  #source: string | undefined;
+  /** Where `source` was read, for `sourceChanged` to read again. */
+  #sourceOf: { serverName: string; dirs: SourceDirs } | undefined;
+  /** What the latest start, whether or not it succeeded, began from. */
+  #attempt: SourceRead[] | undefined;
   /** Calls handed to `run`, numbered as they queue. */
   #queued = 0;
   /** Calls handed to `run` and not yet settled: what arms an idle shutdown. */
@@ -703,6 +726,45 @@ export class KernelSession {
     return this.#client !== null;
   }
 
+  /**
+   * What the running kernel was started from (`serverSource`), read as it
+   * started; undefined before the first. A list it produced belongs under this
+   * in the capability cache, whatever the disk says by the time it is written.
+   */
+  get source(): string | undefined {
+    return this.#source;
+  }
+
+  /**
+   * Whether what the running kernel was started from has changed on disk since,
+   * read again from the directories it was read from: a paclet upgraded under
+   * it, or a start the change landed in. Like with like, so learning the
+   * installation's real directories later, from the facts, does not make a
+   * kernel that started before them look replaced.
+   */
+  /**
+   * What the latest start, whether or not it succeeded, began from, and where:
+   * read before it, and where the kernel then said its directories are.
+   */
+  get attempt(): readonly SourceRead[] {
+    return this.#attempt ?? [];
+  }
+
+  /**
+   * Whether what the latest start began from has changed on disk since, read
+   * again where it was read: a pool lifts the refusal window a failed start
+   * opened once it has, since the paclet that failed it may now be fixed.
+   */
+  attemptChanged(): boolean {
+    return (this.#attempt ?? []).some(sourceChanged);
+  }
+
+  sourceChanged(): boolean {
+    if (!this.#client || !this.#sourceOf) return false;
+    if (this.#source === undefined) return true;
+    return serverSource(this.#sourceOf.serverName, this.#sourceOf.dirs).digest !== this.#source;
+  }
+
   async #spawn(startTimeoutMs = this.#options.startTimeoutMs): Promise<Client> {
     const { bin, log, clientInfo, flavour } = this.#options;
     // What this kernel will actually be, which is the flavour's when there is
@@ -717,33 +779,52 @@ export class KernelSession {
     });
     void fatal.catch(() => {});
 
+    // Layered, and the order is load-bearing. The probe's values are the
+    // floor; this process's environment beats them, because an explicit
+    // WOLFRAM_USERBASE is a deliberate choice and not something to overwrite
+    // with a probe result. The flavour then beats *that*, and removes the
+    // names it leaves unset — because in a broker this process's environment
+    // belongs to whichever session spawned it, and letting it show through is
+    // how one project's MCP_TOOL_OPTIONS came to run another project's calls.
+    const env: NodeJS.ProcessEnv = {
+      ...this.#options.extraEnv,
+      ...(flavour ? applyFlavour(process.env, flavour) : process.env),
+      // Only when the flavour has not already said. `MCP_SERVER_NAME` is part
+      // of a flavour, and in a broker the flavour belongs to the calling
+      // session — which is what lets one broker serve several server names
+      // under one licence budget. This option is the private path's answer,
+      // where there is nobody else to ask.
+      ...(flavour?.env["MCP_SERVER_NAME"] ? {} : { MCP_SERVER_NAME: serverName }),
+    };
+    // Read from the environment this kernel gets, the moment before it starts:
+    // a read taken when its session began, or when a request arrived, cannot
+    // describe a kernel started later (#3). Read again once it is up, below.
+    const guessed = sourceDirs(env, this.#options.extraEnv ?? {});
+    const before = serverSource(serverName, guessed).digest;
+    this.#attempt = [{ serverName, dirs: guessed, digest: before }];
+    // Where the kernel says its directories are, as it reports its facts.
+    let reported: SourceDirs | undefined;
+
     const transport = new FilteringStdioTransport({
       command: bin,
       args: [...KERNEL_ARGS],
-      // Layered, and the order is load-bearing. The probe's values are the
-      // floor; this process's environment beats them, because an explicit
-      // WOLFRAM_USERBASE is a deliberate choice and not something to overwrite
-      // with a probe result. The flavour then beats *that*, and removes the
-      // names it leaves unset — because in a broker this process's environment
-      // belongs to whichever session spawned it, and letting it show through is
-      // how one project's MCP_TOOL_OPTIONS came to run another project's calls.
-      env: {
-        ...this.#options.extraEnv,
-        ...(flavour ? applyFlavour(process.env, flavour) : process.env),
-        // Only when the flavour has not already said. `MCP_SERVER_NAME` is part
-        // of a flavour, and in a broker the flavour belongs to the calling
-        // session — which is what lets one broker serve several server names
-        // under one licence budget. This option is the private path's answer,
-        // where there is nobody else to ask.
-        ...(flavour?.env["MCP_SERVER_NAME"] ? {} : { MCP_SERVER_NAME: serverName }),
-      },
+      env,
       onOutput: (line) => {
         // Not logged raw: one long line of JSON, which the owner's record of
         // it summarises.
         if (isFactsLine(line)) {
           const facts = parseFacts(line);
-          if (facts) this.#options.onFacts?.(facts, chosenShaping(flavour));
-          else log("kernel reported facts that could not be read");
+          if (facts) {
+            if (this.#options.sourceFromFacts !== false && facts.userBase && facts.base) {
+              reported = { userBase: facts.userBase, base: facts.base };
+              // Read there too, now, so a later change there counts while
+              // learning where they are does not (`attemptChanged`).
+              if (reported.userBase !== guessed.userBase || reported.base !== guessed.base) {
+                this.#attempt?.push(readSource(serverName, reported));
+              }
+            }
+            this.#options.onFacts?.(facts, chosenShaping(flavour));
+          } else log("kernel reported facts that could not be read");
           return;
         }
         log(`kernel: ${line}`);
@@ -807,6 +888,26 @@ export class KernelSession {
     log(`kernel ready in ${elapsedText(Date.now() - startedAt)}`);
     this.#client = client;
     this.#transport = transport;
+    // By now the paclet has resolved the server, so read again, where the
+    // kernel says it reads: before any facts, the first kernel's directories
+    // are Wolfram's defaults, guessed, and a Wolfram Engine's user base is not
+    // the desktop's. Changed since the read before the spawn, the kernel may
+    // have loaded either side of the change, so it has no source: its lists are
+    // cached under neither, and a pool hands it to nobody else
+    // (`sourceChanged`).
+    // shortcut: when the kernel's directories were not the guessed ones there
+    // is no earlier read to compare, so a change landing in that start, the
+    // first on a machine with no facts yet, is not seen.
+    const dirs =
+      reported && (reported.userBase !== guessed.userBase || reported.base !== guessed.base)
+        ? reported
+        : undefined;
+    const after = serverSource(serverName, dirs ?? guessed).digest;
+    this.#source = dirs || after === before ? after : undefined;
+    this.#sourceOf = { serverName, dirs: dirs ?? guessed };
+    if (this.#source === undefined) {
+      log("the installed paclets changed while this kernel started; what it serves is uncertain");
+    }
 
     // The kernel's own MCP server declares tools.listChanged, so it will say
     // when its list changes — a paclet upgraded underneath a running session,
@@ -887,10 +988,11 @@ export class KernelSession {
    * `deadlineMs` is how long the *caller* will wait, and deliberately not a
    * timeout on the request: see `#fate`. `fn` is handed the options every
    * request it sends the kernel must carry, which keep the SDK from ending the
-   * request before that deadline does.
+   * request before that deadline does — and the `source` of the kernel it
+   * runs on, so whatever it answers can say what produced it (#3).
    */
   async run<T>(
-    fn: (client: Client, request: RequestOptions) => Promise<T>,
+    fn: (client: Client, request: RequestOptions, source: string | undefined) => Promise<T>,
     options: RunOptions = {},
   ): Promise<T> {
     const ticket = ++this.#queued;
@@ -964,7 +1066,7 @@ export class KernelSession {
       dropIfCancelled();
       sent = true;
       clearTimeout(expiryTimer);
-      const work = fn(client, requestOptions(options.signal));
+      const work = fn(client, requestOptions(options.signal), this.#source);
       // What is left of one budget, not a fresh one: a request that waited
       // 900 ms of a 1 s ceiling has 100 ms more. The error names the whole.
       const waitMs =

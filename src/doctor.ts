@@ -21,6 +21,7 @@ import {
   writeDiscoveryHint,
 } from "./locate.js";
 import { errorText } from "./log.js";
+import { sessionSource } from "./server-source.js";
 import { PKG } from "./version.js";
 
 // Defined by scripts/bundle-js.mjs, and only there: its presence is how the
@@ -102,7 +103,15 @@ export function sessionStatus(now: number = Date.now()): string {
     lines.push("No facts cached yet: they are read on the first kernel start.");
   }
   const cached = config.cacheEnabled
-    ? readCache(cacheKey(install.bin, install.version, config.serverName, config.flavour.digest))
+    ? readCache(
+        cacheKey(
+          install.bin,
+          install.version,
+          config.serverName,
+          config.flavour.digest,
+          sessionSource(config.serverName, config.flavour, install.bin, config.inspect).digest,
+        ),
+      )
     : null;
   lines.push(
     cached
@@ -255,11 +264,13 @@ export async function runDoctor(): Promise<number> {
   // The key this configuration would read, not "the cache": there is a file per
   // kernel and server name, so naming a directory would not answer the question
   // a stuck user is asking.
+  const source = sessionSource(config.serverName, config.flavour, install.bin, config.inspect);
   const key = cacheKey(
     install.bin,
     install.version ?? null,
     config.serverName,
     config.flavour.digest,
+    source.digest,
   );
   out(`  file     ${capabilityFile(key)}`);
   // Which sessions this one will share kernels with. A digest alone answers
@@ -271,6 +282,10 @@ export async function runDoctor(): Promise<number> {
       flavourVars.length ? flavourVars.join(", ") : "defaults only"
     })`,
   );
+  // What the server is served from, which the key also carries: an upgrade of
+  // any of these makes a new entry, and a new kernel on a broker (#3, #6).
+  out(`  source   ${source.digest}${source.found.length ? "" : " (nothing found)"}`);
+  for (const line of source.found) out(`           ${line}`);
   const cached = readCache(key);
   if (!cached) {
     out("  state    absent or expired");
