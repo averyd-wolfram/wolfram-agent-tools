@@ -10916,6 +10916,20 @@ heading("CLI");
     misuse.every((status) => status === 2) && existsSync(kept) && lib.readFacts(fakeKernel) !== null,
     `exit statuses ${misuse.join(", ")}`,
   );
+  // An entry that could not be removed was reported as nothing to remove, with
+  // success, and went on being served. Root removes it regardless.
+  if (process.getuid?.() !== 0) {
+    const locked = entryFor("Locked");
+    const mode = statSync(lib.capabilityDir()).mode & 0o777;
+    chmodSync(lib.capabilityDir(), 0o500);
+    const refused = run(["clear-cache", "--server", "Locked"]);
+    chmodSync(lib.capabilityDir(), mode);
+    check(
+      "an entry that cannot be removed is a failure that names it, not nothing to remove",
+      refused.status === 1 && existsSync(locked) && refused.stderr.includes(locked),
+      `exit ${refused.status}: ${(refused.stderr || refused.stdout).trim().slice(0, 120)}`,
+    );
+  }
 
   const cleared = run(["clear-cache"]);
   check("clear-cache exits 0", cleared.status === 0);

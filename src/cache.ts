@@ -190,6 +190,7 @@ export function clearCache(): string {
  * files for `serverName`, an internal detail, or clear everyone's.
  *
  * @returns the files it removed, for `clear-cache --server` to report.
+ * @throws when an entry of that server's could not be removed.
  */
 export function clearServerCache(serverName: string): string[] {
   const dir = capabilityDir();
@@ -202,15 +203,24 @@ export function clearServerCache(serverName: string): string[] {
   const removed: string[] = [];
   for (const file of files) {
     const path = join(dir, file);
+    let entry: Partial<CacheEntry> | null;
     try {
-      const entry = JSON.parse(readFileSync(path, "utf8")) as Partial<CacheEntry>;
-      if (entry.serverName !== serverName) continue;
-      unlinkSync(path);
-      removed.push(path);
+      entry = JSON.parse(readFileSync(path, "utf8")) as Partial<CacheEntry> | null;
     } catch {
       // Unreadable, or gone since the listing: whose it is cannot be said, and
-      // an entry that cannot be parsed is never served anyway.
+      // an entry that cannot be read is never served anyway.
+      continue;
     }
+    if (entry?.serverName !== serverName) continue;
+    try {
+      unlinkSync(path);
+    } catch (err) {
+      // Gone already is what was asked. Anything else leaves an entry a session
+      // would still serve, which reporting nothing to remove would hide.
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw err;
+    }
+    removed.push(path);
   }
   return removed;
 }

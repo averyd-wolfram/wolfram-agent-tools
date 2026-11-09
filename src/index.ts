@@ -277,7 +277,15 @@ async function main(argv: string[]): Promise<number | null> {
         // Resolved as a session resolves MCP_SERVER_NAME, so the name a session
         // was given finds the entries it wrote.
         const serverName = resolveServerName(requested, silentLogger);
-        const removed = clearServerCache(serverName);
+        let removed: string[];
+        try {
+          removed = clearServerCache(serverName);
+        } catch (err) {
+          process.stderr.write(
+            `could not clear ${serverName}'s cached tool list: ${errorText(err)}\n`,
+          );
+          return 1;
+        }
         for (const file of removed) process.stdout.write(`removed ${file}\n`);
         if (removed.length === 0) process.stdout.write(`no cached tool list for ${serverName}\n`);
         return 0;
