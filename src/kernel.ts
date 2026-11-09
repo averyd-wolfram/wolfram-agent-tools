@@ -692,6 +692,8 @@ export class KernelSession {
   #source: string | undefined;
   /** Where `source` was read, for `sourceChanged` to read again. */
   #sourceOf: { serverName: string; dirs: SourceDirs } | undefined;
+  /** What the latest start, whether or not it succeeded, began from. */
+  #attempt: { serverName: string; dirs: SourceDirs; source: string } | undefined;
   /** Calls handed to `run`, numbered as they queue. */
   #queued = 0;
   /** Calls handed to `run` and not yet settled: what arms an idle shutdown. */
@@ -733,6 +735,17 @@ export class KernelSession {
    * installation's real directories later, from the facts, does not make a
    * kernel that started before them look replaced.
    */
+  /**
+   * Whether what the latest start began from has changed on disk since, read
+   * again where it was read: a pool lifts the refusal window a failed start
+   * opened once it has, since the paclet that failed it may now be fixed.
+   */
+  attemptChanged(): boolean {
+    const attempt = this.#attempt;
+    if (!attempt) return false;
+    return serverSource(attempt.serverName, attempt.dirs).digest !== attempt.source;
+  }
+
   sourceChanged(): boolean {
     if (!this.#client || !this.#sourceOf) return false;
     if (this.#source === undefined) return true;
@@ -775,6 +788,7 @@ export class KernelSession {
     // describe a kernel started later (#3). Read again once it is up, below.
     const guessed = sourceDirs(env, this.#options.extraEnv ?? {});
     const before = serverSource(serverName, guessed).digest;
+    this.#attempt = { serverName, dirs: guessed, source: before };
     // Where the kernel says its directories are, as it reports its facts.
     let reported: SourceDirs | undefined;
 

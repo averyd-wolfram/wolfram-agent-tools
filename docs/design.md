@@ -238,7 +238,8 @@ instead of the server.
   tagged `StartMCPServer::`, since a symbol of that name defined elsewhere warns
   `StartMCPServer::shdw` on a start that then serves. Such a failure starts only a short
   back-off, on both paths: it is fixed by creating the server or installing its paclet,
-  which the full back-off, keyed on the kernel binary, cannot see, but every ask starts a
+  which the full back-off, keyed on the kernel binary, could not see — since #3 a back-off
+  of either length also ends when what the server is served from changes on disk — but every ask starts a
   kernel, so calls that follow it within a few seconds are answered from it. Calls that
   reach a shared broker together, before any failure is recorded, may each start a kernel
   below the budget, but past it only the first retires another session's: the rest are held

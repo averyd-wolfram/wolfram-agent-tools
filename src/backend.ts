@@ -30,6 +30,7 @@ import { brokerAddress } from "./broker-protocol.js";
 import { deadlineDelay, DEFAULT_START_TIMEOUT_MS, type Config } from "./config.js";
 import { doctorCommand } from "./doctor.js";
 import { installationEnv, recordFacts, type KernelFacts } from "./inspect.js";
+import { sessionSource } from "./server-source.js";
 import {
   Backoff,
   candidateIdentity,
@@ -68,7 +69,15 @@ import { PKG } from "./version.js";
  * kernel, so the source has to come with the list rather than from whichever
  * answer arrived last (#6).
  */
-export type ToolPage = ListToolsResult & { source?: string | undefined };
+export type ToolPage = ListToolsResult & {
+  source?: string | undefined;
+  /**
+   * The capabilities of the kernel that listed the tools, read in the same hold
+   * on it: asked for apart, they could come from another kernel, and its flags
+   * be cached beside these tools (#6).
+   */
+  capabilities?: ServerCapabilities | undefined;
+};
 export type PromptPage = ListPromptsResult & { source?: string | undefined };
 
 /**
@@ -304,11 +313,13 @@ export class LocalBackend implements KernelBackend {
    */
   async listTools(): Promise<ToolPage> {
     let source: string | undefined;
+    let capabilities: ServerCapabilities | undefined;
     const tools = await this.#session.run((c, request, served) => {
       source = served;
+      capabilities = c.getServerCapabilities() ?? {};
       return listAllTools(c, request);
     });
-    return { tools, source };
+    return { tools, source, capabilities };
   }
 
   async listPrompts(): Promise<PromptPage> {
@@ -388,6 +399,11 @@ export interface DeferredOptions {
   startTimeoutMs?: number;
   /** The kernel binary, whose identity keys the back-off. */
   bin?: string;
+  /**
+   * What the server is served from (`sessionSource`), read again at each look,
+   * so a paclet installed or repaired ends a back-off, as a new binary does.
+   */
+  source?: () => string;
   /** For the suite, which cannot wait ten minutes for a window to pass. */
   clock?: () => number;
   backoffMs?: number;
@@ -415,6 +431,7 @@ export class DeferredBackend implements KernelBackend {
   readonly #log: Logger | undefined;
   readonly #startTimeoutMs: number;
   readonly #bin: string | undefined;
+  readonly #source: (() => string) | undefined;
   readonly #clock: () => number;
   readonly #backoff: Backoff;
   /**
@@ -457,6 +474,7 @@ export class DeferredBackend implements KernelBackend {
     this.#log = log;
     this.#startTimeoutMs = options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS;
     this.#bin = options.bin;
+    this.#source = options.source;
     this.#clock = options.clock ?? Date.now;
     this.#backoff = new Backoff(options.backoffMs ?? PREPARATION_BACKOFF_MS, this.#clock);
   }
@@ -467,7 +485,8 @@ export class DeferredBackend implements KernelBackend {
   }
 
   #identity(): CandidateIdentity | null {
-    return this.#bin === undefined ? null : candidateIdentity(this.#bin);
+    const identity = this.#bin === undefined ? null : candidateIdentity(this.#bin);
+    return identity && this.#source ? { ...identity, source: this.#source() } : identity;
   }
 
   servedFrom(): string | undefined {
@@ -787,6 +806,8 @@ export function deferredBackend(
     ...overrides,
     startTimeoutMs: config.startTimeoutMs,
     bin: install.bin,
+    source: () =>
+      sessionSource(config.serverName, config.flavour, install.bin, config.inspect).digest,
   });
 }
 

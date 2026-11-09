@@ -65,15 +65,23 @@ export interface WolframServer {
  * the page's own word for it, else the ops'. Pages of one drain come from one
  * kernel, since only `DirectOps` page and they hold it.
  */
-async function drainTools(ops: DirectOps): Promise<{ tools: Tool[]; source?: string }> {
+async function drainTools(
+  ops: DirectOps,
+): Promise<{ tools: Tool[]; source?: string; capabilities?: ServerCapabilities }> {
   let source: string | undefined;
+  let capabilities: ServerCapabilities | undefined;
   const tools = await drainPages(async (cursor) => {
     const page = await ops.listTools(cursor);
     source ??= page.source;
+    capabilities ??= page.capabilities;
     return { items: page.tools ?? [], nextCursor: page.nextCursor };
   });
   source ??= ops.source;
-  return source === undefined ? { tools } : { tools, source };
+  return {
+    tools,
+    ...(source === undefined ? {} : { source }),
+    ...(capabilities === undefined ? {} : { capabilities }),
+  };
 }
 
 async function drainPrompts(ops: DirectOps): Promise<{ prompts: Prompt[]; source?: string }> {
@@ -546,12 +554,11 @@ export function createWolframServer(
    * round trip.
    */
   async function reload(ops: DirectOps): Promise<void> {
-    const caps = await ops.capabilities();
-
     let tools: Tool[];
     let source: string | undefined;
+    let listedCaps: ServerCapabilities | undefined;
     try {
-      ({ tools, source } = await drainTools(ops));
+      ({ tools, source, capabilities: listedCaps } = await drainTools(ops));
     } catch (err) {
       // Keep the last known-good list. Replacing it with an empty array here
       // would advertise a server with no tools, and would persist that.
@@ -569,6 +576,9 @@ export function createWolframServer(
       return;
     }
 
+    // From the kernel that listed the tools where the list says, so its flags
+    // are cached beside its own tools rather than another kernel's (#6).
+    const caps = listedCaps ?? (await ops.capabilities());
     let prompts = promptCache ?? [];
     let listedFrom = caps.prompts ? promptsFrom : source;
     if (caps.prompts) {

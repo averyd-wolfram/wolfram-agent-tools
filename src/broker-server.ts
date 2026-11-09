@@ -10,7 +10,7 @@
  */
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
-import { McpError, type Prompt } from "@modelcontextprotocol/sdk/types.js";
+import { McpError, type Prompt, type ServerCapabilities } from "@modelcontextprotocol/sdk/types.js";
 import { createServer, type Server, type Socket } from "node:net";
 import { randomBytes } from "node:crypto";
 import { linkSync, statSync, unlinkSync } from "node:fs";
@@ -433,13 +433,16 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
         // is paging state belonging to one kernel, and the pool hands out
         // whichever is free — so relaying a cursor could ask page 2 of a kernel
         // that never issued page 1. Nothing outside this process ever sees one.
-        case "listTools":
-          // With the source in the list itself as well, since a session asks
-          // for each list apart and each may reach another kernel (#6).
-          return reply({
-            tools: await run((c, options) => listAllTools(c, options)),
-            source,
+        // With the source and the capabilities in the list itself as well, since
+        // a session asks for each apart and each may reach another kernel (#6).
+        case "listTools": {
+          let capabilities: ServerCapabilities | undefined;
+          const tools = await run((c, options) => {
+            capabilities = c.getServerCapabilities() ?? {};
+            return listAllTools(c, options);
           });
+          return reply({ tools, source, capabilities });
+        }
         case "listPrompts":
           return reply({
             prompts: await run((c, options) =>

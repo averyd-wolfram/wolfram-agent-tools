@@ -2048,6 +2048,56 @@ if (socketsHere("a kernel's reported directories")) {
   wipeCache();
 }
 
+heading("A failed start's back-off ends once the paclets change (#3, #6)");
+{
+  // A paclet whose server cannot start: the fake, given a tools file it cannot
+  // read, exits as it answers initialize. Repairing it is an install, which
+  // says nothing about the binary, so the window used to run its full length.
+  const evaluate = (client) =>
+    client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
+  const attempt = async (label, extra) => {
+    wipeCache();
+    const bench = pacletBench(`backoff-${label}`);
+    bench.install("Demo-1.0.0", "Demo");
+    writeFileSync(bench.env.FAKE_TOOLS_FILE, "not a list of tools");
+    const s = await connect({ ...bench.env, ...extra });
+    const failed = await evaluate(s.client);
+    const refused = await evaluate(s.client);
+    bench.uninstall("Demo-1.0.0");
+    bench.install("Demo-1.0.1", "Demo");
+    bench.declare("DemoFixed");
+    const repaired = await evaluate(s.client);
+    await s.client.close();
+    return { failed, refused, repaired };
+  };
+  const text = (result) => result.content?.[0]?.text ?? "";
+
+  const own = await attempt("private", {});
+  check(
+    "a private session's back-off ends when a paclet is installed, rather than running its window",
+    own.failed.isError && own.refused.isError && !own.repaired.isError,
+    `then: ${text(own.refused).slice(0, 70)}; after the install: ${text(own.repaired).slice(0, 70)}`,
+  );
+
+  if (socketsHere("a pool's refusal window across an install")) {
+    const runtime = privateDir(join(home, "run-source-backoff"));
+    const shared = await attempt("shared", {
+      WOLFRAM_MCP_SHARE: "1",
+      XDG_RUNTIME_DIR: runtime,
+      WOLFRAM_MCP_IDLE_MINUTES: "5",
+      WOLFRAM_MCP_LICENSE_LIMIT: "2",
+    });
+    check(
+      "and so does a pool's refusal window",
+      shared.failed.isError && shared.refused.isError && !shared.repaired.isError,
+      `then: ${text(shared.refused).slice(0, 70)}; after the install: ${text(shared.repaired).slice(0, 70)}`,
+    );
+    signalOwnBrokers("SIGTERM", runtime);
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  wipeCache();
+}
+
 heading("A request queued across a paclet upgrade runs on a kernel started after it (#3)");
 if (socketsHere("a queued request across a paclet upgrade")) {
   wipeCache();

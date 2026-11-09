@@ -207,7 +207,15 @@ export class KernelPool {
    * same flavour would get the same one from a kernel. A burst that arrives
    * before the first failure is recorded is not covered: #19.
    */
-  readonly #failed = new Map<string, { backoff: Backoff; unresolved: boolean }>();
+  readonly #failed = new Map<
+    string,
+    {
+      backoff: Backoff;
+      unresolved: boolean;
+      /** Whether what the failed start began from has changed since. */
+      changed: () => boolean;
+    }
+  >();
   /** Flavours whose kernel started since their last failed start (#19). */
   readonly #proven = new Set<string>();
   /** Requests held on their own flavour, apart from the FIFO queue (#19, #115). */
@@ -323,7 +331,8 @@ export class KernelPool {
       // caller, so it is recorded here, as the start fails: answered "expired"
       // instead, it left no window, and each later request started the kernel
       // that would not start (#80).
-      onStartFailed: (err) => this.#recordFailedStart(flavour.digest, err),
+      onStartFailed: (err) =>
+        this.#recordFailedStart(flavour.digest, err, () => session.attemptChanged()),
       onReady: async (client: Client, late?: AbortSignal) => {
         // Proven: what its held requests were waiting to learn (#19).
         this.#proven.add(flavour.digest);
@@ -843,12 +852,12 @@ export class KernelPool {
     return candidateIdentity(this.#options.bin);
   }
 
-  #recordFailedStart(digest: string, err: unknown): void {
+  #recordFailedStart(digest: string, err: unknown, changed: () => boolean): void {
     // Pruned here, so a long-lived broker does not keep every flavour that ever
     // failed, kernel output and all.
     const identity = this.#identity();
     for (const [key, failed] of this.#failed) {
-      if (!failed.backoff.current(identity)) this.#failed.delete(key);
+      if (!failed.backoff.current(identity) || failed.changed()) this.#failed.delete(key);
     }
     const unresolved = isServerNotResolved(err);
     const { windowMs, advice } = preparationBackoff(
@@ -856,7 +865,7 @@ export class KernelPool {
     );
     const backoff = new Backoff(PREPARATION_BACKOFF_MS, () => this.#now());
     backoff.record(identity, err, windowMs, advice);
-    this.#failed.set(digest, { backoff, unresolved });
+    this.#failed.set(digest, { backoff, unresolved, changed });
     this.#proven.delete(digest);
   }
 
@@ -868,7 +877,9 @@ export class KernelPool {
   #window(digest: string): Window | null {
     const failed = this.#failed.get(digest);
     if (!failed) return null;
-    const state = failed.backoff.current(this.#identity());
+    // A paclet installed or repaired since the start failed: that start says
+    // nothing of the next, so it is asked, as a changed binary would be.
+    const state = failed.changed() ? null : failed.backoff.current(this.#identity());
     if (!state) {
       this.#failed.delete(digest);
       return null;
