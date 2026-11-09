@@ -14,6 +14,12 @@
 # same update in a `fix(deps):` PR of your own: Dependabot closes its PR once
 # the update is on main. Closing it first would make Dependabot skip that
 # version, and retitling can't help, since commit-types reads the commit too.
+#
+# An advisory whose fix is a major version the dependents don't yet accept has
+# no update to propose, so package.json's `overrides` forces it, after reading
+# that they use nothing the major removed. minimatch ^11.0.1 (GHSA-g3hv-75wg-m249)
+# is one: eslint, @eslint/config-array and typescript-eslint ask for ^10, and use
+# only Minimatch, match and minimatch(). Drop it once they ask for ^11.
 version: 2
 updates:
   - package-ecosystem: npm
