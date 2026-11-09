@@ -516,14 +516,15 @@ export class KernelPool {
       case "grow":
         return this.#grow(flavour);
       case "swap": {
-        // A victim of this very environment is one only because its paclets
-        // changed since it started (`#mine`). Logged as another environment's,
-        // the broker said it retired a kernel of X to make room for X.
+        // A victim of this very environment is one only because what its server
+        // is served from changed since it started — an installed paclet, or the
+        // user's own server file (`#mine`). Logged as another environment's, the
+        // broker said it retired a kernel of X to make room for X.
         const stale = plan.victim.flavour.digest === flavour.digest;
         this.#options.log(
           stale
             ? `budget reached; retiring an idle kernel for environment ${flavour.digest}, ` +
-                `started before its paclets changed, to make room`
+                `started before its server's paclets or definition changed, to make room`
             : `budget reached and no kernel for environment ${flavour.digest}; retiring an idle ` +
                 `kernel for ${plan.victim.flavour.digest} to make room`,
         );
@@ -534,7 +535,7 @@ export class KernelPool {
         this.#retire(
           plan.victim,
           stale
-            ? "the paclets it started from changed"
+            ? "the paclets or server definition it started from changed"
             : "a session with a different environment needed the seat",
           false,
         );

@@ -2086,8 +2086,8 @@ if (socketsHere("a stale kernel swapped out")) {
   // It used to say it retired a kernel of this environment because a session
   // of a different one needed the seat: the same digest on both sides.
   check(
-    "and the broker says the kernel went because its paclets changed, not for another environment",
-    swap.some((l) => /paclets changed/.test(l)) && !swap.some((l) => /different environment|kernel for [0-9a-f]+ to make room/.test(l)),
+    "and the broker says the kernel went because its server's paclets or definition changed, not for another environment",
+    swap.some((l) => /paclets or definition changed/.test(l)) && !swap.some((l) => /different environment|kernel for [0-9a-f]+ to make room/.test(l)),
     swap.map((l) => l.replace(/^\S+ \[wolfram-broker\] /, "")).join(" | ").slice(0, 160),
   );
   for (const s of [a, b]) await s.client.close();
