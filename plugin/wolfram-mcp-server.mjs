@@ -8208,7 +8208,7 @@ var init_version = __esm({
   "dist/version.js"() {
     "use strict";
     here = dirname(fileURLToPath(import.meta.url));
-    PKG = true ? JSON.parse('{"name":"wolfram-mcp-server","version":"0.1.11","description":"MCP server that drives a locally installed Wolfram kernel, with lazy start and idle shutdown."}') : JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8"));
+    PKG = true ? JSON.parse('{"name":"wolfram-mcp-server","version":"0.1.12","description":"MCP server that drives a locally installed Wolfram kernel, with lazy start and idle shutdown."}') : JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8"));
   }
 });
 
@@ -8225,8 +8225,8 @@ function cacheDir() {
   const base = process.env["XDG_CACHE_HOME"] ?? join2(os.homedir(), ".cache");
   return join2(base, "wolfram-mcp-server");
 }
-function cacheKey(kernelPath, kernelVersion, serverName, flavour) {
-  return { kernelPath, kernelVersion, serverName, serverVersion: PKG.version, flavour };
+function cacheKey(kernelPath, kernelVersion, serverName, flavour, source) {
+  return { kernelPath, kernelVersion, serverName, serverVersion: PKG.version, flavour, source };
 }
 function capabilityDir() {
   return join2(cacheDir(), "capabilities");
@@ -8237,7 +8237,8 @@ function capabilityFile(key) {
     key.kernelVersion ?? "",
     key.serverName,
     key.serverVersion,
-    key.flavour
+    key.flavour,
+    key.source
   ].join("\0")).digest("hex").slice(0, 16);
   return join2(capabilityDir(), `${digest}.json`);
 }
@@ -8283,7 +8284,7 @@ function clearCache() {
   return dir;
 }
 function cacheMatches(entry, key) {
-  return entry !== null && entry.kernelPath === key.kernelPath && entry.kernelVersion === key.kernelVersion && entry.serverName === key.serverName && entry.serverVersion === key.serverVersion && entry.flavour === key.flavour;
+  return entry !== null && entry.kernelPath === key.kernelPath && entry.kernelVersion === key.kernelVersion && entry.serverName === key.serverName && entry.serverVersion === key.serverVersion && entry.flavour === key.flavour && entry.source === key.source;
 }
 var CACHE_FORMAT, CACHE_TTL_MS;
 var init_cache = __esm({
@@ -8477,7 +8478,7 @@ var init_broker_protocol = __esm({
     init_cache();
     init_flavour();
     init_version();
-    BROKER_PROTOCOL = 8;
+    BROKER_PROTOCOL = 9;
     SUN_PATH_BYTES = process.platform === "linux" ? 108 : 104;
     DIGEST_CHARS = 12;
     SOCKET_MODE = 384;
@@ -18604,6 +18605,116 @@ var init_inspect = __esm({
   }
 });
 
+// dist/server-source.js
+import { createHash as createHash5 } from "node:crypto";
+import { readdirSync as readdirSync2, readFileSync as readFileSync4, statSync as statSync3 } from "node:fs";
+import { join as join5 } from "node:path";
+import os2 from "node:os";
+function sourceDirs(env, facts, home = os2.homedir()) {
+  const mac2 = process.platform === "darwin";
+  return {
+    userBase: settingValue(env["WOLFRAM_USERBASE"]) ?? facts["WOLFRAM_USERBASE"] ?? join5(home, mac2 ? "Library/Wolfram" : ".Wolfram"),
+    base: settingValue(env["WOLFRAM_BASE"]) ?? facts["WOLFRAM_BASE"] ?? (mac2 ? "/Library/Wolfram" : "/usr/share/Wolfram")
+  };
+}
+function paclets(base, label, into, found) {
+  const repository = join5(base, "Paclets", "Repository");
+  let entries;
+  try {
+    entries = readdirSync2(repository).sort();
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    for (const name of ["PacletInfo.wl", "PacletInfo.m"]) {
+      const file = join5(repository, entry, name);
+      let identity;
+      try {
+        const { ino, ctimeMs } = statSync3(file);
+        identity = `${file}\0${ino}\0${ctimeMs}`;
+      } catch {
+        continue;
+      }
+      let hit = mentions.get(identity);
+      if (hit === void 0) {
+        try {
+          hit = readFileSync4(file, "utf8").includes("AgentTools");
+        } catch {
+          hit = false;
+        }
+        mentions.set(identity, hit);
+      }
+      if (hit) {
+        into.push(identity);
+        found.push(`paclet  ${entry} (${label})`);
+      }
+      break;
+    }
+  }
+}
+function userServer(userBase, serverName, into, found) {
+  const roots = join5(userBase, "ApplicationData", "Wolfram");
+  let servers = join5(roots, "AgentTools", "Servers");
+  try {
+    statSync3(join5(roots, "AgentTools"));
+  } catch {
+    servers = join5(roots, "MCPServer", "Servers");
+  }
+  let entries = [];
+  try {
+    entries = readdirSync2(servers);
+  } catch {
+  }
+  for (const entry of entries) {
+    let decoded = entry;
+    try {
+      decoded = decodeURIComponent(entry.replace(/\+/g, " "));
+    } catch {
+    }
+    if (decoded !== serverName)
+      continue;
+    const file = join5(servers, entry, "Metadata.wxf");
+    try {
+      const { ino, ctimeMs, size } = statSync3(file);
+      into.push(`${file}\0${ino}\0${ctimeMs}\0${size}`);
+      found.push(`server  ${file}`);
+      return;
+    } catch {
+    }
+  }
+  into.push("no user server");
+}
+function serverSource(serverName, dirs) {
+  const into = [];
+  const found = [];
+  paclets(dirs.userBase, "user base", into, found);
+  paclets(dirs.base, "base", into, found);
+  userServer(dirs.userBase, serverName, into, found);
+  const digest = createHash5("sha256").update(into.join("\n")).digest("hex").slice(0, 16);
+  return { digest, found };
+}
+function readSource(serverName, dirs) {
+  return { serverName, dirs, digest: serverSource(serverName, dirs).digest };
+}
+function sourceChanged(read) {
+  return serverSource(read.serverName, read.dirs).digest !== read.digest;
+}
+function sessionSource(serverName, flavour, bin, inspect) {
+  return serverSource(serverName, sourceDirs(flavour.env, installationEnv(bin, inspect)));
+}
+function sessionSourceRead(serverName, flavour, bin, inspect) {
+  return readSource(serverName, sourceDirs(flavour.env, installationEnv(bin, inspect)));
+}
+var mentions;
+var init_server_source = __esm({
+  "dist/server-source.js"() {
+    "use strict";
+    init_flavour();
+    init_inspect();
+    mentions = /* @__PURE__ */ new Map();
+  }
+});
+
 // dist/log.js
 function createLogger(prefix, options = {}) {
   const stamp = options.timestamps ?? false;
@@ -18715,6 +18826,7 @@ var init_kernel = __esm({
     init_flavour();
     init_inspect();
     init_duration();
+    init_server_source();
     init_log();
     PACLET_KERNEL_ARGS = [
       "-run",
@@ -18869,6 +18981,12 @@ var init_kernel = __esm({
        */
       #handshaking = null;
       #queue = Promise.resolve();
+      /** `source`: kept per start, since a restart after idling may load another. */
+      #source;
+      /** Where `source` was read, for `sourceChanged` to read again. */
+      #sourceOf;
+      /** What the latest start, whether or not it succeeded, began from. */
+      #attempt;
       /** Calls handed to `run`, numbered as they queue. */
       #queued = 0;
       /** Calls handed to `run` and not yet settled: what arms an idle shutdown. */
@@ -18891,6 +19009,43 @@ var init_kernel = __esm({
       get running() {
         return this.#client !== null;
       }
+      /**
+       * What the running kernel was started from (`serverSource`), read as it
+       * started; undefined before the first. A list it produced belongs under this
+       * in the capability cache, whatever the disk says by the time it is written.
+       */
+      get source() {
+        return this.#source;
+      }
+      /**
+       * Whether what the running kernel was started from has changed on disk since,
+       * read again from the directories it was read from: a paclet upgraded under
+       * it, or a start the change landed in. Like with like, so learning the
+       * installation's real directories later, from the facts, does not make a
+       * kernel that started before them look replaced.
+       */
+      /**
+       * What the latest start, whether or not it succeeded, began from, and where:
+       * read before it, and where the kernel then said its directories are.
+       */
+      get attempt() {
+        return this.#attempt ?? [];
+      }
+      /**
+       * Whether what the latest start began from has changed on disk since, read
+       * again where it was read: a pool lifts the refusal window a failed start
+       * opened once it has, since the paclet that failed it may now be fixed.
+       */
+      attemptChanged() {
+        return (this.#attempt ?? []).some(sourceChanged);
+      }
+      sourceChanged() {
+        if (!this.#client || !this.#sourceOf)
+          return false;
+        if (this.#source === void 0)
+          return true;
+        return serverSource(this.#sourceOf.serverName, this.#sourceOf.dirs).digest !== this.#source;
+      }
       async #spawn(startTimeoutMs = this.#options.startTimeoutMs) {
         const { bin, log, clientInfo, flavour } = this.#options;
         const serverName = flavour?.env["MCP_SERVER_NAME"] ?? this.#options.serverName;
@@ -18900,32 +19055,36 @@ var init_kernel = __esm({
         });
         void fatal.catch(() => {
         });
+        const env = {
+          ...this.#options.extraEnv,
+          ...flavour ? applyFlavour(process.env, flavour) : process.env,
+          // Only when the flavour has not already said. `MCP_SERVER_NAME` is part
+          // of a flavour, and in a broker the flavour belongs to the calling
+          // session — which is what lets one broker serve several server names
+          // under one licence budget. This option is the private path's answer,
+          // where there is nobody else to ask.
+          ...flavour?.env["MCP_SERVER_NAME"] ? {} : { MCP_SERVER_NAME: serverName }
+        };
+        const guessed = sourceDirs(env, this.#options.extraEnv ?? {});
+        const before = serverSource(serverName, guessed).digest;
+        this.#attempt = [{ serverName, dirs: guessed, digest: before }];
+        let reported;
         const transport = new FilteringStdioTransport({
           command: bin,
           args: [...KERNEL_ARGS],
-          // Layered, and the order is load-bearing. The probe's values are the
-          // floor; this process's environment beats them, because an explicit
-          // WOLFRAM_USERBASE is a deliberate choice and not something to overwrite
-          // with a probe result. The flavour then beats *that*, and removes the
-          // names it leaves unset — because in a broker this process's environment
-          // belongs to whichever session spawned it, and letting it show through is
-          // how one project's MCP_TOOL_OPTIONS came to run another project's calls.
-          env: {
-            ...this.#options.extraEnv,
-            ...flavour ? applyFlavour(process.env, flavour) : process.env,
-            // Only when the flavour has not already said. `MCP_SERVER_NAME` is part
-            // of a flavour, and in a broker the flavour belongs to the calling
-            // session — which is what lets one broker serve several server names
-            // under one licence budget. This option is the private path's answer,
-            // where there is nobody else to ask.
-            ...flavour?.env["MCP_SERVER_NAME"] ? {} : { MCP_SERVER_NAME: serverName }
-          },
+          env,
           onOutput: (line) => {
             if (isFactsLine(line)) {
               const facts = parseFacts(line);
-              if (facts)
+              if (facts) {
+                if (this.#options.sourceFromFacts !== false && facts.userBase && facts.base) {
+                  reported = { userBase: facts.userBase, base: facts.base };
+                  if (reported.userBase !== guessed.userBase || reported.base !== guessed.base) {
+                    this.#attempt?.push(readSource(serverName, reported));
+                  }
+                }
                 this.#options.onFacts?.(facts, chosenShaping(flavour));
-              else
+              } else
                 log("kernel reported facts that could not be read");
               return;
             }
@@ -18972,6 +19131,13 @@ var init_kernel = __esm({
         log(`kernel ready in ${elapsedText(Date.now() - startedAt)}`);
         this.#client = client;
         this.#transport = transport;
+        const dirs = reported && (reported.userBase !== guessed.userBase || reported.base !== guessed.base) ? reported : void 0;
+        const after = serverSource(serverName, dirs ?? guessed).digest;
+        this.#source = dirs || after === before ? after : void 0;
+        this.#sourceOf = { serverName, dirs: dirs ?? guessed };
+        if (this.#source === void 0) {
+          log("the installed paclets changed while this kernel started; what it serves is uncertain");
+        }
         const refresh = (why) => {
           if (!this.#options.onReady)
             return;
@@ -19026,7 +19192,8 @@ var init_kernel = __esm({
        * `deadlineMs` is how long the *caller* will wait, and deliberately not a
        * timeout on the request: see `#fate`. `fn` is handed the options every
        * request it sends the kernel must carry, which keep the SDK from ending the
-       * request before that deadline does.
+       * request before that deadline does — and the `source` of the kernel it
+       * runs on, so whatever it answers can say what produced it (#3).
        */
       async run(fn, options = {}) {
         const ticket = ++this.#queued;
@@ -19083,7 +19250,7 @@ var init_kernel = __esm({
           dropIfCancelled();
           sent = true;
           clearTimeout(expiryTimer);
-          const work = fn(client, requestOptions(options.signal));
+          const work = fn(client, requestOptions(options.signal), this.#source);
           const waitMs = expiresAt === void 0 ? options.deadlineMs ?? DEFAULT_DEADLINE_MS : expiresAt === null ? 0 : Math.max(1, expiresAt - Date.now());
           const budgetMs = expiresAt == null ? waitMs : options.deadlineMs ?? waitMs;
           try {
@@ -19397,6 +19564,8 @@ var init_broker_client = __esm({
        */
       #liveness = /* @__PURE__ */ new Map();
       #onKernelReady;
+      /** `servedFrom`: the source the latest answer from a kernel carried. */
+      #served;
       /** No new work goes out on this connection; the next call chooses again. */
       #closed = false;
       /** The session has chosen again, and left this connection to drain (`retire`). */
@@ -19674,8 +19843,9 @@ var init_broker_client = __esm({
             return;
           }
           if (frame.event === "kernelReady") {
-            const { capabilities, tools, prompts, promptsError } = frame;
+            const { capabilities, tools, prompts, promptsError, source } = frame;
             void this.#onKernelReady?.({
+              source,
               capabilities: async () => capabilities,
               listTools: async (cursor) => cursor ? this.listTools(cursor) : { tools },
               listPrompts: async (cursor) => {
@@ -19700,6 +19870,8 @@ var init_broker_client = __esm({
         if (!waiter)
           return;
         this.#pending.delete(response.id);
+        if (response.source !== void 0)
+          this.#served = response.source;
         if (response.ok)
           waiter.resolve(response.result);
         else
@@ -19789,6 +19961,9 @@ var init_broker_client = __esm({
       onKernelReady(handler) {
         this.#onKernelReady = handler;
       }
+      servedFrom() {
+        return this.#served;
+      }
       capabilities() {
         return this.#request("capabilities");
       }
@@ -19869,25 +20044,25 @@ var init_broker_client = __esm({
 });
 
 // dist/wolframscript.js
-import { existsSync, readFileSync as readFileSync4, statSync as statSync3 } from "node:fs";
-import { join as join5 } from "node:path";
-import os2 from "node:os";
+import { existsSync, readFileSync as readFileSync5, statSync as statSync4 } from "node:fs";
+import { join as join6 } from "node:path";
+import os3 from "node:os";
 function configurationFiles() {
   const candidates = [];
   const override = process.env["WOLFRAMSCRIPT_CONFIGURATIONPATH"]?.trim();
   if (override) {
     candidates.push(override);
-    candidates.push(join5(override, CONF_NAME));
+    candidates.push(join6(override, CONF_NAME));
   }
-  const home = os2.homedir();
+  const home = os3.homedir();
   if (process.platform === "darwin") {
-    candidates.push(join5(home, "Library", "Application Support", "Wolfram", "WolframScript", CONF_NAME));
+    candidates.push(join6(home, "Library", "Application Support", "Wolfram", "WolframScript", CONF_NAME));
   } else if (process.platform === "win32") {
-    const appData = process.env["APPDATA"] ?? join5(home, "AppData", "Roaming");
-    candidates.push(join5(appData, "Wolfram", "WolframScript", CONF_NAME));
+    const appData = process.env["APPDATA"] ?? join6(home, "AppData", "Roaming");
+    candidates.push(join6(appData, "Wolfram", "WolframScript", CONF_NAME));
   }
-  const xdg = process.env["XDG_CONFIG_HOME"] ?? join5(home, ".config");
-  candidates.push(join5(xdg, "Wolfram", "WolframScript", CONF_NAME));
+  const xdg = process.env["XDG_CONFIG_HOME"] ?? join6(home, ".config");
+  candidates.push(join6(xdg, "Wolfram", "WolframScript", CONF_NAME));
   return candidates;
 }
 function parse3(text) {
@@ -19909,9 +20084,9 @@ function parse3(text) {
 function readConfiguration() {
   for (const file of configurationFiles()) {
     try {
-      if (!existsSync(file) || !statSync3(file).isFile())
+      if (!existsSync(file) || !statSync4(file).isFile())
         continue;
-      return { file, values: parse3(readFileSync4(file, "utf8")) };
+      return { file, values: parse3(readFileSync5(file, "utf8")) };
     } catch {
     }
   }
@@ -19948,10 +20123,10 @@ __export(locate_exports, {
   versionMatches: () => versionMatches,
   writeDiscoveryHint: () => writeDiscoveryHint
 });
-import { accessSync, constants, existsSync as existsSync2, mkdirSync as mkdirSync4, readFileSync as readFileSync5, readdirSync as readdirSync2, realpathSync, renameSync as renameSync3, statSync as statSync4, writeFileSync as writeFileSync3 } from "node:fs";
+import { accessSync, constants, existsSync as existsSync2, mkdirSync as mkdirSync4, readFileSync as readFileSync6, readdirSync as readdirSync3, realpathSync, renameSync as renameSync3, statSync as statSync5, writeFileSync as writeFileSync3 } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { dirname as dirname5, join as join6 } from "node:path";
-import os3 from "node:os";
+import { dirname as dirname5, join as join7 } from "node:path";
+import os4 from "node:os";
 function compareVersions(a, b) {
   const left = String(a ?? "0").split(".");
   const right = String(b ?? "0").split(".");
@@ -19978,7 +20153,7 @@ function realKernelPath(bin) {
 }
 function isExecutableFile(path) {
   try {
-    if (!statSync4(path).isFile())
+    if (!statSync5(path).isFile())
       return false;
   } catch {
     return false;
@@ -19998,7 +20173,7 @@ function resolveKernelBinary(path) {
     return null;
   let isDirectory;
   try {
-    isDirectory = statSync4(target).isDirectory();
+    isDirectory = statSync5(target).isDirectory();
   } catch {
     return null;
   }
@@ -20006,18 +20181,18 @@ function resolveKernelBinary(path) {
     return isExecutableFile(target) ? canonicalKernelName(realKernelPath(target)) : null;
   }
   for (const probe of KERNEL_PROBES) {
-    const candidate = join6(target, ...probe);
+    const candidate = join7(target, ...probe);
     if (isExecutableFile(candidate))
       return canonicalKernelName(realKernelPath(candidate));
   }
   return null;
 }
 function plistVersion(appPath) {
-  const plist = join6(appPath, "Contents", "Info.plist");
+  const plist = join7(appPath, "Contents", "Info.plist");
   if (!existsSync2(plist))
     return null;
   try {
-    let xml = readFileSync5(plist, "utf8");
+    let xml = readFileSync6(plist, "utf8");
     if (!xml.trimStart().startsWith("<?xml")) {
       xml = execFileSync("plutil", ["-convert", "xml1", "-o", "-", plist], {
         encoding: "utf8",
@@ -20035,20 +20210,20 @@ function versionFromString(text) {
 }
 function safeReaddir(dir) {
   try {
-    return readdirSync2(dir);
+    return readdirSync3(dir);
   } catch {
     return [];
   }
 }
 function scanDarwinBundles(namedOnly) {
   const found = [];
-  for (const root of ["/Applications", join6(os3.homedir(), "Applications")]) {
+  for (const root of ["/Applications", join7(os4.homedir(), "Applications")]) {
     for (const entry of safeReaddir(root)) {
       if (!entry.endsWith(".app"))
         continue;
       if (namedOnly && !/^(Wolfram|Mathematica)/i.test(entry))
         continue;
-      const app = join6(root, entry);
+      const app = join7(root, entry);
       const bin = resolveKernelBinary(app);
       if (!bin)
         continue;
@@ -20084,9 +20259,9 @@ function scanWin32() {
   const bases = [process.env["ProgramFiles"], process.env["ProgramFiles(x86)"]].filter((base) => Boolean(base));
   for (const base of bases) {
     for (const product of ["Wolfram", "Mathematica", "Wolfram Desktop", "Wolfram Engine"]) {
-      const dir = join6(base, "Wolfram Research", product);
+      const dir = join7(base, "Wolfram Research", product);
       for (const version2 of safeReaddir(dir)) {
-        const bin = resolveKernelBinary(join6(dir, version2));
+        const bin = resolveKernelBinary(join7(dir, version2));
         if (bin)
           found.push({ bin, version: versionFromString(version2) ?? version2, source: dir });
       }
@@ -20098,9 +20273,9 @@ function scanLinux() {
   const found = [];
   for (const root of ["/usr/local/Wolfram", "/opt/Wolfram", "/usr/local/Wolfram Research"]) {
     for (const product of ["Wolfram", "Mathematica", "WolframEngine", "Desktop"]) {
-      const dir = join6(root, product);
+      const dir = join7(root, product);
       for (const version2 of safeReaddir(dir)) {
-        const bin = resolveKernelBinary(join6(dir, version2));
+        const bin = resolveKernelBinary(join7(dir, version2));
         if (bin)
           found.push({ bin, version: versionFromString(version2) ?? version2, source: dir });
       }
@@ -20201,11 +20376,11 @@ function fromWolframScript(minVersion, log) {
   return null;
 }
 function hintFile() {
-  return join6(cacheDir(), "installations", "discovery-hint.json");
+  return join7(cacheDir(), "installations", "discovery-hint.json");
 }
 function binaryIdentity2(bin) {
   try {
-    const stat = statSync4(bin);
+    const stat = statSync5(bin);
     return { mtimeMs: Math.round(stat.mtimeMs), size: stat.size };
   } catch {
     return null;
@@ -20231,7 +20406,7 @@ function writeDiscoveryHint(install) {
 function fromDiscoveryHint(minVersion, log) {
   let hint;
   try {
-    hint = JSON.parse(readFileSync5(hintFile(), "utf8"));
+    hint = JSON.parse(readFileSync6(hintFile(), "utf8"));
   } catch {
     return null;
   }
@@ -20382,7 +20557,7 @@ __export(doctor_exports, {
   runDoctor: () => runDoctor,
   sessionStatus: () => sessionStatus
 });
-import { dirname as dirname6, join as join7 } from "node:path";
+import { dirname as dirname6, join as join8 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 function doctorCommand(env = process.env, entry = process.argv[1]) {
   if (env["CLAUDE_PLUGIN_ROOT"]?.trim())
@@ -20390,7 +20565,7 @@ function doctorCommand(env = process.env, entry = process.argv[1]) {
   if (true) {
     return entry ? `node "${entry}" doctor` : "this file's doctor subcommand";
   }
-  return `npm run doctor, in ${join7(dirname6(fileURLToPath3(import.meta.url)), "..")}`;
+  return `npm run doctor, in ${join8(dirname6(fileURLToPath3(import.meta.url)), "..")}`;
 }
 function sessionStatus(now = Date.now()) {
   const config2 = loadConfig(() => {
@@ -20414,7 +20589,7 @@ function sessionStatus(now = Date.now()) {
   } else {
     lines.push("No facts cached yet: they are read on the first kernel start.");
   }
-  const cached2 = config2.cacheEnabled ? readCache(cacheKey(install.bin, install.version, config2.serverName, config2.flavour.digest)) : null;
+  const cached2 = config2.cacheEnabled ? readCache(cacheKey(install.bin, install.version, config2.serverName, config2.flavour.digest, sessionSource(config2.serverName, config2.flavour, install.bin, config2.inspect).digest)) : null;
   lines.push(cached2 ? `Tool list cached ${age(cached2.cachedAt)}; no kernel starts until a tool is called.` : `No tool list cached: the first tool listing starts one kernel to learn it.`);
   return lines.join("\n");
 }
@@ -20480,10 +20655,14 @@ async function runDoctor() {
   }
   out();
   out("Capability cache");
-  const key = cacheKey(install.bin, install.version ?? null, config2.serverName, config2.flavour.digest);
+  const source = sessionSource(config2.serverName, config2.flavour, install.bin, config2.inspect);
+  const key = cacheKey(install.bin, install.version ?? null, config2.serverName, config2.flavour.digest, source.digest);
   out(`  file     ${capabilityFile(key)}`);
   const flavourVars = Object.keys(config2.flavour.env);
   out(`  flavour  ${config2.flavour.digest} (${flavourVars.length ? flavourVars.join(", ") : "defaults only"})`);
+  out(`  source   ${source.digest}${source.found.length ? "" : " (nothing found)"}`);
+  for (const line of source.found)
+    out(`           ${line}`);
   const cached2 = readCache(key);
   if (!cached2) {
     out("  state    absent or expired");
@@ -20595,6 +20774,7 @@ var init_doctor = __esm({
     init_kernel();
     init_locate();
     init_log();
+    init_server_source();
     init_version();
     CONFIG_VARS = [
       // Discovery
@@ -20649,7 +20829,7 @@ var init_doctor = __esm({
 });
 
 // dist/prepare.js
-import { statSync as statSync5 } from "node:fs";
+import { statSync as statSync6 } from "node:fs";
 function preparationBackoff(failure2, repeats = 0) {
   switch (failure2.kind) {
     case "unresolved":
@@ -20678,7 +20858,7 @@ function preparationBackoff(failure2, repeats = 0) {
 }
 function candidateIdentity(bin) {
   try {
-    const stat = statSync5(bin);
+    const stat = statSync6(bin);
     return { bin, mtimeMs: Math.round(stat.mtimeMs), size: stat.size };
   } catch {
     return null;
@@ -20920,7 +21100,8 @@ function deferredBackend(config2, install, log, overrides = {}) {
   return new DeferredBackend((deadline) => createBackend(config2, install, log, deadline), log, {
     ...overrides,
     startTimeoutMs: config2.startTimeoutMs,
-    bin: install.bin
+    bin: install.bin,
+    source: () => sessionSourceRead(config2.serverName, config2.flavour, install.bin, config2.inspect)
   });
 }
 function brokerLaunch(config2, install, log) {
@@ -20951,7 +21132,8 @@ async function createBackend(config2, install, log, deadline = new Deadline(conf
       onFacts: (facts, chosen) => {
         if (config2.inspect)
           recordFacts(install.bin, facts, chosen, log);
-      }
+      },
+      sourceFromFacts: config2.inspect
     });
   };
   if (!config2.share) {
@@ -20982,6 +21164,7 @@ var init_backend = __esm({
     init_config();
     init_doctor();
     init_inspect();
+    init_server_source();
     init_prepare();
     init_kernel();
     init_duration();
@@ -20998,6 +21181,7 @@ var init_backend = __esm({
           onStartFailed: (err) => this.#onStartFailed?.(err),
           onReady: async (client, late) => {
             await this.#onReady?.({
+              source: this.#session.source,
               capabilities: async () => client.getServerCapabilities() ?? {},
               // This server's request options, as `run` gives every other request:
               // with the SDK's own, a slow list was cancelled at 60 s (#70). And
@@ -21019,6 +21203,12 @@ var init_backend = __esm({
       }
       onStartFailed(handler) {
         this.#onStartFailed = handler;
+      }
+      servedFrom() {
+        return this.#session.source;
+      }
+      attempt() {
+        return this.#session.attempt;
       }
       /**
        * Start the kernel within what the deadline has left. Its own handshake
@@ -21047,14 +21237,25 @@ var init_backend = __esm({
        * complete lists and neither ever returns a `nextCursor`.
        */
       async listTools() {
-        return { tools: await this.#session.run((c, request) => listAllTools(c, request)) };
+        let source;
+        let capabilities;
+        const tools = await this.#session.run((c, request, served) => {
+          source = served;
+          capabilities = c.getServerCapabilities() ?? {};
+          return listAllTools(c, request);
+        });
+        return { tools, source, capabilities };
       }
       async listPrompts() {
-        const prompts = await this.#session.run((c, request) => drainPages(async (cursor) => {
-          const page = await c.listPrompts(cursor ? { cursor } : void 0, request);
-          return { items: page.prompts ?? [], nextCursor: page.nextCursor };
-        }));
-        return { prompts };
+        let source;
+        const prompts = await this.#session.run((c, request, served) => {
+          source = served;
+          return drainPages(async (cursor) => {
+            const page = await c.listPrompts(cursor ? { cursor } : void 0, request);
+            return { items: page.prompts ?? [], nextCursor: page.nextCursor };
+          });
+        });
+        return { prompts, source };
       }
       async getPrompt(params, options) {
         return this.#session.run((c, request) => c.getPrompt(params, request), {
@@ -21093,6 +21294,13 @@ var init_backend = __esm({
       #log;
       #startTimeoutMs;
       #bin;
+      #source;
+      /**
+       * What the failure being backed off began from, and what the directories
+       * known by the time it was recorded held: the window stands while each reads
+       * the same where it was read, and ends once a paclet changes one.
+       */
+      #failedFrom = [];
       #clock;
       #backoff;
       /**
@@ -21130,6 +21338,7 @@ var init_backend = __esm({
         this.#log = log;
         this.#startTimeoutMs = options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS;
         this.#bin = options.bin;
+        this.#source = options.source;
         this.#clock = options.clock ?? Date.now;
         this.#backoff = new Backoff(options.backoffMs ?? PREPARATION_BACKOFF_MS, this.#clock);
       }
@@ -21140,8 +21349,21 @@ var init_backend = __esm({
       #identity() {
         return this.#bin === void 0 ? null : candidateIdentity(this.#bin);
       }
-      backoff() {
+      /**
+       * The back-off in force: none once what the failure began from has changed,
+       * read where it was read — installing or repairing the paclet ends it, as a
+       * new binary does, where before the fix waited out the window (#3).
+       */
+      #current() {
+        if (this.#failedFrom.some(sourceChanged))
+          return null;
         return this.#backoff.current(this.#identity());
+      }
+      servedFrom() {
+        return this.#resolved?.servedFrom?.();
+      }
+      backoff() {
+        return this.#current();
       }
       async #get() {
         await this.#resolved?.settled?.();
@@ -21163,6 +21385,7 @@ var init_backend = __esm({
 
 The failure was: ${waiting.reason}`);
         }
+        const before = this.#resolving ? void 0 : this.#source?.();
         this.#resolving ??= this.#prepare().then((backend) => {
           this.#resolved = backend;
           this.#resolving = null;
@@ -21172,7 +21395,7 @@ The failure was: ${waiting.reason}`);
           this.#resolving = null;
           if (err instanceof PreparationStopped)
             throw err;
-          this.#recordFailure("preparation", err);
+          this.#recordFailure("preparation", err, before ? [before] : []);
           throw err;
         });
         return this.#resolving;
@@ -21185,18 +21408,20 @@ The failure was: ${waiting.reason}`);
        * for ten minutes (issue #5); a slow stage has a fresh deadline next time.
        * Neither is the installation, so neither points at doctor.
        */
-      #recordFailure(what, err) {
+      #recordFailure(what, err, from = []) {
         const failure2 = preparationFailure(err, this.#startTimeoutMs);
         let repeats = 0;
         if (failure2.kind === "slow") {
-          const now = this.#clock();
-          const run = this.#slow && now - this.#slow.at < PREPARATION_BACKOFF_MS ? this.#slow : null;
+          const now2 = this.#clock();
+          const run = this.#slow && now2 - this.#slow.at < PREPARATION_BACKOFF_MS ? this.#slow : null;
           repeats = run?.count ?? 0;
-          this.#slow = { count: repeats + 1, at: now };
+          this.#slow = { count: repeats + 1, at: now2 };
         } else {
           this.#slow = null;
         }
         const { windowMs, advice } = preparationBackoff(failure2, repeats);
+        const now = this.#source?.();
+        this.#failedFrom = now ? [...from, now] : from;
         this.#backoff.record(this.#identity(), err, windowMs, advice);
         this.#log?.(`${what} failed; not retrying for ${waitText(this.#backoffWindow())}: ${errorText(err)}`);
       }
@@ -21241,7 +21466,7 @@ The failure was: ${waiting.reason}`);
           return false;
         if (typeof err === "object" && err !== null)
           this.#startFailures.add(err);
-        this.#recordFailure("restarting the kernel", err);
+        this.#recordFailure("restarting the kernel", err, backend.attempt?.() ?? []);
         this.#resolved = null;
         this.#retire(backend);
         return true;
@@ -21269,7 +21494,7 @@ The failure was: ${waiting.reason}`);
         }
       }
       #backoffWindow() {
-        return this.#backoff.current(this.#identity())?.remainingMs ?? 0;
+        return this.#current()?.remainingMs ?? 0;
       }
       /**
        * Leave a backend given up on to finish what it was asked, rather than stop
@@ -21381,8 +21606,8 @@ __export(lsp_exports, {
   runLsp: () => runLsp
 });
 import { spawn as spawn3 } from "node:child_process";
-import { existsSync as existsSync3, mkdirSync as mkdirSync5, readFileSync as readFileSync6, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "node:fs";
-import { dirname as dirname7, join as join8 } from "node:path";
+import { existsSync as existsSync3, mkdirSync as mkdirSync5, readFileSync as readFileSync7, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "node:fs";
+import { dirname as dirname7, join as join9 } from "node:path";
 function discoverLspKernel(log) {
   const config2 = loadConfig(log);
   return locateKernel({
@@ -21395,7 +21620,7 @@ function discoverLspKernel(log) {
 }
 function lspOptionFile(env = process.env) {
   const data = env["CLAUDE_PLUGIN_DATA"]?.trim();
-  return data ? join8(data, "lsp-option") : null;
+  return data ? join9(data, "lsp-option") : null;
 }
 function recordLspOption(env = process.env) {
   const file = lspOptionFile(env);
@@ -21417,7 +21642,7 @@ function lspDecision(env = process.env) {
   const file = lspOptionFile(env);
   let option;
   try {
-    option = file && existsSync3(file) ? readFileSync6(file, "utf8") : void 0;
+    option = file && existsSync3(file) ? readFileSync7(file, "utf8") : void 0;
   } catch {
     option = void 0;
   }
@@ -21748,6 +21973,8 @@ var init_pool = __esm({
       #arrivals = 0;
       /** A second look for a flavour's held requests when its window ends. */
       #windowTimers = /* @__PURE__ */ new Map();
+      /** `#replaced`, for the rest of this turn of the event loop. */
+      #changed = /* @__PURE__ */ new Map();
       constructor(options) {
         this.#options = options;
         this.#licence = options.licence;
@@ -21830,15 +22057,16 @@ var init_pool = __esm({
           flavour,
           log: (message) => log(`kernel ${index}: ${message}`),
           onFacts: (facts, chosen) => this.#learn(facts, chosen),
+          sourceFromFacts: this.#options.learnFromKernels,
           // A start that fails after its caller's ceiling passed reaches no
           // caller, so it is recorded here, as the start fails: answered "expired"
           // instead, it left no window, and each later request started the kernel
           // that would not start (#80).
-          onStartFailed: (err) => this.#recordFailedStart(flavour.digest, err),
+          onStartFailed: (err) => this.#recordFailedStart(flavour.digest, err, () => session.attemptChanged()),
           onReady: async (client, late) => {
             this.#proven.add(flavour.digest);
             this.#schedule();
-            await this.#options.onKernelReady?.(client, flavour.digest, late);
+            await this.#options.onKernelReady?.(client, flavour.digest, late, session.source);
           }
         });
         const slot = { session, busy: true, flavour };
@@ -21861,7 +22089,7 @@ var init_pool = __esm({
        * doing anything at all.
        */
       #victim(flavour) {
-        return this.#slots.find((s) => !s.busy && !s.session.abandoned && s.flavour.digest !== flavour.digest) ?? this.#slots.find((s) => !s.busy && s.flavour.digest !== flavour.digest);
+        return this.#slots.find((s) => !s.busy && !s.session.abandoned && !this.#mine(s, flavour)) ?? this.#slots.find((s) => !s.busy && !this.#mine(s, flavour));
       }
       /**
        * A slot that can take a request of this flavour now. While the flavour's
@@ -21872,7 +22100,7 @@ var init_pool = __esm({
        * start turned the whole flavour away (#101).
        */
       #servable(slot, flavour, refusing) {
-        return !slot.busy && !slot.session.abandoned && slot.flavour.digest === flavour.digest && (!refusing || slot.session.running);
+        return !slot.busy && !slot.session.abandoned && this.#mine(slot, flavour) && (!refusing || slot.session.running);
       }
       /**
        * An idle kernel, preferring one with nothing outstanding.
@@ -21885,7 +22113,35 @@ var init_pool = __esm({
        * never "has this run too long" but "does anyone need the seat".
        */
       #idle(flavour) {
-        return this.#slots.find((s) => this.#servable(s, flavour, false)) ?? this.#slots.find((s) => !s.busy && s.flavour.digest === flavour.digest);
+        return this.#slots.find((s) => this.#servable(s, flavour, false)) ?? this.#slots.find((s) => !s.busy && this.#mine(s, flavour));
+      }
+      /**
+       * Whether a slot's kernel can serve this flavour: one of it whose running
+       * kernel's source has not changed on disk since it started
+       * (`KernelSession.sourceChanged`). One started before a paclet upgrade serves
+       * the old definition, so it is treated as another flavour's: never handed
+       * out, and retired as one is (#3).
+       * Decided as a slot is chosen, so a request queued before an upgrade and
+       * served after it gets a kernel started after it. A slot whose kernel stopped
+       * for idleness reads the source again as it restarts, so it is still this
+       * flavour's.
+       */
+      #mine(slot, flavour) {
+        return slot.flavour.digest === flavour.digest && !this.#replaced(slot);
+      }
+      /**
+       * `KernelSession.sourceChanged`, read once per turn of the event loop and
+       * slot, since one plan looks at every slot; a later turn reads the disk again.
+       */
+      #replaced(slot) {
+        let changed = this.#changed.get(slot);
+        if (changed === void 0) {
+          if (this.#changed.size === 0)
+            setImmediate(() => this.#changed.clear());
+          changed = slot.session.sourceChanged();
+          this.#changed.set(slot, changed);
+        }
+        return changed;
       }
       /**
        * Take an idle kernel of this flavour, grow one, make room for one, or wait.
@@ -21927,11 +22183,11 @@ var init_pool = __esm({
        * request waited out its own ceiling (#115).
        */
       #ownBusy(flavour) {
-        return this.#slots.some((s) => s.busy && !s.session.abandoned && s.flavour.digest === flavour.digest);
+        return this.#slots.some((s) => s.busy && !s.session.abandoned && this.#mine(s, flavour));
       }
       /** A kernel of this flavour whose start is under way. */
       #starting(flavour) {
-        return this.#slots.some((s) => s.busy && !s.session.running && s.flavour.digest === flavour.digest);
+        return this.#slots.some((s) => s.busy && !s.session.running && this.#mine(s, flavour));
       }
       /**
        * Whether this flavour has shown it can start: a kernel of it started since
@@ -21952,8 +22208,9 @@ var init_pool = __esm({
           case "grow":
             return this.#grow(flavour);
           case "swap": {
-            this.#options.log(`budget reached and no kernel for environment ${flavour.digest}; retiring an idle kernel for ${plan.victim.flavour.digest} to make room`);
-            this.#retire(plan.victim, "a session with a different environment needed the seat", false);
+            const stale = plan.victim.flavour.digest === flavour.digest;
+            this.#options.log(stale ? `budget reached; retiring an idle kernel for environment ${flavour.digest} whose server's paclets or definition changed, to make room` : `budget reached and no kernel for environment ${flavour.digest}; retiring an idle kernel for ${plan.victim.flavour.digest} to make room`);
+            this.#retire(plan.victim, stale ? "its server's paclets or definition changed" : "a session with a different environment needed the seat", false);
             const replacement = this.#grow(flavour);
             this.#schedule();
             return replacement;
@@ -22234,17 +22491,17 @@ var init_pool = __esm({
       #identity() {
         return candidateIdentity(this.#options.bin);
       }
-      #recordFailedStart(digest, err) {
+      #recordFailedStart(digest, err, changed) {
         const identity = this.#identity();
         for (const [key, failed] of this.#failed) {
-          if (!failed.backoff.current(identity))
+          if (!failed.backoff.current(identity) || failed.changed())
             this.#failed.delete(key);
         }
         const unresolved = isServerNotResolved(err);
         const { windowMs, advice } = preparationBackoff(unresolved ? { kind: "unresolved" } : { kind: "kernel" });
         const backoff = new Backoff(PREPARATION_BACKOFF_MS, () => this.#now());
         backoff.record(identity, err, windowMs, advice);
-        this.#failed.set(digest, { backoff, unresolved });
+        this.#failed.set(digest, { backoff, unresolved, changed });
         this.#proven.delete(digest);
       }
       /**
@@ -22256,7 +22513,7 @@ var init_pool = __esm({
         const failed = this.#failed.get(digest);
         if (!failed)
           return null;
-        const state = failed.backoff.current(this.#identity());
+        const state = failed.changed() ? null : failed.backoff.current(this.#identity());
         if (!state) {
           this.#failed.delete(digest);
           return null;
@@ -22312,9 +22569,9 @@ __export(broker_server_exports, {
 });
 import { createServer } from "node:net";
 import { randomBytes } from "node:crypto";
-import { linkSync, statSync as statSync6, unlinkSync as unlinkSync3 } from "node:fs";
+import { linkSync, statSync as statSync7, unlinkSync as unlinkSync3 } from "node:fs";
 import { connect as connect2 } from "node:net";
-import { dirname as dirname8, join as join9 } from "node:path";
+import { dirname as dirname8, join as join10 } from "node:path";
 function readFlavour(params) {
   if (typeof params !== "object" || params === null)
     return null;
@@ -22349,7 +22606,7 @@ async function socketIsLive(address) {
 }
 function socketIdentity(address) {
   try {
-    const info = statSync6(address);
+    const info = statSync7(address);
     return `${info.dev}:${info.ino}`;
   } catch {
     return null;
@@ -22415,12 +22672,12 @@ async function startBroker(options) {
         if (options.allowInspect)
           recordFacts(options.bin, facts, chosen, log);
       },
-      onKernelReady: (client, flavour, late) => announceKernel(client, flavour, late)
+      onKernelReady: (client, flavour, late, source) => announceKernel(client, flavour, late, source)
     });
   })();
   preparing.catch(() => {
   });
-  async function announceKernel(client, flavour, late) {
+  async function announceKernel(client, flavour, late, source) {
     const audience = [...connections.values()].filter((s) => s.flavour?.digest === flavour);
     if (audience.length === 0)
       return;
@@ -22445,7 +22702,8 @@ async function startBroker(options) {
         capabilities,
         tools,
         prompts,
-        ...promptsError === void 0 ? {} : { promptsError }
+        ...promptsError === void 0 ? {} : { promptsError },
+        ...source === void 0 ? {} : { source }
       }, flavour);
     } catch (err) {
       log(`could not read the new kernel's tools: ${errorText(err)}`);
@@ -22461,7 +22719,13 @@ async function startBroker(options) {
     }
   }
   async function handle(request, state, inFlight, emit) {
-    const reply = (result) => ({ id: request.id, ok: true, result });
+    let source;
+    const reply = (result) => ({
+      id: request.id,
+      ok: true,
+      result,
+      ...source === void 0 ? {} : { source }
+    });
     const declared = state.flavour;
     if (!declared) {
       return {
@@ -22480,44 +22744,54 @@ async function startBroker(options) {
     const expiresAt = typeof request.expiresAt === "number" || request.expiresAt === null ? request.expiresAt : void 0;
     try {
       const pool = await preparing;
+      const run = (fn, runOptions) => pool.run(flavour, (client, options2, served) => {
+        source = served;
+        return fn(client, options2);
+      }, runOptions);
       switch (request.op) {
         case "capabilities":
-          return reply(await pool.run(flavour, async (c) => c.getServerCapabilities() ?? {}));
+          return reply(await run(async (c) => c.getServerCapabilities() ?? {}));
         // Drained inside the one slot, and answered as a complete list. A cursor
         // is paging state belonging to one kernel, and the pool hands out
         // whichever is free — so relaying a cursor could ask page 2 of a kernel
         // that never issued page 1. Nothing outside this process ever sees one.
-        case "listTools":
-          return reply({
-            tools: await pool.run(flavour, (c, options2) => listAllTools(c, options2))
+        // With the source and the capabilities in the list itself as well, since
+        // a session asks for each apart and each may reach another kernel (#6).
+        case "listTools": {
+          let capabilities;
+          const tools = await run((c, options2) => {
+            capabilities = c.getServerCapabilities() ?? {};
+            return listAllTools(c, options2);
           });
+          return reply({ tools, source, capabilities });
+        }
         case "listPrompts":
           return reply({
-            prompts: await pool.run(flavour, (c, options2) => drainPages(async (cursor) => {
+            prompts: await run((c, options2) => drainPages(async (cursor) => {
               const page = await c.listPrompts(cursor ? { cursor } : void 0, options2);
               return { items: page.prompts ?? [], nextCursor: page.nextCursor };
-            }))
+            })),
+            source
           });
         // The session's own call ceiling, and its cancel, as for a tool call: a
         // prompt runs its function in the kernel. Without a ceiling, the kernel
         // session's default.
         case "getPrompt":
-          return reply(await pool.run(flavour, (c, options2) => c.getPrompt(request.params, options2), {
+          return reply(await run((c, options2) => c.getPrompt(request.params, options2), {
             deadlineMs: request.timeoutMs,
             expiresAt,
             signal: cancel?.signal
           }));
         case "listResources":
-          return reply(await pool.run(flavour, (c, options2) => c.listResources(request.params, options2)));
+          return reply(await run((c, options2) => c.listResources(request.params, options2)));
         case "readResource":
-          return reply(await pool.run(flavour, (c, options2) => c.readResource(request.params, options2), {
+          return reply(await run((c, options2) => c.readResource(request.params, options2), {
             deadlineMs: request.timeoutMs,
             expiresAt,
             signal: cancel?.signal
           }));
         case "callTool":
-          return reply(await pool.run(
-            flavour,
+          return reply(await run(
             (c, options2) => c.callTool(request.params, void 0, {
               // The session's: the signal below, and an SDK timeout that
               // cannot fire first (#34).
@@ -22552,7 +22826,10 @@ async function startBroker(options) {
         id: request.id,
         ok: false,
         error: errorText(err),
-        ...err instanceof McpError ? { code: err.code, ...err.data === void 0 ? {} : { data: err.data } } : {}
+        ...err instanceof McpError ? { code: err.code, ...err.data === void 0 ? {} : { data: err.data } } : {},
+        // A kernel that refused the request answered it all the same: a call to
+        // a tool an upgrade removed is how a session on the old list finds out.
+        ...source === void 0 ? {} : { source }
       };
     } finally {
       if (cancel)
@@ -22731,7 +23008,7 @@ async function startBroker(options) {
   async function claimSocket() {
     if (process.platform === "win32")
       return claimDirect();
-    const staging = join9(dirname8(address), `.b${process.pid}-${randomBytes(4).toString("hex")}`);
+    const staging = join10(dirname8(address), `.b${process.pid}-${randomBytes(4).toString("hex")}`);
     if (!fitsSocketPath(staging))
       return claimDirect();
     const server = await listenAt(staging, 1);
@@ -23548,6 +23825,7 @@ init_inspect();
 init_kernel();
 init_locate();
 init_log();
+init_server_source();
 init_version();
 var PROTOCOL_ERRORS = /* @__PURE__ */ new Set([
   ErrorCode.ParseError,
@@ -23555,17 +23833,31 @@ var PROTOCOL_ERRORS = /* @__PURE__ */ new Set([
   ErrorCode.MethodNotFound,
   ErrorCode.InvalidParams
 ]);
-function drainTools(ops) {
-  return drainPages(async (cursor) => {
+async function drainTools(ops) {
+  let source;
+  let capabilities;
+  const tools = await drainPages(async (cursor) => {
     const page = await ops.listTools(cursor);
+    source ??= page.source;
+    capabilities ??= page.capabilities;
     return { items: page.tools ?? [], nextCursor: page.nextCursor };
   });
+  source ??= ops.source;
+  return {
+    tools,
+    ...source === void 0 ? {} : { source },
+    ...capabilities === void 0 ? {} : { capabilities }
+  };
 }
-function drainPrompts(ops) {
-  return drainPages(async (cursor) => {
+async function drainPrompts(ops) {
+  let source;
+  const prompts = await drainPages(async (cursor) => {
     const page = await ops.listPrompts(cursor);
+    source ??= page.source;
     return { items: page.prompts ?? [], nextCursor: page.nextCursor };
   });
+  source ??= ops.source;
+  return source === void 0 ? { prompts } : { prompts, source };
 }
 var KERNEL_TIME_CONSTRAINT_S = 60;
 var EVALUATOR_DEFAULT_TEXT = `${budgetText(KERNEL_TIME_CONSTRAINT_S * 1e3)} (TimeConstraint ${KERNEL_TIME_CONSTRAINT_S})`;
@@ -23718,7 +24010,14 @@ function createWolframServer(config2, log, makeBackend) {
     log,
     allowWolframScript: false
   });
-  const key = cacheKey(install?.bin ?? "", install?.version ?? null, config2.serverName, config2.flavour.digest);
+  const key = cacheKey(
+    install?.bin ?? "",
+    install?.version ?? null,
+    config2.serverName,
+    config2.flavour.digest,
+    // Read now, before `initialize` is answered from it: a few stats, no kernel.
+    install ? sessionSource(config2.serverName, config2.flavour, install.bin, config2.inspect).digest : ""
+  );
   const usableCache = install && config2.cacheEnabled ? readCache(key) : null;
   const upstream = usableCache?.upstream ?? {
     prompts: false,
@@ -23747,16 +24046,19 @@ function createWolframServer(config2, log, makeBackend) {
   }
   log(`profile=${config2.serverName} idle=${idleText(config2.idleMs)} cache=${usableCache ? "hit" : "miss"}`);
   const backend = makeBackend(install);
-  const fromKernel = (schema, handler) => server.setRequestHandler(schema, (request, extra) => relayed(Promise.resolve(handler(request, extra))));
+  const fromKernel = (schema, handler) => server.setRequestHandler(schema, (request, extra) => relayed(Promise.resolve(handler(request, extra)).finally(follow)));
   let toolCache = usableCache?.tools ?? null;
   let promptCache = usableCache?.prompts ?? null;
   let promptsSeen = Boolean(upstream.prompts);
   let toolCachedAt = usableCache?.cachedAt ?? null;
+  let seen = usableCache ? key.source : void 0;
+  let promptsFrom = usableCache ? key.source : void 0;
   async function reload(ops) {
-    const caps = await ops.capabilities();
     let tools;
+    let source;
+    let listedCaps;
     try {
-      tools = await drainTools(ops);
+      ({ tools, source, capabilities: listedCaps } = await drainTools(ops));
     } catch (err) {
       log(`upstream tools/list failed, keeping the cached list: ${errorText(err)}`);
       return;
@@ -23765,10 +24067,19 @@ function createWolframServer(config2, log, makeBackend) {
       log("upstream reported no tools; not caching an empty list");
       return;
     }
+    const caps = listedCaps ?? await ops.capabilities();
     let prompts = promptCache ?? [];
+    let listedFrom = caps.prompts ? promptsFrom : source;
     if (caps.prompts) {
       try {
-        prompts = await drainPrompts(ops);
+        const listed = await drainPrompts(ops);
+        if (listed.source !== source) {
+          log("the lists came from kernels started from different sources; re-reading later");
+          seen = void 0;
+          return;
+        }
+        prompts = listed.prompts;
+        listedFrom = listed.source;
         promptsSeen = true;
       } catch (err) {
         log(`upstream prompts/list failed, keeping the cached list: ${errorText(err)}`);
@@ -23778,13 +24089,16 @@ function createWolframServer(config2, log, makeBackend) {
     const promptsChanged = JSON.stringify(prompts) !== JSON.stringify(promptCache);
     toolCache = tools;
     promptCache = prompts;
+    promptsFrom = listedFrom;
     toolCachedAt = Date.now();
-    if (config2.cacheEnabled) {
+    seen = source ?? seen;
+    if (config2.cacheEnabled && source !== void 0) {
+      const known = listedFrom === source;
       const observed = {
-        prompts: Boolean(caps.prompts) && promptsSeen,
+        prompts: Boolean(caps.prompts) && promptsSeen && known,
         resources: Boolean(caps.resources)
       };
-      writeCache({ ...key, upstream: observed, tools, prompts });
+      writeCache({ ...key, source, upstream: observed, tools, prompts: known ? prompts : [] });
     }
     if (toolsChanged) {
       log(`upstream tool list changed (${tools.length} tools)`);
@@ -23798,6 +24112,20 @@ function createWolframServer(config2, log, makeBackend) {
     }
   }
   backend.onKernelReady((ops) => reload(ops));
+  function follow() {
+    const served = backend.servedFrom?.();
+    if (served === void 0 || served === seen)
+      return;
+    seen = served;
+    log("a kernel started from another server source answered; re-reading the lists");
+    void reload({
+      capabilities: () => backend.capabilities(),
+      listTools: (cursor) => backend.listTools(cursor),
+      listPrompts: (cursor) => backend.listPrompts(cursor)
+    }).catch((err) => {
+      log(`re-reading the lists failed, keeping them: ${errorText(err)}`);
+    });
+  }
   fromKernel(ListToolsRequestSchema, async () => {
     if (toolCache) {
       log(`tools/list served from cache (${toolCache.length} tools), kernel not started`);
@@ -23840,8 +24168,10 @@ function createWolframServer(config2, log, makeBackend) {
         }
       });
       await relayed2;
+      follow();
       return result;
     } catch (err) {
+      follow();
       if (err instanceof McpError && PROTOCOL_ERRORS.has(err.code)) {
         log(`tools/call ${name} rejected upstream: ${err.message}`);
         throw relayable(err);
@@ -23857,7 +24187,8 @@ function createWolframServer(config2, log, makeBackend) {
     fromKernel(ListPromptsRequestSchema, async () => {
       if (promptCache)
         return { prompts: promptCache };
-      return backend.listPrompts();
+      const { prompts } = await backend.listPrompts();
+      return { prompts };
     });
     fromKernel(GetPromptRequestSchema, async (request, extra) => backend.getPrompt(request.params, {
       timeoutMs: config2.callTimeoutMs,
