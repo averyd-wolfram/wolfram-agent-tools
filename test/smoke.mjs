@@ -3877,11 +3877,14 @@ if (socketsHere()) {
     ),
   );
   const logs = sessions.map((s) => s.stderr());
+  // Waited for, as after the recovery race above: both sessions spawn a broker, and
+  // the one that loses the address stands down and exits by itself — still
+  // alive when the answers came back, once, on a slow CI runner. Two that both
+  // stay up are the fault this counts, and are still two after the wait.
+  const one = await until(() => ownBrokers(run).length === 1, 10_000);
   check(
     "both are answered, by one broker in the cache's run/ they are both attached to",
-    answered.every(Boolean) &&
-      ownBrokers(run).length === 1 &&
-      logs.every((l) => l.includes("attached to the broker")),
+    answered.every(Boolean) && one && logs.every((l) => l.includes("attached to the broker")),
     `answered ${answered}, brokers in run/ ${ownBrokers(run).length}; ` +
       logs
         .map((l) => l.split("\n").find((line) => /attached|not sharing/.test(line)) ?? "(nothing)")
