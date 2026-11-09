@@ -10939,13 +10939,20 @@ heading("CLI");
       `exit ${unlisted.status}: ${(unlisted.stderr || unlisted.stdout).trim().slice(0, 120)}`,
     );
     // Unreadable now, readable later: then served, after a clear that passed.
-    chmodSync(locked, 0o000);
+    // The rest are still tried, and what was removed still said: stopping at
+    // the first failure left an entry removed and unreported.
+    const other = entryFor("Other");
+    chmodSync(other, 0o000);
     const unread = run(["clear-cache", "--server", "Locked"]);
-    chmodSync(locked, 0o600);
+    chmodSync(other, 0o600);
     check(
-      "and so is an entry that cannot be read, whoever's it is",
-      unread.status === 1 && existsSync(locked) && unread.stderr.includes(locked),
-      `exit ${unread.status}: ${(unread.stderr || unread.stdout).trim().slice(0, 120)}`,
+      "and so is an entry that cannot be read, whoever's it is, while the rest are cleared and said",
+      unread.status === 1 &&
+        existsSync(other) &&
+        unread.stderr.includes(other) &&
+        !existsSync(locked) &&
+        unread.stdout.includes(locked),
+      `exit ${unread.status}: ${`${unread.stdout} ${unread.stderr}`.trim().slice(0, 160)}`,
     );
   }
 

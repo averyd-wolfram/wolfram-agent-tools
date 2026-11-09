@@ -189,22 +189,29 @@ export function clearCache(): string {
  * downstream installer that wanted only its own entry gone had to parse these
  * files for `serverName`, an internal detail, or clear everyone's.
  *
- * @returns the files it removed, for `clear-cache --server` to report.
- * @throws when the directory cannot be listed, an entry cannot be read, or one
- *   of that server's cannot be removed.
+ * Every entry is tried, so a failure on one does not hide what was removed
+ * before it, nor leave the rest untried.
+ *
+ * @returns the files it removed and those it could not settle, for
+ *   `clear-cache --server` to report.
+ * @throws when the directory cannot be listed.
  */
-export function clearServerCache(serverName: string): string[] {
+export function clearServerCache(serverName: string): {
+  removed: string[];
+  failed: { file: string; error: unknown }[];
+} {
   const dir = capabilityDir();
+  const removed: string[] = [];
+  const failed: { file: string; error: unknown }[] = [];
   let files: string[];
   try {
     files = readdirSync(dir).filter((file) => file.endsWith(".json"));
   } catch (err) {
     // No directory is nothing cached. One that cannot be listed may still be
     // read at a known path, so its entries would go on being served.
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { removed, failed };
     throw err;
   }
-  const removed: string[] = [];
   for (const file of files) {
     const path = join(dir, file);
     let text: string;
@@ -214,8 +221,8 @@ export function clearServerCache(serverName: string): string[] {
       // Gone since the listing is nothing to remove. One that cannot be read
       // now may be readable later, and served then: whose it is cannot be said,
       // so it fails the command rather than pass as not this server's.
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
-      throw err;
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") failed.push({ file: path, error: err });
+      continue;
     }
     let entry: Partial<CacheEntry> | null;
     try {
@@ -229,12 +236,12 @@ export function clearServerCache(serverName: string): string[] {
     } catch (err) {
       // Gone already is what was asked. Anything else leaves an entry a session
       // would still serve, which reporting nothing to remove would hide.
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
-      throw err;
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") failed.push({ file: path, error: err });
+      continue;
     }
     removed.push(path);
   }
-  return removed;
+  return { removed, failed };
 }
 
 /**
