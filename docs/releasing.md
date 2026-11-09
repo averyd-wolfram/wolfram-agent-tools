@@ -61,6 +61,8 @@ on its commit instead (`workflow_call`, with the commit as `ref`).
   is the version most likely to break when newer syntax creeps in; the newest line catches a
   deprecation removal before a user on it does. Not over OS: the maintainer develops on macOS, so
   every local `npm test` is a macOS run, and CI's job is to cover the Linux that one never sees.
+  A problem matcher, `.github/fail-matcher.json`, makes each failing check an annotation on the
+  PR's checks and in the run summary, so finding the one that failed needs no log (#88).
 - **`build`**: one job, one runner. `npm run release:artifacts`, uploaded as a workflow artifact,
   so a change that breaks bundling or the plugin archive is caught on the PR that makes it, and a
   reviewer can download the result.

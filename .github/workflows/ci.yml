@@ -96,6 +96,10 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
+      # Each failing check, as the line every suite prints for one, becomes an
+      # annotation on the PR's checks and in the run summary, so which one failed
+      # needs no reading of the log (#88). GitHub shows the first ten per step.
+      - run: echo "::add-matcher::.github/fail-matcher.json"
       - run: npm test
 
   build:
