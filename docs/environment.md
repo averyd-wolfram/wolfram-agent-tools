@@ -291,6 +291,9 @@ Two caches, both under the cache directory:
   on the binary's path, mtime and size, so an in-place upgrade invalidates it.
 
 `wolfram-mcp-server clear-cache` removes both; deleting them by hand is just as safe.
+`wolfram-mcp-server clear-cache --server <name>` removes only that server's capability
+entries, for every kernel, and leaves the facts and every other server's. The name is
+resolved as `MCP_SERVER_NAME` is, so a built-in's name matches in any case.
 
 ## The Claude Code plugin
 

@@ -350,13 +350,16 @@ Things worth knowing:
   `~/.cache/...`
 - Windows: `%LOCALAPPDATA%\wolfram-mcp-server\capabilities\<digest>.json`
 
-One file per key, digested from kernel path, kernel version, server name, and this
-package's version — so a project using a different `MCP_SERVER_NAME` keeps its own entry
-instead of evicting yours. `wolfram-mcp-server doctor` prints the one in effect. It is
-rewritten from the live kernel on **every** kernel start, so a `Wolfram/AgentTools`
-upgrade that changes the tool list is picked up the next time a kernel runs, and
-`notifications/tools/list_changed` is emitted when it differs. Nothing here is a source
-of truth; it is a latency cache. `wolfram-mcp-server clear-cache` forgets it.
+One file per key, digested from kernel path, kernel version, server name, this package's
+version, the environment values that change a kernel's answers, and what the server is
+served from: the installed paclets that mention AgentTools, and your own server file. So a
+project using a different `MCP_SERVER_NAME` keeps its own entry instead of evicting yours,
+and a paclet upgrade or reinstall is a new entry rather than the old tools.
+`wolfram-mcp-server doctor` prints the one in effect. It is rewritten from the live kernel
+on **every** kernel start, and `notifications/tools/list_changed` is emitted when it
+differs. Nothing here is a source of truth; it is a latency cache.
+`wolfram-mcp-server clear-cache` forgets it, and `clear-cache --server <name>` forgets only
+that server's entries.
 
 ## Programmatic use
 

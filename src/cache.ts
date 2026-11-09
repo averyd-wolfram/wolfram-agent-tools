@@ -7,7 +7,15 @@
  * starts, so this is a latency cache, never a source of truth.
  */
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, unlinkSync } from "node:fs";
+import {
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+  unlinkSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import os from "node:os";
 import type { Prompt, Tool } from "@modelcontextprotocol/sdk/types.js";
@@ -173,6 +181,38 @@ export function clearCache(): string {
     /* absent, which is the normal case */
   }
   return dir;
+}
+
+/**
+ * Remove one server's entries — every kernel, flavour and source it was cached
+ * under — and leave every other server's and the reported facts (#103). A
+ * downstream installer that wanted only its own entry gone had to parse these
+ * files for `serverName`, an internal detail, or clear everyone's.
+ *
+ * @returns the files it removed, for `clear-cache --server` to report.
+ */
+export function clearServerCache(serverName: string): string[] {
+  const dir = capabilityDir();
+  let files: string[];
+  try {
+    files = readdirSync(dir).filter((file) => file.endsWith(".json"));
+  } catch {
+    return [];
+  }
+  const removed: string[] = [];
+  for (const file of files) {
+    const path = join(dir, file);
+    try {
+      const entry = JSON.parse(readFileSync(path, "utf8")) as Partial<CacheEntry>;
+      if (entry.serverName !== serverName) continue;
+      unlinkSync(path);
+      removed.push(path);
+    } catch {
+      // Unreadable, or gone since the listing: whose it is cannot be said, and
+      // an entry that cannot be parsed is never served anyway.
+    }
+  }
+  return removed;
 }
 
 /**
