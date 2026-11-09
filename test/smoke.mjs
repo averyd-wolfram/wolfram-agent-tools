@@ -10896,9 +10896,9 @@ heading("A commit that changes what ships carries a type that bumps the version"
   // A fork that keeps the version it replaces differs only in where it came
   // from, so that is compared too.
   overridden({ minimatch: "^11.0.1", "fast-uri": "github:someone/fast-uri#0a1b2c3" });
-  commit("chore(deps): override a production package to a fork at its version", "package-lock.json",
-    lock({ ...devLock, "node_modules/minimatch": { version: "11.0.5", dev: true },
-      "node_modules/fast-uri": { version: "3.1.0", resolved: "git+ssh://git@github.com/someone/fast-uri.git#0a1b2c3" } }));
+  const forkLock = { ...devLock, "node_modules/minimatch": { version: "11.0.5", dev: true },
+    "node_modules/fast-uri": { version: "3.1.0", resolved: "git+ssh://git@github.com/someone/fast-uri.git#0a1b2c3" } };
+  commit("chore(deps): override a production package to a fork at its version", "package-lock.json", lock(forkLock));
   const overrideShips = Object.fromEntries(commitsIn(beforeOverrides, "feature", repo).map((c) => [c.message, c.ships()]));
   check(
     "an override that moves only a dev package does not ship; one that moves a production package does, even to a fork at its version",
@@ -10906,6 +10906,20 @@ heading("A commit that changes what ships carries a type that bumps the version"
       overrideShips["chore(deps): override a production package's dependency"] === true &&
       overrideShips["chore(deps): override a production package to a fork at its version"] === true,
     JSON.stringify(overrideShips),
+  );
+  // But a tarball's integrity is what it is: the same bytes from another
+  // registry host, as npm's replace-registry-host rewrites them, ship nothing.
+  const sdkFrom = (host) => ({ version: "1.1.0", resolved: `https://${host}/sdk/-/sdk-1.1.0.tgz`, integrity: "sha512-c2FtZQ==" });
+  commit("chore(deps): pin the SDK's tarball", "package-lock.json",
+    lock({ ...forkLock, "node_modules/sdk": sdkFrom("registry.npmjs.org") }));
+  const beforeMirror = git("rev-parse", "HEAD");
+  commit("chore(deps): resolve the SDK through a mirror", "package-lock.json",
+    lock({ ...forkLock, "node_modules/sdk": sdkFrom("mirror.example.invalid") }));
+  const mirrored = commitsIn(beforeMirror, "feature", repo).map((c) => [c.message, c.ships()]);
+  check(
+    "and the same tarball from another registry host, its integrity unchanged, does not",
+    mirrored.length === 1 && mirrored[0][1] === false,
+    JSON.stringify(mirrored),
   );
 }
 
