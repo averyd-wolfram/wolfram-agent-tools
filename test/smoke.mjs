@@ -10893,11 +10893,18 @@ heading("A commit that changes what ships carries a type that bumps the version"
   overridden({ minimatch: "^11.0.1", "fast-uri": "^3.1.0" });
   commit("chore(deps): override a production package's dependency", "package-lock.json",
     lock({ ...devLock, "node_modules/minimatch": { version: "11.0.5", dev: true }, "node_modules/fast-uri": { version: "3.1.0" } }));
+  // A fork that keeps the version it replaces differs only in where it came
+  // from, so that is compared too.
+  overridden({ minimatch: "^11.0.1", "fast-uri": "github:someone/fast-uri#0a1b2c3" });
+  commit("chore(deps): override a production package to a fork at its version", "package-lock.json",
+    lock({ ...devLock, "node_modules/minimatch": { version: "11.0.5", dev: true },
+      "node_modules/fast-uri": { version: "3.1.0", resolved: "git+ssh://git@github.com/someone/fast-uri.git#0a1b2c3" } }));
   const overrideShips = Object.fromEntries(commitsIn(beforeOverrides, "feature", repo).map((c) => [c.message, c.ships()]));
   check(
-    "an override that moves only a dev package does not ship; one that moves a production package does",
+    "an override that moves only a dev package does not ship; one that moves a production package does, even to a fork at its version",
     overrideShips["chore(deps-dev): override a dev package's dependency"] === false &&
-      overrideShips["chore(deps): override a production package's dependency"] === true,
+      overrideShips["chore(deps): override a production package's dependency"] === true &&
+      overrideShips["chore(deps): override a production package to a fork at its version"] === true,
     JSON.stringify(overrideShips),
   );
 }

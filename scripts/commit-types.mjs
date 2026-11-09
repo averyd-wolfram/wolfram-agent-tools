@@ -114,12 +114,15 @@ const UNSHIPPED_FIELDS = new Set(["devDependencies", "overrides", "scripts", "ve
  * What of the package ships, as one comparable string: every package.json field
  * but the unshipped ones, and every lockfile entry a production install would
  * get — not `dev`, and not `devOptional`, an optional dependency of a dev one.
+ * Each by its source and integrity as well as its version: an override, which
+ * is judged only here, can point a package at a fork or a git revision that
+ * keeps the version it replaced.
  */
 function shippedPackage(packageJson, lockJson) {
   const fields = Object.entries(packageJson ?? {}).filter(([key]) => !UNSHIPPED_FIELDS.has(key));
   const pins = Object.entries(lockJson?.packages ?? {})
     .filter(([path, entry]) => path && !entry.dev && !entry.devOptional)
-    .map(([path, entry]) => `${path} ${entry.version}`);
+    .map(([path, entry]) => `${path} ${entry.version} ${entry.resolved ?? ""} ${entry.integrity ?? ""}`);
   return JSON.stringify([fields.sort(([a], [b]) => a.localeCompare(b)), pins.sort()]);
 }
 
