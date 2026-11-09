@@ -798,19 +798,23 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
     // A named pipe has no file to link, and nothing can replace one.
     if (process.platform === "win32") return claimDirect();
 
-    // Short, so it fits wherever an address `brokerAddress` makes does: sun_path
-    // is 104 bytes on macOS, and this is no longer than the terse
-    // `wm-<digest>.sock`. Random, and never cleared first. Named for the
-    // process and a count of its claims, it was cleared on the reasoning that
-    // any file of that name was left by a process that died with this pid.
-    // That holds inside one PID namespace only: two containers sharing this
-    // directory can each run a broker as the same pid, and clearing the name
-    // removed the other's socket between its bind and its link. A name already
-    // taken fails the bind, and the claim stands down rather than take it.
-    const staging = join(dirname(address), `.b${process.pid}-${randomBytes(4).toString("hex")}`);
-    // A library caller's address may have a shorter name than this, and fit
-    // where the staging name beside it does not. Bound, that name would be
-    // truncated or refused, leaving nothing to link; bind at the address.
+    // Random, and never cleared first. Named for the process and a count of its
+    // claims, it was cleared on the reasoning that any file of that name was
+    // left by a process that died with this pid. That holds inside one PID
+    // namespace only: two containers sharing this directory can each run a
+    // broker as the same pid, and clearing the name removed the other's socket
+    // between its bind and its link. A name already taken fails the bind, and
+    // the claim stands down rather than take it.
+    //
+    // And as short as that allows, ten bytes, so it fits wherever its address
+    // does unless the address's own name is shorter (#109). The pid, once in
+    // it too, made nothing more unique than the random part already does, but
+    // left a library caller's address of a short name near sun_path's limit,
+    // 104 bytes on macOS, binding directly where it could have been linked.
+    const staging = join(dirname(address), `.b${randomBytes(4).toString("hex")}`);
+    // A library caller's address may have a name shorter still, and fit where
+    // the staging name beside it does not. Bound, that name would be truncated
+    // or refused, leaving nothing to link; bind at the address.
     if (!fitsSocketPath(staging)) return claimDirect();
     const server = await listenAt(staging, 1);
     if (!server) return null;

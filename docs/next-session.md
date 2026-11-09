@@ -112,7 +112,7 @@ in `docs/design.md`.
   - **#73 is merged** (`5b8d60b`, fixes #32), after four `/code-review high` rounds and two
     Codex reviews, the last clean.
     - **How a broker claims its address:** it binds under a staging name,
-      `.b<pid>-<8 random hex>`, never cleared first, links it into place, and watches the
+      `.b<8 random hex>` (#109), never cleared first, links it into place, and watches the
       address. It binds at the address directly where it can't link, as for an over-long
       address.
     - **Handing over:** a broker that finds its address gone or replaced tells its sessions

@@ -8,7 +8,7 @@
  */
 import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, mkdtempSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { connect as connectSocket, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -3765,6 +3765,42 @@ if (socketsHere()) {
   );
   await fitBroker?.stop();
 
+  // As long, under a name as long as the staging name: that fits beside it, so
+  // the broker links its socket into place rather than binding at the address,
+  // and keeps #32's guarantees there. With the pid in the staging name, it did
+  // not fit, and the broker bound directly (#109).
+  const linkName = "link0.sock";
+  const linkDir = privateDir(
+    join(home, "l".repeat(Math.max(1, limit - 3 - Buffer.byteLength(home) - linkName.length))),
+  );
+  const linked = join(linkDir, linkName);
+  const bound = [];
+  const linkBroker = await lib.startBroker({
+    address: linked,
+    bin: fakeKernel,
+    serverName: "WolframLanguage",
+    idleMs: 60_000,
+    startTimeoutMs: 10_000,
+    reserveSeats: 0,
+    allowInspect: false,
+    clientInfo: { name: "smoke", version: "1.0.0" },
+    log: () => {},
+    onBound: (path) => bound.push(path),
+  });
+  check(
+    `at ${limit - 1} bytes, a name as long as the staging name's is linked into place, not bound directly`,
+    Buffer.byteLength(linked) === limit - 1 &&
+      linkBroker !== null &&
+      bound.length === 1 &&
+      bound[0] !== linked &&
+      dirname(bound[0]) === linkDir &&
+      existsSync(linked) &&
+      statSync(linked).isSocket(),
+    `${Buffer.byteLength(linked)} bytes, ${linkBroker ? "listening" : "no broker"}; bound at ` +
+      (bound.map((p) => (p === linked ? "the address" : p.slice(linkDir.length + 1))).join(", ") || "nothing"),
+  );
+  await linkBroker?.stop();
+
   // Deep enough that a truncation falls inside the directory's own name, where
   // the socket would land in `home` instead.
   const deepDir = privateDir(join(home, "t".repeat(Math.max(1, 120 - home.length))));
@@ -4031,8 +4067,8 @@ if (socketsHere()) {
 // died with this pid. That holds inside one PID namespace only: two containers
 // sharing a runtime or cache directory can each run a broker as the same pid,
 // and the one that cleared the name removed the other's socket between that
-// one's bind and its link. This process plays the other: a live socket under
-// every name a broker here could have picked.
+// one's bind and its link. The name is random now, so this process plays the
+// other by holding a live socket under the very name the broker draws.
 heading("A broker's staging name never takes another process's socket");
 if (socketsHere()) {
   const dir = privateDir(join(home, "run-same-pid"));
@@ -4044,36 +4080,58 @@ if (socketsHere()) {
       return null;
     }
   };
-  const others = [];
-  for (let k = 0; k < 64; k++) {
-    const path = join(dir, `.b${process.pid}-${k}`);
-    const server = createServer((c) => c.end());
-    await new Promise((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(path, resolve);
-    });
-    others.push({ path, server, ino: ino(path) });
-  }
-  const logs = [];
-  const broker = await lib.startBroker({
-    address,
-    bin: fakeKernel,
-    serverName: "WolframLanguage",
-    idleMs: 60_000,
-    startTimeoutMs: 10_000,
-    reserveSeats: 0,
-    allowInspect: false,
-    clientInfo: { name: "smoke", version: "1.0.0" },
-    log: (message) => logs.push(message),
+  const drawn = Buffer.from("0a1b2c3d", "hex");
+  const otherPath = join(dir, `.b${drawn.toString("hex")}`);
+  const other = createServer((c) => c.end());
+  await new Promise((resolve, reject) => {
+    other.once("error", reject);
+    other.listen(otherPath, resolve);
   });
-  const taken = others.filter((o) => ino(o.path) !== o.ino).map((o) => o.path.slice(dir.length + 1));
+  const otherIno = ino(otherPath);
+  const startHere = (logs) =>
+    lib.startBroker({
+      address,
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 10_000,
+      reserveSeats: 0,
+      allowInspect: false,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: (message) => logs.push(message),
+    });
+  // The broker's own import of randomBytes sees this only once the builtin's
+  // exports are synced, and the real one is back before anything else runs.
+  const nodeCrypto = process.getBuiltinModule("node:crypto");
+  const realRandomBytes = nodeCrypto.randomBytes;
+  nodeCrypto.randomBytes = (size, ...rest) =>
+    size === drawn.length && rest.length === 0 ? Buffer.from(drawn) : realRandomBytes(size, ...rest);
+  syncBuiltinESMExports();
+  const collidedLogs = [];
+  let collided;
+  try {
+    collided = await startHere(collidedLogs);
+  } finally {
+    nodeCrypto.randomBytes = realRandomBytes;
+    syncBuiltinESMExports();
+  }
   check(
-    "it takes its address, and every other process's socket is where it was",
-    broker !== null && taken.length === 0,
-    `${broker ? "listening" : "stood down"}; ${taken.length} of ${others.length} taken${taken.length ? `: ${taken.join(", ")}` : ""}`,
+    "drawing a name another process holds, it stands down, and that socket is where it was",
+    collided === null && ino(otherPath) === otherIno && !existsSync(address),
+    `${collided ? "listening" : "stood down"}; the other's socket ${ino(otherPath) === otherIno ? "untouched" : "taken"}; ` +
+      collidedLogs.filter((l) => /bind|link/.test(l)).join(" | ").slice(0, 200),
+  );
+  await collided?.stop();
+
+  const logs = [];
+  const broker = await startHere(logs);
+  check(
+    "drawing another, it takes its address, and the other's socket is still where it was",
+    broker !== null && ino(otherPath) === otherIno,
+    `${broker ? "listening" : "stood down"}; the other's socket ${ino(otherPath) === otherIno ? "untouched" : "taken"}`,
   );
   await broker?.stop();
-  for (const o of others) await new Promise((resolve) => o.server.close(() => resolve()));
+  await new Promise((resolve) => other.close(() => resolve()));
 }
 
 // ---------------------------------------------------------------------------
