@@ -37,7 +37,14 @@ import { FilteringStdioTransport } from "./transport.js";
 import { applyFlavour, type KernelFlavour } from "./flavour.js";
 import { FACTS_EXPRESSION, isFactsLine, parseFacts, type KernelFacts } from "./inspect.js";
 import { budgetText, elapsedText } from "./duration.js";
-import { serverSource, sourceDirs, type SourceDirs } from "./server-source.js";
+import {
+  readSource,
+  serverSource,
+  sourceChanged,
+  sourceDirs,
+  type SourceDirs,
+  type SourceRead,
+} from "./server-source.js";
 import { errorText, type Logger } from "./log.js";
 
 /**
@@ -693,7 +700,7 @@ export class KernelSession {
   /** Where `source` was read, for `sourceChanged` to read again. */
   #sourceOf: { serverName: string; dirs: SourceDirs } | undefined;
   /** What the latest start, whether or not it succeeded, began from. */
-  #attempt: { serverName: string; dirs: SourceDirs; source: string } | undefined;
+  #attempt: SourceRead[] | undefined;
   /** Calls handed to `run`, numbered as they queue. */
   #queued = 0;
   /** Calls handed to `run` and not yet settled: what arms an idle shutdown. */
@@ -736,14 +743,20 @@ export class KernelSession {
    * kernel that started before them look replaced.
    */
   /**
+   * What the latest start, whether or not it succeeded, began from, and where:
+   * read before it, and where the kernel then said its directories are.
+   */
+  get attempt(): readonly SourceRead[] {
+    return this.#attempt ?? [];
+  }
+
+  /**
    * Whether what the latest start began from has changed on disk since, read
    * again where it was read: a pool lifts the refusal window a failed start
    * opened once it has, since the paclet that failed it may now be fixed.
    */
   attemptChanged(): boolean {
-    const attempt = this.#attempt;
-    if (!attempt) return false;
-    return serverSource(attempt.serverName, attempt.dirs).digest !== attempt.source;
+    return (this.#attempt ?? []).some(sourceChanged);
   }
 
   sourceChanged(): boolean {
@@ -788,7 +801,7 @@ export class KernelSession {
     // describe a kernel started later (#3). Read again once it is up, below.
     const guessed = sourceDirs(env, this.#options.extraEnv ?? {});
     const before = serverSource(serverName, guessed).digest;
-    this.#attempt = { serverName, dirs: guessed, source: before };
+    this.#attempt = [{ serverName, dirs: guessed, digest: before }];
     // Where the kernel says its directories are, as it reports its facts.
     let reported: SourceDirs | undefined;
 
@@ -804,6 +817,11 @@ export class KernelSession {
           if (facts) {
             if (this.#options.sourceFromFacts !== false && facts.userBase && facts.base) {
               reported = { userBase: facts.userBase, base: facts.base };
+              // Read there too, now, so a later change there counts while
+              // learning where they are does not (`attemptChanged`).
+              if (reported.userBase !== guessed.userBase || reported.base !== guessed.base) {
+                this.#attempt?.push(readSource(serverName, reported));
+              }
             }
             this.#options.onFacts?.(facts, chosenShaping(flavour));
           } else log("kernel reported facts that could not be read");

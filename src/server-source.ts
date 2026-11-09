@@ -194,6 +194,28 @@ export function servingDigest(flavourDigest: string, source: ServerSource): stri
     .slice(0, 16);
 }
 
+/** A source as it was read: where, and what was found, so it can be read again there. */
+export interface SourceRead {
+  serverName: string;
+  dirs: SourceDirs;
+  digest: string;
+}
+
+export function readSource(serverName: string, dirs: SourceDirs): SourceRead {
+  return { serverName, dirs, digest: serverSource(serverName, dirs).digest };
+}
+
+/**
+ * Whether the disk says otherwise now, read where it was read: a paclet
+ * installed, removed or repaired. Like with like, so learning the
+ * installation's real directories since — a cold machine's first kernel
+ * reports them as it starts — is not a change, which compared with a read
+ * from the new directories it always was.
+ */
+export function sourceChanged(read: SourceRead): boolean {
+  return serverSource(read.serverName, read.dirs).digest !== read.digest;
+}
+
 /**
  * What a session's kernels would be served from, as its cache key reads it:
  * the session's own environment over the installation's reported facts, as a
@@ -206,4 +228,14 @@ export function sessionSource(
   inspect: boolean,
 ): ServerSource {
   return serverSource(serverName, sourceDirs(flavour.env, installationEnv(bin, inspect)));
+}
+
+/** `sessionSource`, as a read that can be taken again where it was taken. */
+export function sessionSourceRead(
+  serverName: string,
+  flavour: KernelFlavour,
+  bin: string,
+  inspect: boolean,
+): SourceRead {
+  return readSource(serverName, sourceDirs(flavour.env, installationEnv(bin, inspect)));
 }

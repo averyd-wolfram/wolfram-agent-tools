@@ -2079,6 +2079,65 @@ heading("A failed start's back-off ends once the paclets change (#3, #6)");
     `then: ${text(own.refused).slice(0, 70)}; after the install: ${text(own.repaired).slice(0, 70)}`,
   );
 
+  // The install lands while the failing start is still running: the failure
+  // is that start's, so it belongs to what the start began from, not to the
+  // paclet on disk by the time it is recorded, which never failed.
+  {
+    wipeCache();
+    const bench = pacletBench("backoff-during");
+    bench.install("Demo-1.0.0", "Demo");
+    writeFileSync(bench.env.FAKE_TOOLS_FILE, "not a list of tools");
+    const s = await connect({ ...bench.env, FAKE_INIT_DELAY_MS: "1500" });
+    const before = startCount();
+    const failing = evaluate(s.client);
+    await until(() => startCount() > before, 5_000);
+    bench.uninstall("Demo-1.0.0");
+    bench.install("Demo-1.0.1", "Demo");
+    const failed = await failing;
+    bench.declare("DemoFixed");
+    const next = await evaluate(s.client);
+    check(
+      "and a paclet repaired while a start was failing is not held to that start's failure",
+      failed.isError && !next.isError,
+      `first: ${text(failed).slice(0, 60)}; next: ${text(next).slice(0, 70)}`,
+    );
+    await s.client.close();
+  }
+
+  // A cold machine's first kernel reports where its directories really are —
+  // a Wolfram Engine's are not the defaults — and then fails. Read from there,
+  // what is installed differs from the defaults' empty read: learning that is
+  // not a repair, and must not end the back-off, or every call starts another
+  // kernel to fail the same way.
+  {
+    wipeCache();
+    const engine = join(home, "engine-backoff");
+    const bench = pacletBench("backoff-learned", { userBase: join(engine, "userbase") });
+    bench.install("Demo-1.0.0", "Demo");
+    writeFileSync(bench.env.FAKE_TOOLS_FILE, "not a list of tools");
+    const s = await connect({ FAKE_TOOLS_FILE: bench.env.FAKE_TOOLS_FILE, FAKE_BASE: engine, WOLFRAM_MCP_INSPECT: "1" });
+    const failed = await evaluate(s.client);
+    const before = startCount();
+    const next = await evaluate(s.client);
+    check(
+      "a first start that fails after reporting its real directories is still backed off",
+      failed.isError && next.isError && /the last attempt to prepare/.test(text(next)) && startCount() === before,
+      `${startCount() - before} start(s); next: ${text(next).slice(0, 80)}`,
+    );
+    // But a repair there is one.
+    bench.uninstall("Demo-1.0.0");
+    bench.install("Demo-1.0.1", "Demo");
+    bench.declare("DemoFixed");
+    const repaired = await evaluate(s.client);
+    check(
+      "and a repair in those directories ends that back-off",
+      !repaired.isError,
+      text(repaired).slice(0, 80),
+    );
+    await s.client.close();
+    wipeCache();
+  }
+
   if (socketsHere("a pool's refusal window across an install")) {
     const runtime = privateDir(join(home, "run-source-backoff"));
     const shared = await attempt("shared", {

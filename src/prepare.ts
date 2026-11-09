@@ -318,12 +318,6 @@ export interface CandidateIdentity {
   bin: string;
   mtimeMs: number;
   size: number;
-  /**
-   * What the server is served from (`serverSource`), where the owner reads it:
-   * installing or repairing a paclet ends a back-off its absence or breakage
-   * began, as a changed binary does. Without it, a fix waited out the window.
-   */
-  source?: string;
 }
 
 export function candidateIdentity(bin: string): CandidateIdentity | null {
@@ -342,7 +336,7 @@ function sameCandidate(a: CandidateIdentity | null, b: CandidateIdentity | null)
   // retiring another session's idle kernel each time to make room. A binary
   // that reads again is a change, and ends it.
   if (a === null || b === null) return a === b;
-  return a.bin === b.bin && a.mtimeMs === b.mtimeMs && a.size === b.size && a.source === b.source;
+  return a.bin === b.bin && a.mtimeMs === b.mtimeMs && a.size === b.size;
 }
 
 /** The state `wolfram_status` reports. */
