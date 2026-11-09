@@ -197,8 +197,11 @@ export function clearServerCache(serverName: string): string[] {
   let files: string[];
   try {
     files = readdirSync(dir).filter((file) => file.endsWith(".json"));
-  } catch {
-    return [];
+  } catch (err) {
+    // No directory is nothing cached. One that cannot be listed may still be
+    // read at a known path, so its entries would go on being served.
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw err;
   }
   const removed: string[] = [];
   for (const file of files) {

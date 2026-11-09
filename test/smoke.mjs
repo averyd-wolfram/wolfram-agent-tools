@@ -10929,6 +10929,15 @@ heading("CLI");
       refused.status === 1 && existsSync(locked) && refused.stderr.includes(locked),
       `exit ${refused.status}: ${(refused.stderr || refused.stdout).trim().slice(0, 120)}`,
     );
+    // Searchable but not listable: its entries are still read at their paths.
+    chmodSync(lib.capabilityDir(), 0o100);
+    const unlisted = run(["clear-cache", "--server", "Locked"]);
+    chmodSync(lib.capabilityDir(), mode);
+    check(
+      "and so is a cache directory that cannot be listed",
+      unlisted.status === 1 && existsSync(locked),
+      `exit ${unlisted.status}: ${(unlisted.stderr || unlisted.stdout).trim().slice(0, 120)}`,
+    );
   }
 
   const cleared = run(["clear-cache"]);
