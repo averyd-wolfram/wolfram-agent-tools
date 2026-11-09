@@ -91,6 +91,7 @@ const check = (label, ok, detail = "") => {
   if (!ok) failures++;
   console.log(`  ${ok ? "PASS" : "FAIL"}  ${label}${detail ? `  — ${detail}` : ""}`);
 };
+check("annotation probe, to be closed unmerged", false, "100% of this detail, said twice");
 
 // The cache key every default session here writes under: the fake kernel has no
 // version, and connect() names WolframLanguage. There is a file per key now, so
