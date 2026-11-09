@@ -145,6 +145,15 @@ any editor's LSP client. Because the broker socket derives from the installation
 the client, sessions from *different* clients on one machine share one kernel — the licence
 seat economy holds across VS Code and Claude Code at once, not just within either.
 
+Each release carries the bundle as `wolfram-mcp-server.mjs`, with `SHA256SUMS.txt` over its
+files. Releases after 0.1.12 also carry a signed build-provenance attestation for each file,
+so you can check where one came from as well as that it arrived intact:
+`gh attestation verify wolfram-mcp-server.mjs --repo averyd-wolfram/wolfram-agent-tools`
+shows it was built by this repository's release workflow, from the commit it names.
+Pre-releases carry none, and nor does a release finished by a later run than the one its merge
+started, since the commit an attestation would name is not the one either was built from
+(`docs/releasing.md`).
+
 ## Why a proxy rather than a launcher
 
 The Wolfram MCP server is already a subprocess speaking newline-delimited JSON-RPC over

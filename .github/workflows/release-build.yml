@@ -17,7 +17,8 @@ name: Release build
 # The build is named before anything else runs, so a ref that names no release
 # fails at once. Then CI runs in full on the exact commit, the Node floor and
 # validate-plugin included. Then a job with no write token builds the files,
-# and only a fresh one, which runs no repository code, publishes them (#84).
+# and only a fresh one, which runs no repository code, publishes them (#84),
+# once another has attested their provenance (#47).
 #
 # Run by hand (workflow_dispatch on a tag, or a tag pushed by a person), it
 # builds that tag. A release that is already published is never rebuilt: its
@@ -172,11 +173,51 @@ jobs:
           path: ${{ runner.temp }}/publish/
           if-no-files-found: error
 
+  # A signed build-provenance attestation for each file publish hands out
+  # (#47), so `gh attestation verify <file> --repo <this repository>` shows it
+  # was built by this workflow from this commit; the checksums prove only that
+  # a download matches the release. On a fresh runner, like publish, and its
+  # own job: build holds no token that can write, and the action here gets
+  # only what signing and storing an attestation take, never publish's
+  # contents: write. Before publish, so no release is seen without them.
+  #
+  # The commit an attestation names is the one this run started from, read
+  # from the run's OIDC token, which nothing in the run can change. That is
+  # the commit built only for a release built in the run its merge started,
+  # or a build dispatched or pushed on its tag. A pre-release is built from
+  # release-please's branch, a commit past the one main's push started the
+  # run from, and a release finished by a later run from an older one: those
+  # are left unattested, and say so, rather than attributed to a commit they
+  # were not built from.
+  attest:
+    needs: [name, build]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      attestations: write
+    steps:
+      - if: needs.name.outputs.sha == github.sha
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: publish-${{ needs.name.outputs.tag }}
+          path: release
+      - if: needs.name.outputs.sha == github.sha
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: release/*
+      - if: needs.name.outputs.sha != github.sha
+        env:
+          TAG: ${{ needs.name.outputs.tag }}
+          BUILT: ${{ needs.name.outputs.sha }}
+          STARTED: ${{ github.sha }}
+        run: |
+          echo "::notice title=Not attested::$TAG was built from $BUILT, and this run started from $STARTED, the commit an attestation would name; publishing it unattested"
+
   # The one job that can write, on a fresh runner: no checkout, no npm, no
   # repository code — a pinned download of the files build made, then gh and
   # git ls-remote.
   publish:
-    needs: [name, build]
+    needs: [name, build, attest]
     runs-on: ubuntu-latest
     permissions:
       contents: write
