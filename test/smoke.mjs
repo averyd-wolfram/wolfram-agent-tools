@@ -10609,6 +10609,41 @@ heading("CI runs the tests for anything but prose");
 }
 
 // ---------------------------------------------------------------------------
+// In CI a problem matcher makes each failing check's line an annotation on the
+// PR's checks and in the run summary (#88). It matches the line the suites print,
+// so one that came to print its failures some other way would fail unannotated.
+heading("CI annotates each failing check");
+{
+  const matcher = JSON.parse(readFileSync(join(root, ".github", "fail-matcher.json"), "utf8"));
+  const [pattern] = matcher.problemMatcher[0].pattern;
+  const re = new RegExp(pattern.regexp);
+  const line = (ok, label, detail) => `  ${ok ? "PASS" : "FAIL"}  ${label}${detail ? `  — ${detail}` : ""}`;
+  const failed = re.exec(line(false, "a check", "what it saw"));
+  check(
+    "a failing check's line is an annotation of the check and its detail, and a passing one's is none",
+    failed?.[pattern.message] === "a check  — what it saw" && !re.test(line(true, "a check", "what it saw")),
+    failed ? failed[pattern.message] : "no match",
+  );
+  const suites = [
+    ...JSON.parse(readFileSync(join(root, "package.json"), "utf8")).scripts.test.matchAll(/node (test\/[\w-]+\.mjs)/g),
+  ].map((m) => m[1]);
+  const printer = '"FAIL"}  ${label}${detail ? `  — ${detail}` : ""}`';
+  const other = suites.filter((file) => !readFileSync(join(root, file), "utf8").includes(printer));
+  check(
+    "every suite npm test runs prints a failure as that line",
+    suites.length >= 5 && other.length === 0,
+    other.length ? `not: ${other.join(", ")}` : suites.join(", "),
+  );
+  const ci = readFileSync(join(root, ".github", "workflows", "ci.yml"), "utf8");
+  const added = ci.indexOf("::add-matcher::.github/fail-matcher.json");
+  check(
+    "and CI registers the matcher before it runs them",
+    added !== -1 && added < ci.indexOf("- run: npm test"),
+    added === -1 ? "not registered" : `registered at offset ${added}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // A release is built from release-please's release branch, as a numbered
 // pre-release of the version it computed, or from a v<version> tag. Claude Code
 // updates an installed plugin when its manifest's version string changes, so
