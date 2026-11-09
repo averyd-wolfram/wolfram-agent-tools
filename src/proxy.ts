@@ -533,6 +533,9 @@ export function createWolframServer(
   // it began while they are the cache's, then each reload's kernel's. `follow`
   // re-reads them when a kernel answers from another (#3).
   let seen: string | undefined = usableCache ? key.source : undefined;
+  // What the prompts above came from, which a failed read leaves behind the
+  // tools' (`reload`).
+  let promptsFrom: string | undefined = usableCache ? key.source : undefined;
 
   /**
    * Re-read the upstream lists from a live kernel and persist them.
@@ -567,6 +570,7 @@ export function createWolframServer(
     }
 
     let prompts = promptCache ?? [];
+    let listedFrom = caps.prompts ? promptsFrom : source;
     if (caps.prompts) {
       try {
         const listed = await drainPrompts(ops);
@@ -580,6 +584,7 @@ export function createWolframServer(
           return;
         }
         prompts = listed.prompts;
+        listedFrom = listed.source;
         promptsSeen = true;
       } catch (err) {
         log(`upstream prompts/list failed, keeping the cached list: ${errorText(err)}`);
@@ -595,6 +600,7 @@ export function createWolframServer(
     const promptsChanged = JSON.stringify(prompts) !== JSON.stringify(promptCache);
     toolCache = tools;
     promptCache = prompts;
+    promptsFrom = listedFrom;
     toolCachedAt = Date.now();
     seen = source ?? seen;
 
@@ -602,11 +608,15 @@ export function createWolframServer(
     // session read as it began, a list from a kernel started after an upgrade
     // sat under the old source, and undoing the install served it again (#6).
     if (config.cacheEnabled && source !== undefined) {
+      // Prompts kept after a failed read are another source's when an upgrade
+      // came between: kept in memory, but cached as unknown here, with none,
+      // and so not offered from the cache — rather than as this source's.
+      const known = listedFrom === source;
       const observed: UpstreamCapabilities = {
-        prompts: Boolean(caps.prompts) && promptsSeen,
+        prompts: Boolean(caps.prompts) && promptsSeen && known,
         resources: Boolean(caps.resources),
       };
-      writeCache({ ...key, source, upstream: observed, tools, prompts });
+      writeCache({ ...key, source, upstream: observed, tools, prompts: known ? prompts : [] });
     }
 
     if (toolsChanged) {

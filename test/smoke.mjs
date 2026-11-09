@@ -1664,6 +1664,43 @@ heading("A paclet upgrade is a new cache entry, read off the disk without a kern
 }
 
 // ---------------------------------------------------------------------------
+heading("Prompts kept after a failed read are not cached under another source (#6)");
+{
+  // A session starts from the cache of one source; its kernel starts after an
+  // upgrade, and its prompts/list fails. The prompts it keeps are the old
+  // source's, so they may stay in memory but not go into the new source's entry.
+  wipeCache();
+  const bench = pacletBench("prompts-source");
+  bench.install("Demo-1.0.0", "Demo");
+  bench.declare("DemoOne");
+  await warmCache({
+    ...bench.env,
+    FAKE_EXTRA_PROMPTS: JSON.stringify([{ name: "OldPrompt", description: "the old source's" }]),
+  });
+  const warmed = lib.readCache(bench.key())?.prompts?.some((prompt) => prompt.name === "OldPrompt");
+  const s = await connect({ ...bench.env, FAKE_MODE: "fail-prompts-once" });
+  bench.uninstall("Demo-1.0.0");
+  bench.install("Demo-1.1.0", "Demo");
+  bench.declare("DemoTwo");
+  // Its kernel is the first process again, so its prompts/list fails.
+  rmSync(join(home, "fake-state"), { force: true });
+  await s.client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, { timeout: 30_000 });
+  const entry = await until(() => lib.readCache(bench.key()), 5_000);
+  check(
+    "a failed prompt read after an upgrade caches no prompts of the old source under the new",
+    warmed &&
+      entry?.tools?.some((tool) => tool.name === "DemoTwo") &&
+      !entry.prompts.some((prompt) => prompt.name === "OldPrompt") &&
+      entry.upstream.prompts === false,
+    entry
+      ? `tools: ${entry.tools.map((t) => t.name).join(", ")}; prompts: ${entry.prompts.map((p) => p.name).join(", ") || "none"}; offered: ${entry.upstream.prompts}`
+      : "nothing cached under the new source",
+  );
+  await s.client.close();
+  wipeCache();
+}
+
+// ---------------------------------------------------------------------------
 heading("Regression — a startup failure must report what the kernel said");
 {
   wipeCache();
