@@ -146,10 +146,12 @@ the client, sessions from *different* clients on one machine share one kernel â€
 seat economy holds across VS Code and Claude Code at once, not just within either.
 
 Each release carries the bundle as `wolfram-mcp-server.mjs`, with `SHA256SUMS.txt` over its
-files. Releases after 0.1.12, pre-releases included, also carry a signed build-provenance
-attestation for each file, so you can check where one came from as well as that it arrived
-intact: `gh attestation verify wolfram-mcp-server.mjs --repo averyd-wolfram/wolfram-agent-tools`
+files. Releases after 0.1.12 also carry a signed build-provenance attestation for each file,
+so you can check where one came from as well as that it arrived intact:
+`gh attestation verify wolfram-mcp-server.mjs --repo averyd-wolfram/wolfram-agent-tools`
 shows it was built by this repository's release workflow, from the commit it names.
+Pre-releases carry none, since the commit an attestation would name is not the one they are
+built from (`docs/releasing.md`).
 
 ## Why a proxy rather than a launcher
 

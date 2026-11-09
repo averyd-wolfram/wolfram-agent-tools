@@ -180,6 +180,15 @@ jobs:
   # own job: build holds no token that can write, and the action here gets
   # only what signing and storing an attestation take, never publish's
   # contents: write. Before publish, so no release is seen without them.
+  #
+  # The commit an attestation names is the one this run started from, read
+  # from the run's OIDC token, which nothing in the run can change. That is
+  # the commit built only for a release built in the run its merge started,
+  # or a build dispatched or pushed on its tag. A pre-release is built from
+  # release-please's branch, a commit past the one main's push started the
+  # run from, and a release finished by a later run from an older one: those
+  # are left unattested, and say so, rather than attributed to a commit they
+  # were not built from.
   attest:
     needs: [name, build]
     runs-on: ubuntu-latest
@@ -187,13 +196,22 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - if: needs.name.outputs.sha == github.sha
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: publish-${{ needs.name.outputs.tag }}
           path: release
-      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+      - if: needs.name.outputs.sha == github.sha
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: release/*
+      - if: needs.name.outputs.sha != github.sha
+        env:
+          TAG: ${{ needs.name.outputs.tag }}
+          BUILT: ${{ needs.name.outputs.sha }}
+          STARTED: ${{ github.sha }}
+        run: |
+          echo "::notice title=Not attested::$TAG was built from $BUILT, and this run started from $STARTED, the commit an attestation would name; publishing it unattested"
 
   # The one job that can write, on a fresh runner: no checkout, no npm, no
   # repository code — a pinned download of the files build made, then gh and

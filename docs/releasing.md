@@ -45,9 +45,14 @@ A user never builds from source. They pick one of:
    config at (`node /path/to/wolfram-mcp-server.mjs`).
 
 `SHA256SUMS.txt` covers both, so the `archive` source can pin its download and a user can
-verify one. Each of the three files also carries a signed build-provenance attestation (#47),
-which says what the checksums cannot: that `release-build.yml` built it, from which commit.
-`gh attestation verify <file> --repo averyd-wolfram/wolfram-agent-tools` checks one.
+verify one. Each of a release's three files also carries a signed build-provenance attestation
+(#47), which says what the checksums cannot: that `release-build.yml` built it, from which
+commit. `gh attestation verify <file> --repo averyd-wolfram/wolfram-agent-tools` checks one.
+The commit it names comes from the run's OIDC token, the commit the run started from, so only a
+build of that very commit is attested: a release built in the run its merge started, or one
+dispatched or pushed on its tag. A pre-release is built from release-please's branch, a commit
+past the one that started its run, and a release finished by a later run from an older one;
+both are published unattested, with a notice on the run saying why.
 
 ## What runs, and where
 
@@ -170,9 +175,9 @@ holds no token that can write. `npm ci` runs every dependency's install scripts,
 validator is fetched from outside the lockfile. On one runner, any of them could rewrite a
 script or put a command on `$GITHUB_PATH` for a later step, so a write token anywhere in that
 job would be theirs too (#84). The files go on as an artifact to `attest`, a fresh job with
-no checkout that signs a build-provenance attestation for each (#47), holding only `id-token`
-and `attestations` write, and so do the two `release-please.yml` jobs that call this, since a
-called workflow's jobs get no more than its caller grants. Then to `publish`, another fresh job
+no checkout that signs a release's files' build provenance (#47), holding only `id-token` and
+`attestations` write, as do the two `release-please.yml` jobs that call this, since a called
+workflow's jobs get no more than its caller grants. Then to `publish`, another fresh job
 with no checkout that runs no repository code: one action, `download-artifact` pinned to a
 commit, then `gh` and `git ls-remote`. It is the one job that can write the repository, and it
 publishes:
@@ -440,8 +445,8 @@ those is on the real repo:
 - **The release PR** exercises all of it: merge a `fix:` or `feat:` into `main`;
   release-please opens or updates its PR, the PR's branch builds the next pre-release, and
   merging the PR makes the draft, the tag, and the published release. Check a build with
-  `gh release download <tag> -D <dir>` and `shasum -a 256 -c SHA256SUMS.txt`, then
-  `gh attestation verify <file> --repo averyd-wolfram/wolfram-agent-tools` for each file.
+  `gh release download <tag> -D <dir>` and `shasum -a 256 -c SHA256SUMS.txt`, then, for a
+  release, `gh attestation verify <file> --repo averyd-wolfram/wolfram-agent-tools` for each file.
 - **`actionlint`** (`brew install actionlint`) statically checks the workflow syntax and the
   `${{ }}` expressions without running anything, and **zizmor** (`brew install zizmor`, or
   `uvx zizmor@<version>` for CI's exact one) checks them for security, as CI's `workflows`
