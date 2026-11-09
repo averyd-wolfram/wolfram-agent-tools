@@ -150,8 +150,9 @@ files. Releases after 0.1.12 also carry a signed build-provenance attestation fo
 so you can check where one came from as well as that it arrived intact:
 `gh attestation verify wolfram-mcp-server.mjs --repo averyd-wolfram/wolfram-agent-tools`
 shows it was built by this repository's release workflow, from the commit it names.
-Pre-releases carry none, since the commit an attestation would name is not the one they are
-built from (`docs/releasing.md`).
+Pre-releases carry none, and nor does a release finished by a later run than the one its merge
+started, since the commit an attestation would name is not the one either was built from
+(`docs/releasing.md`).
 
 ## Why a proxy rather than a launcher
 
