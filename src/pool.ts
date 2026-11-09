@@ -517,14 +517,16 @@ export class KernelPool {
         return this.#grow(flavour);
       case "swap": {
         // A victim of this very environment is one only because what its server
-        // is served from changed since it started — an installed paclet, or the
-        // user's own server file (`#mine`). Logged as another environment's, the
-        // broker said it retired a kernel of X to make room for X.
+        // is served from changed — an installed paclet, or the user's own server
+        // file — since it started, or while it did, when which it loaded is
+        // unknown (`#mine`). So the log names the change, not its order. Logged
+        // as another environment's, the broker said it retired a kernel of X to
+        // make room for X.
         const stale = plan.victim.flavour.digest === flavour.digest;
         this.#options.log(
           stale
-            ? `budget reached; retiring an idle kernel for environment ${flavour.digest}, ` +
-                `started before its server's paclets or definition changed, to make room`
+            ? `budget reached; retiring an idle kernel for environment ${flavour.digest} ` +
+                `whose server's paclets or definition changed, to make room`
             : `budget reached and no kernel for environment ${flavour.digest}; retiring an idle ` +
                 `kernel for ${plan.victim.flavour.digest} to make room`,
         );
@@ -535,7 +537,7 @@ export class KernelPool {
         this.#retire(
           plan.victim,
           stale
-            ? "the paclets or server definition it started from changed"
+            ? "its server's paclets or definition changed"
             : "a session with a different environment needed the seat",
           false,
         );
