@@ -10928,6 +10928,84 @@ heading("CLI");
     agentTools: "2.2.7",
   }, [], () => {});
   check("facts are cached before clearing", lib.readFacts(fakeKernel) !== null);
+
+  // clear-cache --server forgets one server's lists, across kernels, and leaves
+  // every other server's and the facts (#103). Without it a downstream installer
+  // parsed these files for serverName, or cleared everyone's.
+  const entryFor = (serverName, kernelPath = fakeKernel) => {
+    const key = lib.cacheKey(kernelPath, null, serverName, "flavour", "source");
+    lib.writeCache({ ...key, upstream: { prompts: false, resources: false }, tools: [], prompts: [] });
+    return lib.capabilityFile(key);
+  };
+  const demo = [entryFor("Demo/Server"), entryFor("Demo/Server", "/other/kernel")];
+  const ours = entryFor("WolframLanguage");
+  const one = run(["clear-cache", "--server", "Demo/Server"]);
+  check(
+    "clear-cache --server removes that server's entries for every kernel, and says which",
+    one.status === 0 && demo.every((f) => !existsSync(f)) && demo.every((f) => one.stdout.includes(f)),
+    one.stdout.trim() || one.stderr.trim(),
+  );
+  check(
+    "and leaves other servers' entries and the facts",
+    existsSync(ours) && lib.readFacts(fakeKernel) !== null,
+    `${existsSync(ours) ? "" : "WolframLanguage's entry gone; "}${lib.readFacts(fakeKernel) ? "" : "facts gone"}`,
+  );
+  const kept = entryFor("Kept");
+  const insensitive = run(["clear-cache", "--server=wolframlanguage"]);
+  check(
+    "a name is resolved as a session resolves it, so a built-in's any-case spelling finds its entries",
+    insensitive.status === 0 && !existsSync(ours) && existsSync(kept),
+    insensitive.stdout.trim(),
+  );
+  const none = run(["clear-cache", "--server", "Nobody"]);
+  check("a server with nothing cached is not an error", none.status === 0 && /no cached tool list for Nobody/.test(none.stdout), none.stdout.trim());
+  const misuse = [["--server"], ["--sever", "Kept"], ["--server", "Kept", "extra"], ["--server="]].map((args) =>
+    run(["clear-cache", ...args]).status);
+  check(
+    "a malformed option is refused, and clears nothing",
+    misuse.every((status) => status === 2) && existsSync(kept) && lib.readFacts(fakeKernel) !== null,
+    `exit statuses ${misuse.join(", ")}`,
+  );
+  // An entry that could not be removed was reported as nothing to remove, with
+  // success, and went on being served. Root removes it regardless.
+  if (process.getuid?.() !== 0) {
+    const locked = entryFor("Locked");
+    const mode = statSync(lib.capabilityDir()).mode & 0o777;
+    chmodSync(lib.capabilityDir(), 0o500);
+    const refused = run(["clear-cache", "--server", "Locked"]);
+    chmodSync(lib.capabilityDir(), mode);
+    check(
+      "an entry that cannot be removed is a failure that names it, not nothing to remove",
+      refused.status === 1 && existsSync(locked) && refused.stderr.includes(locked),
+      `exit ${refused.status}: ${(refused.stderr || refused.stdout).trim().slice(0, 120)}`,
+    );
+    // Searchable but not listable: its entries are still read at their paths.
+    chmodSync(lib.capabilityDir(), 0o100);
+    const unlisted = run(["clear-cache", "--server", "Locked"]);
+    chmodSync(lib.capabilityDir(), mode);
+    check(
+      "and so is a cache directory that cannot be listed",
+      unlisted.status === 1 && existsSync(locked),
+      `exit ${unlisted.status}: ${(unlisted.stderr || unlisted.stdout).trim().slice(0, 120)}`,
+    );
+    // Unreadable now, readable later: then served, after a clear that passed.
+    // The rest are still tried, and what was removed still said: stopping at
+    // the first failure left an entry removed and unreported.
+    const other = entryFor("Other");
+    chmodSync(other, 0o000);
+    const unread = run(["clear-cache", "--server", "Locked"]);
+    chmodSync(other, 0o600);
+    check(
+      "and so is an entry that cannot be read, whoever's it is, while the rest are cleared and said",
+      unread.status === 1 &&
+        existsSync(other) &&
+        unread.stderr.includes(other) &&
+        !existsSync(locked) &&
+        unread.stdout.includes(locked),
+      `exit ${unread.status}: ${`${unread.stdout} ${unread.stderr}`.trim().slice(0, 160)}`,
+    );
+  }
+
   const cleared = run(["clear-cache"]);
   check("clear-cache exits 0", cleared.status === 0);
   check("and says it removed both", cleared.stdout.trim().split("\n").length === 2, cleared.stdout.trim());

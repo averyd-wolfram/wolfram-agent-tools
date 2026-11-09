@@ -103,6 +103,7 @@ export {
   capabilityDir,
   cacheDir,
   clearCache,
+  clearServerCache,
   readCache,
   writeCache,
   cacheMatches,

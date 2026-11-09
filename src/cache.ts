@@ -7,7 +7,15 @@
  * starts, so this is a latency cache, never a source of truth.
  */
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, unlinkSync } from "node:fs";
+import {
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+  unlinkSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import os from "node:os";
 import type { Prompt, Tool } from "@modelcontextprotocol/sdk/types.js";
@@ -173,6 +181,67 @@ export function clearCache(): string {
     /* absent, which is the normal case */
   }
   return dir;
+}
+
+/**
+ * Remove one server's entries — every kernel, flavour and source it was cached
+ * under — and leave every other server's and the reported facts (#103). A
+ * downstream installer that wanted only its own entry gone had to parse these
+ * files for `serverName`, an internal detail, or clear everyone's.
+ *
+ * Every entry is tried, so a failure on one does not hide what was removed
+ * before it, nor leave the rest untried.
+ *
+ * @returns the files it removed and those it could not settle, for
+ *   `clear-cache --server` to report.
+ * @throws when the directory cannot be listed.
+ */
+export function clearServerCache(serverName: string): {
+  removed: string[];
+  failed: { file: string; error: unknown }[];
+} {
+  const dir = capabilityDir();
+  const removed: string[] = [];
+  const failed: { file: string; error: unknown }[] = [];
+  let files: string[];
+  try {
+    files = readdirSync(dir).filter((file) => file.endsWith(".json"));
+  } catch (err) {
+    // No directory is nothing cached. One that cannot be listed may still be
+    // read at a known path, so its entries would go on being served.
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { removed, failed };
+    throw err;
+  }
+  for (const file of files) {
+    const path = join(dir, file);
+    let text: string;
+    try {
+      text = readFileSync(path, "utf8");
+    } catch (err) {
+      // Gone since the listing is nothing to remove. One that cannot be read
+      // now may be readable later, and served then: whose it is cannot be said,
+      // so it fails the command rather than pass as not this server's.
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") failed.push({ file: path, error: err });
+      continue;
+    }
+    let entry: Partial<CacheEntry> | null;
+    try {
+      entry = JSON.parse(text) as Partial<CacheEntry> | null;
+    } catch {
+      continue; // Not JSON, so never served: nobody's entry.
+    }
+    if (entry?.serverName !== serverName) continue;
+    try {
+      unlinkSync(path);
+    } catch (err) {
+      // Gone already is what was asked. Anything else leaves an entry a session
+      // would still serve, which reporting nothing to remove would hide.
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") failed.push({ file: path, error: err });
+      continue;
+    }
+    removed.push(path);
+  }
+  return { removed, failed };
 }
 
 /**

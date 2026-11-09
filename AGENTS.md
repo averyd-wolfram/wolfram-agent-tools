@@ -304,6 +304,9 @@ smoke suite depends on this — and an older kernel named that way starts and th
 `clear-cache` removes both the `capabilities/` directory — including the single
 `capabilities.json` that preceded it — and the reported facts, and says so; it is the
 cold-machine reset. A live broker and the client's own tool-definition cache survive it.
+`clear-cache --server <name>` removes only that server's capability entries, for every
+kernel, and leaves the facts and every other server's — what a downstream installer calls
+rather than reading the entries' format (#103).
 
 ### MCP documentation
 

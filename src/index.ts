@@ -8,9 +8,9 @@
  */
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { deferredBackend } from "./backend.js";
-import { clearCache } from "./cache.js";
-import { loadConfig } from "./config.js";
-import { createLogger, errorText } from "./log.js";
+import { clearCache, clearServerCache } from "./cache.js";
+import { loadConfig, resolveServerName } from "./config.js";
+import { createLogger, errorText, silentLogger } from "./log.js";
 import { createWolframServer } from "./proxy.js";
 import { PKG } from "./version.js";
 
@@ -32,6 +32,10 @@ Usage
                                   what the caches say about this machine, for a
                                   session-start hook; starts no kernel
   wolfram-mcp-server clear-cache  forget the cached tool list and kernel facts
+  wolfram-mcp-server clear-cache --server <name>
+                                  forget only that server's cached tool lists,
+                                  for every kernel, and leave the rest; a
+                                  running session keeps the list it has
   wolfram-mcp-server --version
   wolfram-mcp-server --help
 
@@ -256,6 +260,41 @@ async function main(argv: string[]): Promise<number | null> {
     }
 
     case "clear-cache": {
+      if (argv.length > 1) {
+        // `--server <name>` or `--server=<name>`, and nothing else: an option
+        // misspelt and ignored would clear every server's entries instead.
+        const rest = argv.slice(1);
+        const requested =
+          rest.length === 2 && rest[0] === "--server"
+            ? rest[1]
+            : rest.length === 1 && rest[0]?.startsWith("--server=")
+              ? rest[0].slice("--server=".length)
+              : undefined;
+        if (!requested) {
+          process.stderr.write(`usage: wolfram-mcp-server clear-cache [--server <name>]\n`);
+          return 2;
+        }
+        // Resolved as a session resolves MCP_SERVER_NAME, so the name a session
+        // was given finds the entries it wrote.
+        const serverName = resolveServerName(requested, silentLogger);
+        const failure = (err: unknown) =>
+          process.stderr.write(
+            `could not clear ${serverName}'s cached tool list: ${errorText(err)}\n`,
+          );
+        let cleared: ReturnType<typeof clearServerCache>;
+        try {
+          cleared = clearServerCache(serverName);
+        } catch (err) {
+          failure(err);
+          return 1;
+        }
+        const { removed, failed } = cleared;
+        for (const file of removed) process.stdout.write(`removed ${file}\n`);
+        for (const { error } of failed) failure(error);
+        if (failed.length > 0) return 1;
+        if (removed.length === 0) process.stdout.write(`no cached tool list for ${serverName}\n`);
+        return 0;
+      }
       const { clearFacts } = await import("./inspect.js");
       const capabilities = clearCache();
       const facts = clearFacts();
