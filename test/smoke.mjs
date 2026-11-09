@@ -10877,6 +10877,29 @@ heading("A commit that changes what ships carries a type that bumps the version"
       ships["chore(deps): bump eslint"] === false && ships["chore(deps): re-resolve a dev-optional package"] === false,
     JSON.stringify(ships),
   );
+  // An override reaches the bundle only through what it resolves, which the
+  // lockfile's production entries say: one that moves only a dev package is a
+  // chore, and one that moves a production package ships.
+  const devLock = { "": {}, "node_modules/sdk": { version: "1.0.0" }, "node_modules/fsevents": { version: "2.3.3", devOptional: true } };
+  const beforeOverrides = git("rev-parse", "HEAD");
+  const overridden = (overrides) =>
+    writeFileSync(
+      join(repo, "package.json"),
+      pkg({ description: "the server", dependencies: { sdk: "1.1.0" }, devDependencies: { eslint: "10.0.0" }, overrides }),
+    );
+  overridden({ minimatch: "^11.0.1" });
+  commit("chore(deps-dev): override a dev package's dependency", "package-lock.json",
+    lock({ ...devLock, "node_modules/minimatch": { version: "11.0.5", dev: true } }));
+  overridden({ minimatch: "^11.0.1", "fast-uri": "^3.1.0" });
+  commit("chore(deps): override a production package's dependency", "package-lock.json",
+    lock({ ...devLock, "node_modules/minimatch": { version: "11.0.5", dev: true }, "node_modules/fast-uri": { version: "3.1.0" } }));
+  const overrideShips = Object.fromEntries(commitsIn(beforeOverrides, "feature", repo).map((c) => [c.message, c.ships()]));
+  check(
+    "an override that moves only a dev package does not ship; one that moves a production package does",
+    overrideShips["chore(deps-dev): override a dev package's dependency"] === false &&
+      overrideShips["chore(deps): override a production package's dependency"] === true,
+    JSON.stringify(overrideShips),
+  );
 }
 
 // ---------------------------------------------------------------------------

@@ -102,8 +102,13 @@ export function mistyped(commits, bumping = bumpingTypes()) {
   });
 }
 
-/** package.json fields that never reach the bundle: the version is the bump itself. */
-const UNSHIPPED_FIELDS = new Set(["devDependencies", "scripts", "version"]);
+/**
+ * package.json fields that never reach the bundle: the version is the bump
+ * itself. An override reaches it only through what it resolves, and the
+ * lockfile's production entries below say that, so one that moves only a dev
+ * package, as minimatch's for eslint did, is a `chore:` too.
+ */
+const UNSHIPPED_FIELDS = new Set(["devDependencies", "overrides", "scripts", "version"]);
 
 /**
  * What of the package ships, as one comparable string: every package.json field
