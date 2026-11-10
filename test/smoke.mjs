@@ -10877,6 +10877,50 @@ heading("A commit that changes what ships carries a type that bumps the version"
       ships["chore(deps): bump eslint"] === false && ships["chore(deps): re-resolve a dev-optional package"] === false,
     JSON.stringify(ships),
   );
+  // An override reaches the bundle only through what it resolves, which the
+  // lockfile's production entries say: one that moves only a dev package is a
+  // chore, and one that moves a production package ships.
+  const devLock = { "": {}, "node_modules/sdk": { version: "1.0.0" }, "node_modules/fsevents": { version: "2.3.3", devOptional: true } };
+  const beforeOverrides = git("rev-parse", "HEAD");
+  const overridden = (overrides) =>
+    writeFileSync(
+      join(repo, "package.json"),
+      pkg({ description: "the server", dependencies: { sdk: "1.1.0" }, devDependencies: { eslint: "10.0.0" }, overrides }),
+    );
+  overridden({ minimatch: "^11.0.1" });
+  commit("chore(deps-dev): override a dev package's dependency", "package-lock.json",
+    lock({ ...devLock, "node_modules/minimatch": { version: "11.0.5", dev: true } }));
+  overridden({ minimatch: "^11.0.1", "fast-uri": "^3.1.0" });
+  commit("chore(deps): override a production package's dependency", "package-lock.json",
+    lock({ ...devLock, "node_modules/minimatch": { version: "11.0.5", dev: true }, "node_modules/fast-uri": { version: "3.1.0" } }));
+  // A fork that keeps the version it replaces differs only in where it came
+  // from, so that is compared too.
+  overridden({ minimatch: "^11.0.1", "fast-uri": "github:someone/fast-uri#0a1b2c3" });
+  const forkLock = { ...devLock, "node_modules/minimatch": { version: "11.0.5", dev: true },
+    "node_modules/fast-uri": { version: "3.1.0", resolved: "git+ssh://git@github.com/someone/fast-uri.git#0a1b2c3" } };
+  commit("chore(deps): override a production package to a fork at its version", "package-lock.json", lock(forkLock));
+  const overrideShips = Object.fromEntries(commitsIn(beforeOverrides, "feature", repo).map((c) => [c.message, c.ships()]));
+  check(
+    "an override that moves only a dev package does not ship; one that moves a production package does, even to a fork at its version",
+    overrideShips["chore(deps-dev): override a dev package's dependency"] === false &&
+      overrideShips["chore(deps): override a production package's dependency"] === true &&
+      overrideShips["chore(deps): override a production package to a fork at its version"] === true,
+    JSON.stringify(overrideShips),
+  );
+  // But a tarball's integrity is what it is: the same bytes from another
+  // registry host, as npm's replace-registry-host rewrites them, ship nothing.
+  const sdkFrom = (host) => ({ version: "1.1.0", resolved: `https://${host}/sdk/-/sdk-1.1.0.tgz`, integrity: "sha512-c2FtZQ==" });
+  commit("chore(deps): pin the SDK's tarball", "package-lock.json",
+    lock({ ...forkLock, "node_modules/sdk": sdkFrom("registry.npmjs.org") }));
+  const beforeMirror = git("rev-parse", "HEAD");
+  commit("chore(deps): resolve the SDK through a mirror", "package-lock.json",
+    lock({ ...forkLock, "node_modules/sdk": sdkFrom("mirror.example.invalid") }));
+  const mirrored = commitsIn(beforeMirror, "feature", repo).map((c) => [c.message, c.ships()]);
+  check(
+    "and the same tarball from another registry host, its integrity unchanged, does not",
+    mirrored.length === 1 && mirrored[0][1] === false,
+    JSON.stringify(mirrored),
+  );
 }
 
 // ---------------------------------------------------------------------------

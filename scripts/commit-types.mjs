@@ -102,19 +102,29 @@ export function mistyped(commits, bumping = bumpingTypes()) {
   });
 }
 
-/** package.json fields that never reach the bundle: the version is the bump itself. */
-const UNSHIPPED_FIELDS = new Set(["devDependencies", "scripts", "version"]);
+/**
+ * package.json fields that never reach the bundle: the version is the bump
+ * itself. An override reaches it only through what it resolves, and the
+ * lockfile's production entries below say that, so one that moves only a dev
+ * package, as minimatch's for eslint did, is a `chore:` too.
+ */
+const UNSHIPPED_FIELDS = new Set(["devDependencies", "overrides", "scripts", "version"]);
 
 /**
  * What of the package ships, as one comparable string: every package.json field
  * but the unshipped ones, and every lockfile entry a production install would
  * get — not `dev`, and not `devOptional`, an optional dependency of a dev one.
+ * Each by what it is as well as its version: an override, which is judged only
+ * here, can point a package at a fork or a git revision that keeps the version
+ * it replaced. What it is is its integrity, the tarball's own hash, so a lockfile
+ * moved to another registry or mirror under the same bytes ships nothing; only
+ * an entry without one, as a git dependency is, falls back to where it came from.
  */
 function shippedPackage(packageJson, lockJson) {
   const fields = Object.entries(packageJson ?? {}).filter(([key]) => !UNSHIPPED_FIELDS.has(key));
   const pins = Object.entries(lockJson?.packages ?? {})
     .filter(([path, entry]) => path && !entry.dev && !entry.devOptional)
-    .map(([path, entry]) => `${path} ${entry.version}`);
+    .map(([path, entry]) => `${path} ${entry.version} ${entry.integrity ?? entry.resolved ?? ""}`);
   return JSON.stringify([fields.sort(([a], [b]) => a.localeCompare(b)), pins.sort()]);
 }
 
