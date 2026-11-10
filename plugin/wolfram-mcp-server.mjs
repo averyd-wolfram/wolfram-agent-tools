@@ -8208,7 +8208,7 @@ var init_version = __esm({
   "dist/version.js"() {
     "use strict";
     here = dirname(fileURLToPath(import.meta.url));
-    PKG = true ? JSON.parse('{"name":"wolfram-mcp-server","version":"0.2.0","description":"MCP server that drives a locally installed Wolfram kernel, with lazy start and idle shutdown."}') : JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8"));
+    PKG = true ? JSON.parse('{"name":"wolfram-mcp-server","version":"0.2.1","description":"MCP server that drives a locally installed Wolfram kernel, with lazy start and idle shutdown."}') : JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8"));
   }
 });
 
