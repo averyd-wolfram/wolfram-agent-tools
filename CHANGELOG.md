@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.2.0...v0.2.1) (2026-11-10)
+
+
+### Bug Fixes
+
+* **deps:** Bump @modelcontextprotocol/sdk from 1.32.1 to 1.32.2 ([#171](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/171)) ([3f0e439](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/3f0e439460f30080c64230dfe7a8c770ed415685))
+
 ## [0.2.0](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.1.12...v0.2.0) (2026-11-10)
 
 
