@@ -8208,13 +8208,13 @@ var init_version = __esm({
   "dist/version.js"() {
     "use strict";
     here = dirname(fileURLToPath(import.meta.url));
-    PKG = true ? JSON.parse('{"name":"wolfram-mcp-server","version":"0.1.12","description":"MCP server that drives a locally installed Wolfram kernel, with lazy start and idle shutdown."}') : JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8"));
+    PKG = true ? JSON.parse('{"name":"wolfram-mcp-server","version":"0.2.0","description":"MCP server that drives a locally installed Wolfram kernel, with lazy start and idle shutdown."}') : JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8"));
   }
 });
 
 // dist/cache.js
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, unlinkSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync, unlinkSync } from "node:fs";
 import { dirname as dirname2, join as join2 } from "node:path";
 import os from "node:os";
 function cacheDir() {
@@ -8282,6 +8282,47 @@ function clearCache() {
   } catch {
   }
   return dir;
+}
+function clearServerCache(serverName) {
+  const dir = capabilityDir();
+  const removed = [];
+  const failed = [];
+  let files;
+  try {
+    files = readdirSync(dir).filter((file) => file.endsWith(".json"));
+  } catch (err) {
+    if (err.code === "ENOENT")
+      return { removed, failed };
+    throw err;
+  }
+  for (const file of files) {
+    const path = join2(dir, file);
+    let text;
+    try {
+      text = readFileSync(path, "utf8");
+    } catch (err) {
+      if (err.code !== "ENOENT")
+        failed.push({ file: path, error: err });
+      continue;
+    }
+    let entry;
+    try {
+      entry = JSON.parse(text);
+    } catch {
+      continue;
+    }
+    if (entry?.serverName !== serverName)
+      continue;
+    try {
+      unlinkSync(path);
+    } catch (err) {
+      if (err.code !== "ENOENT")
+        failed.push({ file: path, error: err });
+      continue;
+    }
+    removed.push(path);
+  }
+  return { removed, failed };
 }
 function cacheMatches(entry, key) {
   return entry !== null && entry.kernelPath === key.kernelPath && entry.kernelVersion === key.kernelVersion && entry.serverName === key.serverName && entry.serverVersion === key.serverVersion && entry.flavour === key.flavour && entry.source === key.source;
@@ -8355,7 +8396,7 @@ __export(broker_protocol_exports, {
   socketFault: () => socketFault
 });
 import { createHash as createHash3 } from "node:crypto";
-import { mkdirSync as mkdirSync2, readdirSync, readFileSync as readFileSync2, statSync } from "node:fs";
+import { mkdirSync as mkdirSync2, readdirSync as readdirSync2, readFileSync as readFileSync2, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname as dirname3, join as join3 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
@@ -8371,7 +8412,7 @@ function codeIdentity() {
   const hash = createHash3("sha256");
   try {
     const here2 = fileURLToPath2(import.meta.url);
-    const files = true ? [here2] : readdirSync(dirname3(here2)).filter((name) => name.endsWith(".js")).sort().map((name) => join3(dirname3(here2), name));
+    const files = true ? [here2] : readdirSync2(dirname3(here2)).filter((name) => name.endsWith(".js")).sort().map((name) => join3(dirname3(here2), name));
     for (const file of files)
       hash.update(readFileSync2(file));
   } catch {
@@ -18607,7 +18648,7 @@ var init_inspect = __esm({
 
 // dist/server-source.js
 import { createHash as createHash5 } from "node:crypto";
-import { readdirSync as readdirSync2, readFileSync as readFileSync4, statSync as statSync3 } from "node:fs";
+import { readdirSync as readdirSync3, readFileSync as readFileSync4, statSync as statSync3 } from "node:fs";
 import { join as join5 } from "node:path";
 import os2 from "node:os";
 function sourceDirs(env, facts, home = os2.homedir()) {
@@ -18621,7 +18662,7 @@ function paclets(base, label, into, found) {
   const repository = join5(base, "Paclets", "Repository");
   let entries;
   try {
-    entries = readdirSync2(repository).sort();
+    entries = readdirSync3(repository).sort();
   } catch {
     return;
   }
@@ -18662,7 +18703,7 @@ function userServer(userBase, serverName, into, found) {
   }
   let entries = [];
   try {
-    entries = readdirSync2(servers);
+    entries = readdirSync3(servers);
   } catch {
   }
   for (const entry of entries) {
@@ -18742,9 +18783,12 @@ function bareMcpText(code2, message) {
   const prefix = `MCP error ${code2}: `;
   return message.startsWith(prefix) ? message.slice(prefix.length) : message;
 }
+var silentLogger;
 var init_log = __esm({
   "dist/log.js"() {
     "use strict";
+    silentLogger = () => {
+    };
   }
 });
 
@@ -20123,7 +20167,7 @@ __export(locate_exports, {
   versionMatches: () => versionMatches,
   writeDiscoveryHint: () => writeDiscoveryHint
 });
-import { accessSync, constants, existsSync as existsSync2, mkdirSync as mkdirSync4, readFileSync as readFileSync6, readdirSync as readdirSync3, realpathSync, renameSync as renameSync3, statSync as statSync5, writeFileSync as writeFileSync3 } from "node:fs";
+import { accessSync, constants, existsSync as existsSync2, mkdirSync as mkdirSync4, readFileSync as readFileSync6, readdirSync as readdirSync4, realpathSync, renameSync as renameSync3, statSync as statSync5, writeFileSync as writeFileSync3 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname as dirname5, join as join7 } from "node:path";
 import os4 from "node:os";
@@ -20210,7 +20254,7 @@ function versionFromString(text) {
 }
 function safeReaddir(dir) {
   try {
-    return readdirSync3(dir);
+    return readdirSync4(dir);
   } catch {
     return [];
   }
@@ -23008,7 +23052,7 @@ async function startBroker(options) {
   async function claimSocket() {
     if (process.platform === "win32")
       return claimDirect();
-    const staging = join10(dirname8(address), `.b${process.pid}-${randomBytes(4).toString("hex")}`);
+    const staging = join10(dirname8(address), `.b${randomBytes(4).toString("hex")}`);
     if (!fitsSocketPath(staging))
       return claimDirect();
     const server = await listenAt(staging, 1);
@@ -24231,6 +24275,10 @@ Usage
                                   what the caches say about this machine, for a
                                   session-start hook; starts no kernel
   wolfram-mcp-server clear-cache  forget the cached tool list and kernel facts
+  wolfram-mcp-server clear-cache --server <name>
+                                  forget only that server's cached tool lists,
+                                  for every kernel, and leave the rest; a
+                                  running session keeps the list it has
   wolfram-mcp-server --version
   wolfram-mcp-server --help
 
@@ -24417,6 +24465,37 @@ async function main(argv) {
       return running ? null : 0;
     }
     case "clear-cache": {
+      if (argv.length > 1) {
+        const rest = argv.slice(1);
+        const requested = rest.length === 2 && rest[0] === "--server" ? rest[1] : rest.length === 1 && rest[0]?.startsWith("--server=") ? rest[0].slice("--server=".length) : void 0;
+        if (!requested) {
+          process.stderr.write(`usage: wolfram-mcp-server clear-cache [--server <name>]
+`);
+          return 2;
+        }
+        const serverName = resolveServerName(requested, silentLogger);
+        const failure2 = (err) => process.stderr.write(`could not clear ${serverName}'s cached tool list: ${errorText(err)}
+`);
+        let cleared;
+        try {
+          cleared = clearServerCache(serverName);
+        } catch (err) {
+          failure2(err);
+          return 1;
+        }
+        const { removed, failed } = cleared;
+        for (const file of removed)
+          process.stdout.write(`removed ${file}
+`);
+        for (const { error: error2 } of failed)
+          failure2(error2);
+        if (failed.length > 0)
+          return 1;
+        if (removed.length === 0)
+          process.stdout.write(`no cached tool list for ${serverName}
+`);
+        return 0;
+      }
       const { clearFacts: clearFacts2 } = await Promise.resolve().then(() => (init_inspect(), inspect_exports));
       const capabilities = clearCache();
       const facts = clearFacts2();
