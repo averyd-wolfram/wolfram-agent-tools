@@ -824,9 +824,11 @@ are *traced* in this tree on 2026-10-05 unless marked otherwise.
    - **What it is.** One lease per installation and licence, in the broker directory, which
      every kernel this package starts takes a seat from before it spawns: a broker's pool, a
      private kernel, the LSP's. An entitlement (`WOLFRAMINIT`) brings its own licence and seat
-     limit, so it has its own lease, keyed as its broker's address is; one lease shared with
-     the activation would either hold the entitlement to the wrong limit or let the
-     activation's kernels past theirs (Codex on #176). The lease's size is that licence's
+     limit, so it has its own lease; one lease shared with the activation would either hold
+     the entitlement to the wrong limit or let the activation's kernels past theirs (Codex on
+     #176). The key is the entitlement itself, not `WOLFRAMINIT`'s raw text, which the broker
+     address digests: two spellings of one entitlement are one licence, and two leases for it
+     would each grant its whole budget. The lease's size is that licence's
      seats less the reserve, the budget each pool derives alone today. A start that finds no
      free seat waits for one, as a pool's waiter does now, and doesn't spawn a kernel the
      licence would refuse.
