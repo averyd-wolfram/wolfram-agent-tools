@@ -821,12 +821,21 @@ are *traced* in this tree on 2026-10-05 unless marked otherwise.
      already builds a bundle, so it can build two marked ones.
 
    **B: a seat lease every kernel takes**, the first candidate above, which keeps the rule.
-   - **What it is.** One lease per installation, in the broker directory, which every kernel
-     this package starts takes a seat from before it spawns: a broker's pool, a private kernel,
-     the LSP's. Each seat is a file created exclusively and naming its holder's pid, so a seat
-     whose holder died is reclaimed. The lease's size is the licence's seats less the reserve,
-     the budget each pool derives alone today. A start that finds no free seat waits for one,
-     as a pool's waiter does now, and doesn't spawn a kernel the licence would refuse.
+   - **What it is.** One lease per installation and licence, in the broker directory, which
+     every kernel this package starts takes a seat from before it spawns: a broker's pool, a
+     private kernel, the LSP's. An entitlement (`WOLFRAMINIT`) brings its own licence and seat
+     limit, so it has its own lease, keyed as its broker's address is; one lease shared with
+     the activation would either hold the entitlement to the wrong limit or let the
+     activation's kernels past theirs (Codex on #176). The lease's size is that licence's
+     seats less the reserve, the budget each pool derives alone today. A start that finds no
+     free seat waits for one, as a pool's waiter does now, and doesn't spawn a kernel the
+     licence would refuse.
+   - **A dead holder's seat comes back.** A pid alone can't say a seat's holder died, since
+     a crashed holder's pid can be reused by an unrelated process that then holds the seat
+     for as long as it runs. So a seat names its holder by pid and that process's start time,
+     and is reclaimed when no process has both; or it is a lock the operating system releases
+     when its holder exits, if one can be held from Node on both platforms without a native
+     module. Which one is the implementation's first measurement.
    - **What it keeps.** Every session is served by its own release's code, as now, so
      *sharing may never change an answer* stands as written.
    - **What it costs.** Two releases still run two brokers, and a server both use runs a kernel
@@ -838,7 +847,9 @@ are *traced* in this tree on 2026-10-05 unless marked otherwise.
    - **Checks first:** two brokers of different code identities on one installation never hold
      more kernels together than the lease allows, and a start that finds the lease full waits,
      then starts when the other's kernel stops. The LSP kernel and a private kernel count
-     against the lease.
+     against the lease. An entitlement's kernels count against their own lease, not the
+     activation's. A seat whose holder was killed is reclaimed, and one whose pid now
+     belongs to another process is reclaimed too.
 
    **For the maintainer:** A, with the invariant changed in `AGENTS.md` to say a session may be
    served by a newer release's broker; or B, keeping the invariant and accepting the wait and
