@@ -798,8 +798,13 @@ are *traced* in this tree on 2026-10-05 unless marked otherwise.
        broker.
      - **A request the old broker never read** fails at the handover rather than moving, as at
        any handover (#102).
-     - **A short overlap.** The old broker's kernels hold seats beside the new broker's until
-       its calls in flight are answered; #124 bounds one that stops answering.
+     - **The handover needs B's lease.** Until its calls in flight are answered, the old
+       broker's kernels hold their seats, and #124 only bounds how long. A new broker that
+       derived its own full budget meanwhile would overrun the licence: on 4 seats, with the
+       old pool at its budget of 3, the new broker's first kernel takes the reserved seat and
+       its next start fails or hangs (Codex on #176). With the lease, the new broker's starts
+       wait for the old kernels to give their seats back. So A is built on B: the lease
+       first, then the shared address.
    - **Rejected within A: oldest wins**, where a newer session attaches to an older broker
      until that one idles out. It relaxes the rule the same way, toward older code instead of
      newer, and since sessions live for days, a fix in the broker, the pool or the kernel layer,
@@ -808,7 +813,8 @@ are *traced* in this tree on 2026-10-05 unless marked otherwise.
      - two release-marked bundles of different versions on one machine run one broker, the
        newer's, and a session of each is served by it;
      - a newer session replaces an older broker, and the older broker answers its call in
-       flight first.
+       flight first, while the two brokers' kernels together stay within the lease, the new
+       broker's start waiting for the old kernel's seat.
 
      These two pass today and must keep passing: a working-tree build and a release of the
      same version never meet, and two protocols never meet. The suite's bundle section
@@ -836,8 +842,8 @@ are *traced* in this tree on 2026-10-05 unless marked otherwise.
 
    **For the maintainer:** A, with the invariant changed in `AGENTS.md` to say a session may be
    served by a newer release's broker; or B, keeping the invariant and accepting the wait and
-   the duplicate kernels. Under A the lease is still worth doing afterwards, for the kernels
-   no broker counts: the LSP's and private ones.
+   the duplicate kernels. B comes first under either choice: A's handover needs it, and it
+   also covers the kernels no broker counts, the LSP's and private ones.
 3. **Paclet-qualified server names, end to end.** *Traced:* `resolveServerName` passes
    `Publisher/Server` through unchanged; `SERVER_NOT_FOUND` matches only `MCPServerNotFound` and
    `No MCPServerObject found for name`, so a paclet that is not installed is diagnosed only if
