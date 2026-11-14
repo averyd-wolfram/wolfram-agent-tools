@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.2.1...v0.2.2) (2026-11-14)
+
+
+### Bug Fixes
+
+* **deps:** Bump hono from 4.13.13 to 4.13.18 ([#173](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/173)) ([e5514ba](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/e5514baf57a8faee41566c13f7f67781e8c556b0))
+
 ## [0.2.1](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.2.0...v0.2.1) (2026-11-10)
 
 
