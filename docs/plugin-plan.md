@@ -758,6 +758,56 @@ are *traced* in this tree on 2026-10-05 unless marked otherwise.
    rather than the bundle's bytes. The second runs against *sharing may never change an answer*
    (`AGENTS.md`): a broker running other code may answer differently, so it needs its own
    argument, not just a key change.
+   *Proposed design* (#59, 2026-11-14, for the maintainer to agree before code): **the newest
+   release on a protocol holds the address.** #59 measured the split this ends: a downstream
+   copy one release behind the `wolfram` plugin ran its own broker, and on 2026-11-10 a 0.1.7
+   plugin broker a week old ran beside the 0.2.1 one another session started after the update.
+   - **The key.** A release's bundle keys its broker on `BROKER_PROTOCOL`, the kernel binary,
+     the uid and any entitlement, as now, but not on the package version or its own bytes. Any
+     other build — a clone's `dist/`, a bundle built from a working tree — keeps both, so a
+     working tree still never serves an installed release's sessions, nor the reverse, which is
+     what `codeIdentity` is for. Telling the two apart needs a mark only the release build
+     sets: the version can't, since a working tree's `package.json` carries the last release's.
+   - **Newest wins.** `hello`'s answer carries the broker's version. A session of the same
+     release as the broker, or an older one, attaches, and the newer code serves it. A session
+     of a newer release starts its own broker, which takes the address instead of standing
+     down (#73's claim, with the holder's older version the one reason to replace a live
+     broker). The old broker already knows how to go: it finds its address replaced, tells its
+     sessions `shuttingDown`, answers the calls already on it (#110), and leaves. Its sessions
+     choose again and land on the new broker, at the same address.
+   - **Why answers stay right.** Which kernel serves a session is still decided by its flavour,
+     in every broker, so two environments still never share a kernel. What changes is whose
+     code stands between a session and its kernel: always the newest release a session on the
+     machine has loaded, which is what the update asked for. Today a session started before an
+     update keeps the old code for its proxy and its broker; under this, only for its proxy.
+     Frames agree by construction, since a protocol bump still keeps two brokers apart.
+   - **What it costs**, to be stated where the plugin is installed:
+     - **An update restarts the kernels once.** The old broker's kernels go with it, so an
+       evaluator's state is lost at the first session after an update, as an idle shutdown
+       loses it today, and the next call pays a cold start.
+     - **A pinned older release is served by a newer broker** whenever a session of the newer
+       one runs on the machine. A pin then holds the plugin's skills and its proxy, not its
+       broker.
+     - **A request the old broker never read** fails at the handover rather than moving, as at
+       any handover (#102).
+     - **A short overlap.** The old broker's kernels hold seats beside the new broker's until
+       its calls in flight are answered; #124 bounds one that stops answering.
+   - **Rejected:**
+     - *Oldest wins*, where a newer session attaches to an older broker until that one idles
+       out. Sessions live for days, so a fix in the broker, the pool or the kernel layer, where
+       most fixes land, would reach no one until the oldest session ended.
+     - *The seat lease* alone, the first candidate. It bounds seats but still runs two pools,
+       each on a smaller budget, which is the split #59 measured. It remains the candidate for
+       kernels no broker counts: the LSP's and private ones.
+   - **Checks first.** These two fail on today's code:
+     - two release-marked bundles of different versions on one machine run one broker, the
+       newer's, and a session of each is served by it;
+     - a newer session replaces an older broker, and the older broker answers its call in
+       flight first.
+
+     These two pass today and must keep passing: a working-tree build and a release of the
+     same version never meet, and two protocols never meet. The suite's bundle section
+     already builds a bundle, so it can build two marked ones.
 3. **Paclet-qualified server names, end to end.** *Traced:* `resolveServerName` passes
    `Publisher/Server` through unchanged; `SERVER_NOT_FOUND` matches only `MCPServerNotFound` and
    `No MCPServerObject found for name`, so a paclet that is not installed is diagnosed only if
