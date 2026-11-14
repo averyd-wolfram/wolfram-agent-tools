@@ -124,8 +124,10 @@ in `docs/design.md`.
   reads — once `ci-ok`, `conventional-title` and `commit-types` pass and Codex is clean on the
   PR's current head (below). That is standing permission from the maintainer (2026-11-06):
   merge then without asking, pinned to the reviewed head (the REST merge's `sha`), and carry
-  on. Dependabot's PRs go the same way. The exception is release-please's release PR, which
-  needs no review and is merged only when the maintainer says. GitHub deletes a merged PR's
+  on. Dependabot's PRs go the same way. The exception is release-please's release PR: it gets
+  no Codex review, since it holds only the changelog and the version bumps, and it is merged
+  only when the maintainer says, after reviewing it. That is D25's one human step of a
+  release, and the review that goes with it. GitHub deletes a merged PR's
   branch; delete the local copy with `git branch -d`.
 - **Review.** Run `codex review --base main` on the branch before pushing, and fix what it
   finds. Once the PR's checks pass, comment `@codex review`; for a change to the workflows or
