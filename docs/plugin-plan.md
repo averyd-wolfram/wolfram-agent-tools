@@ -758,10 +758,13 @@ are *traced* in this tree on 2026-10-05 unless marked otherwise.
    rather than the bundle's bytes. The second runs against *sharing may never change an answer*
    (`AGENTS.md`): a broker running other code may answer differently, so it needs its own
    argument, not just a key change.
-   *Proposed design* (#59, 2026-11-14, for the maintainer to agree before code): **the newest
-   release on a protocol holds the address.** #59 measured the split this ends: a downstream
-   copy one release behind the `wolfram` plugin ran its own broker, and on 2026-11-10 a 0.1.7
-   plugin broker a week old ran beside the 0.2.1 one another session started after the update.
+   *Two designs for the maintainer to choose between* (#59, 2026-11-14), before any code. #59
+   measured the split: a downstream copy one release behind the `wolfram` plugin ran its own
+   broker, and on 2026-11-10 a 0.1.7 plugin broker a week old ran beside the 0.2.1 one another
+   session started after the update. Design A ends the split, and to do it relaxes *sharing
+   may never change an answer*. Design B keeps that rule and bounds only the seats.
+
+   **A: the newest release on a protocol holds the address.**
    - **The key.** A release's bundle keys its broker on `BROKER_PROTOCOL`, the kernel binary,
      the uid and any entitlement, as now, but not on the package version or its own bytes. Any
      other build — a clone's `dist/`, a bundle built from a working tree — keeps both, so a
@@ -775,12 +778,17 @@ are *traced* in this tree on 2026-10-05 unless marked otherwise.
      broker). The old broker already knows how to go: it finds its address replaced, tells its
      sessions `shuttingDown`, answers the calls already on it (#110), and leaves. Its sessions
      choose again and land on the new broker, at the same address.
-   - **Why answers stay right.** Which kernel serves a session is still decided by its flavour,
-     in every broker, so two environments still never share a kernel. What changes is whose
-     code stands between a session and its kernel: always the newest release a session on the
-     machine has loaded, which is what the update asked for. Today a session started before an
-     update keeps the old code for its proxy and its broker; under this, only for its proxy.
-     Frames agree by construction, since a protocol bump still keeps two brokers apart.
+   - **What it does to *sharing may never change an answer*.** The flavour still decides which
+     kernel serves a session, in every broker, so two environments still never share a kernel,
+     and a protocol bump still keeps frames apart. But `BROKER_PROTOCOL` pins only the frames'
+     shape: the pool, the kernel layer, timeouts and error handling change between releases
+     without a bump (`broker-protocol.ts` says so). An older session served by a newer broker
+     can therefore get an answer its own release would not have given: a different error, a
+     list relayed differently, a call timed out differently. So A relaxes the rule from "the
+     session's own code" to "its own release or a newer one on the same machine". The case for
+     it is that the newer code is what the update installed, and today a session started
+     before an update keeps old code in its broker as well as its proxy. Choosing A means
+     changing that invariant in `AGENTS.md`, which is the maintainer's call (Codex on #176).
    - **What it costs**, to be stated where the plugin is installed:
      - **An update restarts the kernels once.** The old broker's kernels go with it, so an
        evaluator's state is lost at the first session after an update, as an idle shutdown
@@ -792,13 +800,10 @@ are *traced* in this tree on 2026-10-05 unless marked otherwise.
        any handover (#102).
      - **A short overlap.** The old broker's kernels hold seats beside the new broker's until
        its calls in flight are answered; #124 bounds one that stops answering.
-   - **Rejected:**
-     - *Oldest wins*, where a newer session attaches to an older broker until that one idles
-       out. Sessions live for days, so a fix in the broker, the pool or the kernel layer, where
-       most fixes land, would reach no one until the oldest session ended.
-     - *The seat lease* alone, the first candidate. It bounds seats but still runs two pools,
-       each on a smaller budget, which is the split #59 measured. It remains the candidate for
-       kernels no broker counts: the LSP's and private ones.
+   - **Rejected within A: oldest wins**, where a newer session attaches to an older broker
+     until that one idles out. It relaxes the rule the same way, toward older code instead of
+     newer, and since sessions live for days, a fix in the broker, the pool or the kernel layer,
+     where most fixes land, would reach no one until the oldest session ended.
    - **Checks first.** These two fail on today's code:
      - two release-marked bundles of different versions on one machine run one broker, the
        newer's, and a session of each is served by it;
@@ -808,6 +813,31 @@ are *traced* in this tree on 2026-10-05 unless marked otherwise.
      These two pass today and must keep passing: a working-tree build and a release of the
      same version never meet, and two protocols never meet. The suite's bundle section
      already builds a bundle, so it can build two marked ones.
+
+   **B: a seat lease every kernel takes**, the first candidate above, which keeps the rule.
+   - **What it is.** One lease per installation, in the broker directory, which every kernel
+     this package starts takes a seat from before it spawns: a broker's pool, a private kernel,
+     the LSP's. Each seat is a file created exclusively and naming its holder's pid, so a seat
+     whose holder died is reclaimed. The lease's size is the licence's seats less the reserve,
+     the budget each pool derives alone today. A start that finds no free seat waits for one,
+     as a pool's waiter does now, and doesn't spawn a kernel the licence would refuse.
+   - **What it keeps.** Every session is served by its own release's code, as now, so
+     *sharing may never change an answer* stands as written.
+   - **What it costs.** Two releases still run two brokers, and a server both use runs a kernel
+     in each, one seat apiece. A session waits for a seat another release's idle kernel holds
+     until that kernel's idle shutdown, unless brokers also learn to ask each other to give up
+     an idle kernel, which is more protocol. On a 2-seat licence with the LSP kernel on, one
+     idle kernel of another release can block every new start until it times out. It does not
+     meet #59's acceptance, which asks for one broker.
+   - **Checks first:** two brokers of different code identities on one installation never hold
+     more kernels together than the lease allows, and a start that finds the lease full waits,
+     then starts when the other's kernel stops. The LSP kernel and a private kernel count
+     against the lease.
+
+   **For the maintainer:** A, with the invariant changed in `AGENTS.md` to say a session may be
+   served by a newer release's broker; or B, keeping the invariant and accepting the wait and
+   the duplicate kernels. Under A the lease is still worth doing afterwards, for the kernels
+   no broker counts: the LSP's and private ones.
 3. **Paclet-qualified server names, end to end.** *Traced:* `resolveServerName` passes
    `Publisher/Server` through unchanged; `SERVER_NOT_FOUND` matches only `MCPServerNotFound` and
    `No MCPServerObject found for name`, so a paclet that is not installed is diagnosed only if
