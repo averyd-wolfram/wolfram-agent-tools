@@ -26,10 +26,12 @@ mcp_optional_startup_grace_ms = 0
 # one, so a user with a `WolframLanguage` server of their own, an HTTP one say, would have
 # Codex refuse the whole configuration and not start in this repository at all.
 [mcp_servers.wolfram-agent-tools-dev]
-command = "node"
-args = ["release/plugin/wolfram-mcp-server.mjs"]
-# Relative to this .codex/ folder, so the repository's root wherever Codex was started.
-cwd = ".."
+# Codex starts a server in the directory the session was launched from, and resolves a relative
+# `cwd` against that directory too, not this file's (measured: `..` from the root was the
+# repository's parent), so the shell finds the repository's root itself, wherever in it Codex
+# started; `exec` leaves node as the process Codex signals. The suite checks the path resolves.
+command = "sh"
+args = ["-c", "exec node \"$(git rev-parse --show-toplevel)/release/plugin/wolfram-mcp-server.mjs\""]
 env = { WOLFRAM_MCP_DEFAULT_SERVER = "WolframLanguage" }
 # Codex passes a server only a short allow-list of its environment, where Claude Code passes
 # all of it, so without this every setting a user exported, and the directories the broker

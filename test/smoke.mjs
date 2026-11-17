@@ -11065,13 +11065,15 @@ heading("CLI");
         ?.split(/^\[/m)[0] ?? ""
     ).replace(/#.*$/gm, "");
     // `npm run release:artifacts` assembles the plugin at release/plugin, which
-    // the entry names from the repository's root.
-    const args = manifest.args.map((arg) => arg.replace("${CLAUDE_PLUGIN_ROOT}", "release/plugin"));
+    // the entry's shell finds from the repository's root: Codex starts a server
+    // where the session was launched, and resolves a relative `cwd` there too.
+    const rootOf = "$(git rev-parse --show-toplevel)/release/plugin";
+    const paths = manifest.args.map((arg) => arg.replace("${CLAUDE_PLUGIN_ROOT}", rootOf));
+    const args = ["-c", `exec ${manifest.command} ${paths.map((path) => `"${path}"`).join(" ")}`];
     const pairs = Object.entries(manifest.env).map(([name, value]) => `${name} = ${JSON.stringify(value)}`);
     const drifted = [
-      ["command", `command = ${JSON.stringify(manifest.command)}`],
+      ["command", `command = "sh"`],
       ["args", `args = [${args.map((arg) => JSON.stringify(arg)).join(", ")}]`],
-      ["cwd", `cwd = ".."`],
       ["env", `env = { ${pairs.join(", ")} }`],
     ]
       // Whole lines: as a substring, `launcher_args = [...]` passed for `args`.
@@ -11081,6 +11083,20 @@ heading("CLI");
       "Codex's server entry runs the plugin's own server",
       entry !== "" && drifted.length === 0,
       drifted.length ? `differs in: ${drifted.join(", ")}` : "",
+    );
+    // What failed in practice: `cwd = ".."` beside `release/plugin/...` held
+    // only where Codex happened to start one directory down, and from the root
+    // named the repository's parent. Resolve the entry's own path the way its
+    // shell does, from a directory other than the root, and expect the bundle's.
+    // The path is read out of the entry itself, not the expectation above.
+    const configured = /^args = \["-c", "exec node \\"([^"\\]+)\\""\]$/m.exec(entry)?.[1];
+    const resolved = configured
+      ? spawnSync("sh", ["-c", `printf %s "${configured}"`], { cwd: join(root, "test"), encoding: "utf8" })
+      : undefined;
+    check(
+      "Codex's server entry finds the assembled plugin from anywhere in the repository",
+      resolved?.stdout === join(realpathSync(root), "release", "plugin", "wolfram-mcp-server.mjs"),
+      resolved ? resolved.stdout || resolved.stderr.trim() : "no `exec node \"<path>\"` in the entry's args",
     );
     const forwarded = new Set(
       [...(/^env_vars = \[([\s\S]*?)\]/m.exec(entry)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map(([, name]) => name),
