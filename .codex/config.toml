@@ -29,9 +29,11 @@ mcp_optional_startup_grace_ms = 0
 # Codex starts a server in the directory the session was launched from, and resolves a relative
 # `cwd` against that directory too, not this file's (measured: `..` from the root was the
 # repository's parent), so the shell finds the repository's root itself, wherever in it Codex
-# started; `exec` leaves node as the process Codex signals. The suite checks the path resolves.
+# started; `exec` leaves node as the process Codex signals. Where there is no .git, a source
+# export say, Codex takes the launch directory as the project's root, and loads this file only
+# there, so that directory is the root. The suite checks the path resolves in both.
 command = "sh"
-args = ["-c", "exec node \"$(git rev-parse --show-toplevel)/release/plugin/wolfram-mcp-server.mjs\""]
+args = ["-c", "exec node \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/release/plugin/wolfram-mcp-server.mjs\""]
 env = { WOLFRAM_MCP_DEFAULT_SERVER = "WolframLanguage" }
 # Codex passes a server only a short allow-list of its environment, where Claude Code passes
 # all of it, so without this every setting a user exported, and the directories the broker

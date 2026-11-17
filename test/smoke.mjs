@@ -11067,7 +11067,7 @@ heading("CLI");
     // `npm run release:artifacts` assembles the plugin at release/plugin, which
     // the entry's shell finds from the repository's root: Codex starts a server
     // where the session was launched, and resolves a relative `cwd` there too.
-    const rootOf = "$(git rev-parse --show-toplevel)/release/plugin";
+    const rootOf = "$(git rev-parse --show-toplevel 2>/dev/null || pwd)/release/plugin";
     const paths = manifest.args.map((arg) => arg.replace("${CLAUDE_PLUGIN_ROOT}", rootOf));
     const args = ["-c", `exec ${manifest.command} ${paths.map((path) => `"${path}"`).join(" ")}`];
     const pairs = Object.entries(manifest.env).map(([name, value]) => `${name} = ${JSON.stringify(value)}`);
@@ -11088,22 +11088,31 @@ heading("CLI");
     // only where Codex happened to start one directory down, and from the root
     // named the repository's parent. Resolve the entry's own path the way its
     // shell does, from a directory other than the root, and expect the bundle's.
-    // The path is read out of the entry itself, not the expectation above. In a
-    // repository of its own, two directories down: this tree may be a source
-    // export with no .git, where the shell would find no root at all.
-    const configured = /^args = \["-c", "exec node \\"([^"\\]+)\\""\]$/m.exec(entry)?.[1];
+    // The path is read out of the entry itself, not the expectation above. In
+    // trees of the check's own: a repository, two directories down, and a
+    // source export with no .git, where Codex loads the file only from the
+    // launch directory, which is then the root.
+    const configured = /^args = \["-c", "exec node \\"([^"]+)\\""\]$/m.exec(entry)?.[1];
     const repo = realpathSync(mkdtempSync(join(tmpdir(), "wmcp-codex-root-")));
+    const exported = realpathSync(mkdtempSync(join(tmpdir(), "wmcp-codex-export-")));
     spawnSync("git", ["init", "-q"], { cwd: repo });
     mkdirSync(join(repo, "a", "b"), { recursive: true });
-    const resolved = configured
-      ? spawnSync("sh", ["-c", `printf %s "${configured}"`], { cwd: join(repo, "a", "b"), encoding: "utf8" })
-      : undefined;
-    check(
-      "Codex's server entry finds the assembled plugin from anywhere in the repository",
-      resolved?.stdout === join(repo, "release", "plugin", "wolfram-mcp-server.mjs"),
-      resolved ? resolved.stdout || resolved.stderr.trim() : "no `exec node \"<path>\"` in the entry's args",
-    );
+    const resolveIn = (dir) =>
+      configured ? spawnSync("sh", ["-c", `printf %s "${configured}"`], { cwd: dir, encoding: "utf8" }) : undefined;
+    const bundleIn = (dir) => join(dir, "release", "plugin", "wolfram-mcp-server.mjs");
+    for (const [where, from, top] of [
+      ["two directories down in a repository", join(repo, "a", "b"), repo],
+      ["at the root of a tree with no .git", exported, exported],
+    ]) {
+      const resolved = resolveIn(from);
+      check(
+        `Codex's server entry finds the assembled plugin ${where}`,
+        resolved?.stdout === bundleIn(top),
+        resolved ? resolved.stdout || resolved.stderr.trim() : "no `exec node \"<path>\"` in the entry's args",
+      );
+    }
     rmSync(repo, { recursive: true, force: true });
+    rmSync(exported, { recursive: true, force: true });
     const forwarded = new Set(
       [...(/^env_vars = \[([\s\S]*?)\]/m.exec(entry)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map(([, name]) => name),
     );
