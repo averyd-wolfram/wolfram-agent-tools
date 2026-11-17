@@ -11088,16 +11088,22 @@ heading("CLI");
     // only where Codex happened to start one directory down, and from the root
     // named the repository's parent. Resolve the entry's own path the way its
     // shell does, from a directory other than the root, and expect the bundle's.
-    // The path is read out of the entry itself, not the expectation above.
+    // The path is read out of the entry itself, not the expectation above. In a
+    // repository of its own, two directories down: this tree may be a source
+    // export with no .git, where the shell would find no root at all.
     const configured = /^args = \["-c", "exec node \\"([^"\\]+)\\""\]$/m.exec(entry)?.[1];
+    const repo = realpathSync(mkdtempSync(join(tmpdir(), "wmcp-codex-root-")));
+    spawnSync("git", ["init", "-q"], { cwd: repo });
+    mkdirSync(join(repo, "a", "b"), { recursive: true });
     const resolved = configured
-      ? spawnSync("sh", ["-c", `printf %s "${configured}"`], { cwd: join(root, "test"), encoding: "utf8" })
+      ? spawnSync("sh", ["-c", `printf %s "${configured}"`], { cwd: join(repo, "a", "b"), encoding: "utf8" })
       : undefined;
     check(
       "Codex's server entry finds the assembled plugin from anywhere in the repository",
-      resolved?.stdout === join(realpathSync(root), "release", "plugin", "wolfram-mcp-server.mjs"),
+      resolved?.stdout === join(repo, "release", "plugin", "wolfram-mcp-server.mjs"),
       resolved ? resolved.stdout || resolved.stderr.trim() : "no `exec node \"<path>\"` in the entry's args",
     );
+    rmSync(repo, { recursive: true, force: true });
     const forwarded = new Set(
       [...(/^env_vars = \[([\s\S]*?)\]/m.exec(entry)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map(([, name]) => name),
     );
