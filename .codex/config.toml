@@ -16,14 +16,11 @@ mcp_optional_startup_grace_ms = 0
 
 # The plugin's own server, from the tree `npm run release:artifacts` assembles: what Claude
 # Code runs in this repository too (`.claude/settings.json`). The same bytes, so the two share
-# one broker and one pool of seats where two programs would be two pools against one licence.
-# And opening a branch runs none of its source: release/ is untracked and changes only when
-# someone assembles it, where .mcp.json's `npm run mcp` would run the checked-out branch's own
-# package.json and launcher, outside Codex's sandbox, before anyone had reviewed them. A branch
-# can still change this file, as it can .claude/settings.json's hooks for Claude Code, so
-# review a branch you do not trust in a checkout neither trusts (AGENTS.md). Until
-# it is assembled the server fails to start, and Codex goes on without it. The suite fails
-# when this entry drifts from the plugin's manifest.
+# one broker and one pool of seats where two programs would be two pools against one licence,
+# and a session runs what was last assembled rather than whatever the checked-out branch's
+# package.json says. What a branch you have not reviewed can make either tool run as a
+# session starts is #181. Until it is assembled the server fails to start, and Codex goes on
+# without it. The suite fails when this entry drifts from the plugin's manifest.
 #
 # A name of its own: Codex merges a table of the same name from the user's config into this
 # one, so a user with a `WolframLanguage` server of their own, an HTTP one say, would have
