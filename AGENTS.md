@@ -238,13 +238,10 @@ built-ins, which is the bug it exists for.
   the reasoning effort reviews run at and serves `.mcp.json`'s server to Codex, which does not
   read `.mcp.json`, under a name of its own so a user's server of the same name cannot clash:
   keep the two in step. Codex lists tools as a session starts, as Claude Code does, so on a
-  cold cache its first session starts a kernel to learn them. `agents/` holds the custom
-  agents the skills spawn
-- `.agents/skills/`: skills Codex and Claude Code share, where Codex reads them;
-  `.claude/skills/` links each one Claude Code should load, since it reads only its own.
-  `red-team` attacks a design or a change for every way its promise can fail;
-  `wolfram-language` links the plugin's own, so Codex knows the Wolfram tools too. That one is
-  written for Claude Code until §5 MA renders skills per client (D30): in Codex, its
+  cold cache its first session starts a kernel to learn them
+- `.agents/skills/`: where Codex reads a repository's skills. `wolfram-language` links the
+  plugin's own, so Codex knows the Wolfram tools a Claude Code session learns from the plugin.
+  It is written for Claude Code until §5 MA renders skills per client (D30): in Codex, its
   `/wolfram:doctor` is `npm run doctor`
 - `.github/dependabot.yml`: weekly npm and Actions updates, and security updates; its header
   says how their titles fit the release pipeline
