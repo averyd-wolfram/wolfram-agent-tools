@@ -36,7 +36,10 @@ env = { WOLFRAM_MCP_DEFAULT_SERVER = "WolframLanguage" }
 # and cache live in, would vanish: a different kernel, a different flavour, a different broker.
 # Every variable src/ reads, less the Windows ones and those `env` sets, and the three Node's
 # tmpdir() reads, which decides the broker's directory when nothing names one. The suite fails
-# when one is missing. A variable that WOLFRAM_MCP_KERNEL_ENV names must be added by hand.
+# when one is missing. A variable of your own that WOLFRAM_MCP_KERNEL_ENV names is not here:
+# give it its value under `[mcp_servers.wolfram-agent-tools-dev.env]` in ~/.codex/config.toml,
+# which Codex merges with this entry's `env` (measured), since an `env_vars` there replaces
+# this list rather than adding to it.
 env_vars = [
   "LLMKIT_ENABLED", "MCP_APPS_ENABLED", "MCP_APPS_NOTEBOOK_METHOD", "MCP_SERVER_NAME",
   "MCP_TOOL_OPTIONS", "TEMP", "TMP", "TMPDIR", "WOLFRAMINIT", "WOLFRAMSCRIPT_CONFIGURATIONPATH",
