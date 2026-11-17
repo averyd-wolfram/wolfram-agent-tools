@@ -766,8 +766,14 @@ are *traced* in this tree on 2026-10-05 unless marked otherwise.
    - **What it is.** One lease per installation and licence, which every kernel this package
      starts takes a seat from before it spawns: a broker's pool, a private kernel, the LSP's.
      A start that finds no free seat waits for one, as a pool's waiter does now, rather than
-     spawn a kernel the licence would refuse. Where the licence is unlimited there is no lease;
-     where it is unknown, the lease keeps the size it last knew, as the pool keeps its budget.
+     spawn a kernel the licence would refuse. Where the licence is unlimited there is no lease.
+   - **Before the licence is known there is no lease.** Only a kernel reports the licence, so
+     on a cold machine, after `clear-cache`, or under `WOLFRAM_MCP_INSPECT=0`, nothing can
+     size it, and a provisional size would let an LSP kernel, which reports no facts, hold
+     the only seat and keep every tool kernel waiting (Codex on #176). So until a kernel's
+     report sizes the lease, starts behave as today, and a kernel started meanwhile, the LSP's
+     included, holds no seat. A cold machine can therefore still meet a refused start, which
+     #143 turns into a short wait.
    - **Its key.** The installation, not the kernel binary's path: one installation was used
      through two binaries on this machine (`Executables/wolfram`, and `WolframKernel` after
      `WolframScript.conf` changed on 2026-11-04), and two leases for one licence would each
@@ -781,14 +787,15 @@ are *traced* in this tree on 2026-10-05 unless marked otherwise.
      its budget of seats less the reserve, so with one broker nothing changes. A lease of
      seats less the reserve would keep that seat free across every kernel, but on a 2-seat
      licence it would leave the tools no seat while the LSP's kernel runs, and that kernel runs
-     for the session's life (13 days, measured on 2026-11-17). So the lease stops refused
+     for the session's life. So the lease stops refused
      starts, and the reserve across two brokers stays MD-2's known limit.
-   - **A dead holder's seat comes back.** A pid alone can't say a seat's holder died, since a
-     crashed holder's pid can be reused by an unrelated process that then holds the seat for
-     as long as it runs. So a seat names its holder by pid and that process's start time, and
-     is reclaimed when no process has both; or it is a lock the operating system releases when
-     its holder exits, if one can be held from Node on both platforms without a native module.
-     Which one is the implementation's first measurement.
+   - **A seat lives as long as its kernel.** The launcher takes the seat before it spawns,
+     and once the kernel is running the seat names the kernel's own process, not the
+     launcher's: a launcher killed while its kernel lives on must not free a seat the licence
+     still counts (Codex on #176). A seat is freed when the process it names is gone. A pid
+     alone can't say that, since a dead process's pid can be reused, so a seat names its
+     process by pid and start time. The window between taking the seat and naming the kernel
+     belongs to the launcher, and is freed with it.
    - **What it keeps, and what it costs.** Every session is served by its own release's code,
      so *sharing may never change an answer* stands as written. Two releases still run two
      brokers, and a server both use runs a kernel in each. A start can wait for a seat another
@@ -800,8 +807,10 @@ are *traced* in this tree on 2026-10-05 unless marked otherwise.
      - the LSP kernel and a private kernel count against the lease, and on a 2-seat licence
        the LSP's kernel and one tool kernel still both run, as today;
      - an entitlement's kernels count against their own lease, not the activation's;
-     - a seat whose holder was killed is reclaimed, and so is one whose pid now belongs to
-       another process.
+     - a seat whose kernel was killed is freed, and so is one whose pid now belongs to
+       another process; a seat whose launcher was killed while its kernel lives on is not;
+     - on a cold machine, an LSP kernel started first leaves the tools' kernels free to
+       start.
    - **The harm it removes**, as measured. An idle kernel stops after 10 minutes, so an older
      release's broker holds no seat unless its session used a kernel recently: the 0.1.7
      broker still running on 2026-11-17 held none. The harm is two releases in use at once on
@@ -809,17 +818,17 @@ are *traced* in this tree on 2026-10-05 unless marked otherwise.
      as though the installation were broken (#143). The lease turns that into a wait. #143's
      seat-refusal measurement comes first, since the lease's checks need a refused start to
      compare against.
-   - **Why not one broker across releases (A).** Measured against every release on
-     2026-11-17:
+   - **Why not one broker across releases (A).** Measured against the release history on
+     2026-11-17; the figures are on #59, and `git diff --name-only v<a> v<b> -- src/` with
+     `BROKER_PROTOCOL` at each tag reproduces them.
      - **It reaches less than it seemed.** It could join only releases of one
-       `BROKER_PROTOCOL`, which changed 4 times in 15 releases (6 at 0.1.4, 7 at 0.1.8, 8 at
-       0.1.10, 9 at 0.1.12), so 10 of the 14 upgrades, and only on one kernel path. The 0.1.7
-       and 0.2.1 brokers seen side by side on 2026-11-10 differed in both, so A would not have
+       `BROKER_PROTOCOL`, which has changed often, and only on one kernel path. The 0.1.7 and
+       0.2.1 brokers seen side by side on 2026-11-10 differed in both, so A would not have
        joined them.
      - **Its relaxation of the invariant is the common case.** An older session served by a
        newer broker gets the newer broker's behaviour, which `BROKER_PROTOCOL` does not pin.
-       Of those 10 upgrades, 7 changed code a broker runs (`kernel`, `pool`, `broker-server`,
-       `prepare`), and the other 3 changed the MCP SDK it runs.
+       Most upgrades it could join changed code a broker runs (`kernel`, `pool`,
+       `broker-server`, `prepare`), and the rest changed the MCP SDK it runs.
      - **It needs the lease anyway.** While the old broker answers its calls in flight, its
        kernels keep their seats, and a new broker sizing its own pool beside them overruns the
        licence (Codex on #176).
