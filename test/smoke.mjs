@@ -11057,10 +11057,12 @@ heading("CLI");
   {
     const manifest = JSON.parse(readFileSync(join(root, "plugin", ".claude-plugin", "plugin.json"), "utf8"))
       .mcpServers.WolframLanguage;
+    // Up to the next table only: a later table of the same shape would otherwise
+    // supply the line this one drifted from.
     const entry = (
-      readFileSync(join(root, ".codex", "config.toml"), "utf8").split(
-        /^\[mcp_servers\.wolfram-agent-tools-dev\]$/m,
-      )[1] ?? ""
+      readFileSync(join(root, ".codex", "config.toml"), "utf8")
+        .split(/^\[mcp_servers\.wolfram-agent-tools-dev\]$/m)[1]
+        ?.split(/^\[/m)[0] ?? ""
     ).replace(/#.*$/gm, "");
     // `npm run release:artifacts` assembles the plugin at release/plugin, which
     // the entry names from the repository's root.

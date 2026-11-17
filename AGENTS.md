@@ -236,8 +236,11 @@ built-ins, which is the bug it exists for.
 - `.codex/`: Codex's project layer, which it loads only once the user marks the repository
   trusted in `~/.codex/config.toml`, and otherwise ignores without a word. `config.toml` sets
   the reasoning effort reviews run at, and serves Codex the plugin's server from the assembled
-  `release/plugin/`, as Claude Code runs it here: the same bytes, so one broker, and no code of
-  a checked-out branch runs before it is reviewed, as `.mcp.json`'s `npm run mcp` would. It
+  `release/plugin/`, as Claude Code runs it here: the same bytes, so one broker, and none of a
+  checked-out branch's source runs before it is reviewed, as `.mcp.json`'s `npm run mcp` would.
+  A branch's own `.codex/` and `.claude/settings.json` still take effect, hooks and server
+  commands included, so review a branch you do not trust where neither loads them: Codex in a
+  worktree it has not been told to trust, Claude Code with `--setting-sources user`. It
   is named apart so a user's server of the same name cannot clash, and the suite holds it to
   the plugin's manifest. Codex lists tools as a session starts, as Claude Code does, so on a
   cold cache its first session starts a kernel to learn them
