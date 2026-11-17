@@ -11074,7 +11074,8 @@ heading("CLI");
       ["cwd", `cwd = ".."`],
       ["env", `env = { ${pairs.join(", ")} }`],
     ]
-      .filter(([, line]) => !entry.includes(line))
+      // Whole lines: as a substring, `launcher_args = [...]` passed for `args`.
+      .filter(([, line]) => !entry.split("\n").some((text) => text.trim() === line))
       .map(([field]) => field);
     check(
       "Codex's server entry runs the plugin's own server",
@@ -11082,7 +11083,7 @@ heading("CLI");
       drifted.length ? `differs in: ${drifted.join(", ")}` : "",
     );
     const forwarded = new Set(
-      [...(/env_vars = \[([\s\S]*?)\]/.exec(entry)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map(([, name]) => name),
+      [...(/^env_vars = \[([\s\S]*?)\]/m.exec(entry)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map(([, name]) => name),
     );
     const windowsOnly = new Set(["LOCALAPPDATA", "APPDATA", "ProgramFiles"]);
     // Read by Node's tmpdir(), which picks the broker's directory when nothing

@@ -51,9 +51,11 @@ env_vars = [
   "WOLFRAM_MIN_VERSION", "WOLFRAM_START_TIMEOUT_SECONDS", "WOLFRAM_USERBASE", "XDG_CACHE_HOME",
   "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR",
 ]
-# A cold list waits for a kernel's start, which WOLFRAM_MCP_START_TIMEOUT_SECONDS bounds at
-# 120 s by default.
-startup_timeout_sec = 150
+# Codex holds the first tools/list to this too, and a cold one waits for a kernel: on the shared
+# path the broker allows it the start timeout, the 60 s request deadline and 2 s of grace
+# (`brokerCeilingMs`), 182 s by default, after up to ~9 s attaching to the broker. Raise this
+# with WOLFRAM_MCP_START_TIMEOUT_SECONDS.
+startup_timeout_sec = 200
 # The server answers every call by its own ceiling (`evaluationCeilingMs`), which a requested
 # timeConstraint raises as far as MAX_TIME_MS, 24 days, so Codex's timeout must never be the one
 # that fires: at its default of 60 s, a cold kernel start alone would outlast it. A minute past
