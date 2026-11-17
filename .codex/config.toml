@@ -1,0 +1,70 @@
+# Codex's project layer for this repository. Codex loads it only when the user has marked the
+# repository trusted (`[projects."<path>"] trust_level = "trusted"` in ~/.codex/config.toml);
+# untrusted, it silently ignores this file.
+#
+# No `model`: Codex then uses the newest default model, which is what reviews here should run
+# on. A pin here would go stale the day a newer model ships, as 6.1 did on 2026-11-17.
+
+# Reviews are most of what Codex does here, and the default (medium) misses what a second
+# round then finds.
+model_reasoning_effort = "high"
+
+# Codex gives an optional server one second to list its tools before a session's first turn,
+# and a cold list waits for a kernel to start, so the first turn would go without the Wolfram
+# tools. 0 waits up to the server's own startup_timeout_sec; a cached list answers at once.
+mcp_optional_startup_grace_ms = 0
+
+# The plugin's own server, from the tree `npm run release:artifacts` assembles: what Claude
+# Code runs in this repository too (`.claude/settings.json`). The same bytes, so the two share
+# one broker and one pool of seats where two programs would be two pools against one licence,
+# and a session runs what was last assembled rather than whatever the checked-out branch's
+# package.json says. What a branch you have not reviewed can make either tool run as a
+# session starts is #181. Until it is assembled the server fails to start, and Codex goes on
+# without it. The suite fails when this entry drifts from the plugin's manifest.
+#
+# A name of its own: Codex merges a table of the same name from the user's config into this
+# one, so a user with a `WolframLanguage` server of their own, an HTTP one say, would have
+# Codex refuse the whole configuration and not start in this repository at all.
+[mcp_servers.wolfram-agent-tools-dev]
+# Codex starts a server in the directory the session was launched from, and resolves a relative
+# `cwd` against that directory too, not this file's (measured: `..` from the root was the
+# repository's parent), so the shell finds the repository's root itself, wherever in it Codex
+# started; `exec` leaves node as the process Codex signals. Where there is no .git, a source
+# export say, Codex takes the launch directory as the project's root, and loads this file only
+# there, so that directory is the root. The suite checks the path resolves in both.
+command = "sh"
+args = ["-c", "exec node \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/release/plugin/wolfram-mcp-server.mjs\""]
+env = { WOLFRAM_MCP_DEFAULT_SERVER = "WolframLanguage" }
+# Codex passes a server only a short allow-list of its environment, where Claude Code passes
+# all of it, so without this every setting a user exported, and the directories the broker
+# and cache live in, would vanish: a different kernel, a different flavour, a different broker.
+# Every variable src/ reads, less the Windows ones and those `env` sets, and the three Node's
+# tmpdir() reads, which decides the broker's directory when nothing names one. The suite fails
+# when one is missing. A variable of your own that WOLFRAM_MCP_KERNEL_ENV names is not here:
+# give it its value under `[mcp_servers.wolfram-agent-tools-dev.env]` in ~/.codex/config.toml,
+# which Codex merges with this entry's `env` (measured), since an `env_vars` there replaces
+# this list rather than adding to it.
+env_vars = [
+  "LLMKIT_ENABLED", "MCP_APPS_ENABLED", "MCP_APPS_NOTEBOOK_METHOD", "MCP_SERVER_NAME",
+  "MCP_TOOL_OPTIONS", "TEMP", "TMP", "TMPDIR", "WOLFRAMINIT", "WOLFRAMSCRIPT_CONFIGURATIONPATH",
+  "WOLFRAMSCRIPT_KERNELPATH", "WOLFRAM_BASE", "WOLFRAM_CALL_TIMEOUT_SECONDS",
+  "WOLFRAM_CLOUDBASE", "WOLFRAM_HOME", "WOLFRAM_IDLE_MINUTES", "WOLFRAM_INSTALLATION_DIRECTORY",
+  "WOLFRAM_KERNEL_PATH", "WOLFRAM_LOCALBASE", "WOLFRAM_MCP_CACHE",
+  "WOLFRAM_MCP_CALL_TIMEOUT_SECONDS", "WOLFRAM_MCP_IDLE_MINUTES", "WOLFRAM_MCP_INSPECT",
+  "WOLFRAM_MCP_KERNEL", "WOLFRAM_MCP_KERNEL_ENV", "WOLFRAM_MCP_LICENSE_LIMIT", "WOLFRAM_MCP_LOG",
+  "WOLFRAM_MCP_LSP", "WOLFRAM_MCP_MAX_KERNELS", "WOLFRAM_MCP_MIN_VERSION",
+  "WOLFRAM_MCP_RESERVE_SEATS", "WOLFRAM_MCP_RUNTIME_DIR", "WOLFRAM_MCP_SERVER_NAME",
+  "WOLFRAM_MCP_SHARE", "WOLFRAM_MCP_START_TIMEOUT_SECONDS", "WOLFRAM_MCP_VERSION",
+  "WOLFRAM_MIN_VERSION", "WOLFRAM_START_TIMEOUT_SECONDS", "WOLFRAM_USERBASE", "XDG_CACHE_HOME",
+  "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR",
+]
+# Codex holds the first tools/list to this too, and a cold one waits for a kernel: on the shared
+# path the broker allows it the start timeout, the 60 s request deadline and 2 s of grace
+# (`brokerCeilingMs`), 182 s by default, after up to ~9 s attaching to the broker. Raise this
+# with WOLFRAM_MCP_START_TIMEOUT_SECONDS.
+startup_timeout_sec = 200
+# The server answers every call by its own ceiling (`evaluationCeilingMs`), which a requested
+# timeConstraint raises as far as MAX_TIME_MS, 24 days, so Codex's timeout must never be the one
+# that fires: at its default of 60 s, a cold kernel start alone would outlast it. A minute past
+# that; it is the only bound left on a call when the user configured no ceiling at all.
+tool_timeout_sec = 2073660

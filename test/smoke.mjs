@@ -11045,6 +11045,91 @@ heading("CLI");
     unreported.length ? `not in CONFIG_VARS: ${unreported.join(", ")}` : "",
   );
 
+  // .codex/config.toml serves the plugin's server to Codex, from the assembled
+  // tree Claude Code runs here, so that both run the same bytes and share a
+  // broker. Codex reads only its own config and passes a server only the
+  // variables `env_vars` names: a setting added to src/ and not there works in
+  // Claude Code and silently not in Codex, and an entry that drifts from the
+  // manifest is a second program, a second pool against one licence. Read as
+  // text: Node has no TOML parser, and the file is ours. Its comments go first,
+  // so a commented-out value does not count as one set; no value in the entry
+  // holds a `#`.
+  {
+    const manifest = JSON.parse(readFileSync(join(root, "plugin", ".claude-plugin", "plugin.json"), "utf8"))
+      .mcpServers.WolframLanguage;
+    // Up to the next table only: a later table of the same shape would otherwise
+    // supply the line this one drifted from.
+    const entry = (
+      readFileSync(join(root, ".codex", "config.toml"), "utf8")
+        .split(/^\[mcp_servers\.wolfram-agent-tools-dev\]$/m)[1]
+        ?.split(/^\[/m)[0] ?? ""
+    ).replace(/#.*$/gm, "");
+    // `npm run release:artifacts` assembles the plugin at release/plugin, which
+    // the entry's shell finds from the repository's root: Codex starts a server
+    // where the session was launched, and resolves a relative `cwd` there too.
+    const rootOf = "$(git rev-parse --show-toplevel 2>/dev/null || pwd)/release/plugin";
+    const paths = manifest.args.map((arg) => arg.replace("${CLAUDE_PLUGIN_ROOT}", rootOf));
+    const args = ["-c", `exec ${manifest.command} ${paths.map((path) => `"${path}"`).join(" ")}`];
+    const pairs = Object.entries(manifest.env).map(([name, value]) => `${name} = ${JSON.stringify(value)}`);
+    const drifted = [
+      ["command", `command = "sh"`],
+      ["args", `args = [${args.map((arg) => JSON.stringify(arg)).join(", ")}]`],
+      ["env", `env = { ${pairs.join(", ")} }`],
+    ]
+      // Whole lines: as a substring, `launcher_args = [...]` passed for `args`.
+      .filter(([, line]) => !entry.split("\n").some((text) => text.trim() === line))
+      .map(([field]) => field);
+    check(
+      "Codex's server entry runs the plugin's own server",
+      entry !== "" && drifted.length === 0,
+      drifted.length ? `differs in: ${drifted.join(", ")}` : "",
+    );
+    // What failed in practice: `cwd = ".."` beside `release/plugin/...` held
+    // only where Codex happened to start one directory down, and from the root
+    // named the repository's parent. Resolve the entry's own path the way its
+    // shell does, from a directory other than the root, and expect the bundle's.
+    // The path is read out of the entry itself, not the expectation above. In
+    // trees of the check's own: a repository, two directories down, and a
+    // source export with no .git, where Codex loads the file only from the
+    // launch directory, which is then the root.
+    const configured = /^args = \["-c", "exec node \\"([^"]+)\\""\]$/m.exec(entry)?.[1];
+    const repo = realpathSync(mkdtempSync(join(tmpdir(), "wmcp-codex-root-")));
+    const exported = realpathSync(mkdtempSync(join(tmpdir(), "wmcp-codex-export-")));
+    spawnSync("git", ["init", "-q"], { cwd: repo });
+    mkdirSync(join(repo, "a", "b"), { recursive: true });
+    const resolveIn = (dir) =>
+      configured ? spawnSync("sh", ["-c", `printf %s "${configured}"`], { cwd: dir, encoding: "utf8" }) : undefined;
+    const bundleIn = (dir) => join(dir, "release", "plugin", "wolfram-mcp-server.mjs");
+    for (const [where, from, top] of [
+      ["two directories down in a repository", join(repo, "a", "b"), repo],
+      ["at the root of a tree with no .git", exported, exported],
+    ]) {
+      const resolved = resolveIn(from);
+      check(
+        `Codex's server entry finds the assembled plugin ${where}`,
+        resolved?.stdout === bundleIn(top),
+        resolved ? resolved.stdout || resolved.stderr.trim() : "no `exec node \"<path>\"` in the entry's args",
+      );
+    }
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(exported, { recursive: true, force: true });
+    const forwarded = new Set(
+      [...(/^env_vars = \[([\s\S]*?)\]/m.exec(entry)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map(([, name]) => name),
+    );
+    const windowsOnly = new Set(["LOCALAPPDATA", "APPDATA", "ProgramFiles"]);
+    // Read by Node's tmpdir(), which picks the broker's directory when nothing
+    // names one, so not by name anywhere in src/.
+    const readByNode = ["TMPDIR", "TMP", "TEMP"];
+    const unforwarded = [...envNames(sourceText), ...readByNode]
+      .filter((name) => !windowsOnly.has(name) && !(name in manifest.env) && !forwarded.has(name))
+      .sort();
+    check(
+      "Codex forwards every variable the code reads",
+      forwarded.size > 0 && unforwarded.length === 0,
+      unforwarded.length ? `not in env_vars: ${unforwarded.join(", ")}` : `${forwarded.size} forwarded`,
+    );
+  }
+
   const version = run(["--version"]);
   check("--version prints the package version", version.stdout.trim() === lib.PKG.version);
 
