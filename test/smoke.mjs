@@ -11045,30 +11045,37 @@ heading("CLI");
     unreported.length ? `not in CONFIG_VARS: ${unreported.join(", ")}` : "",
   );
 
-  // .codex/config.toml serves .mcp.json's server to Codex, which reads only its
-  // own config and passes a server only the variables `env_vars` names. A
-  // setting added to src/ and not there works in Claude Code and silently not in
-  // Codex; an entry that drifts from .mcp.json runs a differently configured
-  // server. Read as text: Node has no TOML parser, and the file is ours. Its
-  // comments go first, so a commented-out value does not count as one set; no
-  // value in the entry holds a `#`.
+  // .codex/config.toml serves the plugin's server to Codex, from the assembled
+  // tree Claude Code runs here, so that both run the same bytes and share a
+  // broker. Codex reads only its own config and passes a server only the
+  // variables `env_vars` names: a setting added to src/ and not there works in
+  // Claude Code and silently not in Codex, and an entry that drifts from the
+  // manifest is a second program, a second pool against one licence. Read as
+  // text: Node has no TOML parser, and the file is ours. Its comments go first,
+  // so a commented-out value does not count as one set; no value in the entry
+  // holds a `#`.
   {
-    const mcpJson = JSON.parse(readFileSync(join(root, ".mcp.json"), "utf8")).mcpServers.WolframLanguage;
+    const manifest = JSON.parse(readFileSync(join(root, "plugin", ".claude-plugin", "plugin.json"), "utf8"))
+      .mcpServers.WolframLanguage;
     const entry = (
       readFileSync(join(root, ".codex", "config.toml"), "utf8").split(
         /^\[mcp_servers\.wolfram-agent-tools-dev\]$/m,
       )[1] ?? ""
     ).replace(/#.*$/gm, "");
-    const pairs = Object.entries(mcpJson.env).map(([name, value]) => `${name} = ${JSON.stringify(value)}`);
+    // `npm run release:artifacts` assembles the plugin at release/plugin, which
+    // the entry names from the repository's root.
+    const args = manifest.args.map((arg) => arg.replace("${CLAUDE_PLUGIN_ROOT}", "release/plugin"));
+    const pairs = Object.entries(manifest.env).map(([name, value]) => `${name} = ${JSON.stringify(value)}`);
     const drifted = [
-      ["command", `command = ${JSON.stringify(mcpJson.command)}`],
-      ["args", `args = [${mcpJson.args.map((arg) => JSON.stringify(arg)).join(", ")}]`],
+      ["command", `command = ${JSON.stringify(manifest.command)}`],
+      ["args", `args = [${args.map((arg) => JSON.stringify(arg)).join(", ")}]`],
+      ["cwd", `cwd = ".."`],
       ["env", `env = { ${pairs.join(", ")} }`],
     ]
       .filter(([, line]) => !entry.includes(line))
       .map(([field]) => field);
     check(
-      "Codex's copy of .mcp.json's server matches it",
+      "Codex's server entry runs the plugin's own server",
       entry !== "" && drifted.length === 0,
       drifted.length ? `differs in: ${drifted.join(", ")}` : "",
     );
@@ -11076,8 +11083,11 @@ heading("CLI");
       [...(/env_vars = \[([\s\S]*?)\]/.exec(entry)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map(([, name]) => name),
     );
     const windowsOnly = new Set(["LOCALAPPDATA", "APPDATA", "ProgramFiles"]);
-    const unforwarded = [...envNames(sourceText)]
-      .filter((name) => !windowsOnly.has(name) && !(name in mcpJson.env) && !forwarded.has(name))
+    // Read by Node's tmpdir(), which picks the broker's directory when nothing
+    // names one, so not by name anywhere in src/.
+    const readByNode = ["TMPDIR", "TMP", "TEMP"];
+    const unforwarded = [...envNames(sourceText), ...readByNode]
+      .filter((name) => !windowsOnly.has(name) && !(name in manifest.env) && !forwarded.has(name))
       .sort();
     check(
       "Codex forwards every variable the code reads",

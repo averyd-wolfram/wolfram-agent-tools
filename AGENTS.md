@@ -235,9 +235,11 @@ built-ins, which is the bug it exists for.
 - `.mcp.json`: committed, so this repo runs its own working tree as an MCP server
 - `.codex/`: Codex's project layer, which it loads only once the user marks the repository
   trusted in `~/.codex/config.toml`, and otherwise ignores without a word. `config.toml` sets
-  the reasoning effort reviews run at and serves `.mcp.json`'s server to Codex, which does not
-  read `.mcp.json`, under a name of its own so a user's server of the same name cannot clash:
-  keep the two in step. Codex lists tools as a session starts, as Claude Code does, so on a
+  the reasoning effort reviews run at, and serves Codex the plugin's server from the assembled
+  `release/plugin/`, as Claude Code runs it here: the same bytes, so one broker, and no code of
+  a checked-out branch runs before it is reviewed, as `.mcp.json`'s `npm run mcp` would. It
+  is named apart so a user's server of the same name cannot clash, and the suite holds it to
+  the plugin's manifest. Codex lists tools as a session starts, as Claude Code does, so on a
   cold cache its first session starts a kernel to learn them
 - `.agents/skills/`: where Codex reads a repository's skills. `wolfram-language` links the
   plugin's own, so Codex knows the Wolfram tools a Claude Code session learns from the plugin.
@@ -418,12 +420,12 @@ conversation).
 repo runs the working tree through the plugin (`wolfram@wolfram`) and only through it —
 `.claude/settings.json` retires `.mcp.json`'s copy of the same server so the tools appear
 once. `.mcp.json` stays committed as the harness-agnostic entry: it is what an MCP client
-without Claude Code's plugin system points at, and the command `.codex/config.toml` gives a
-Codex session: the working tree, a different program from the plugin's bundle, so its broker
-and kernels are its own. Each broker sizes its pool from the whole licence, so a Claude Code
-and a Codex session at once are two pools against one licence (#59): on a licence of two or
-four seats they can together start a kernel the licence refuses. Consider how a change affects the session you are typing into — and
-note that it keeps running the code it loaded at startup, however many times you rebuild.
+without Claude Code's plugin system points at. A Codex session here runs the plugin's server
+too (`.codex/config.toml`), from the same assembled tree, so the two share a broker; run
+anything else beside them, `.mcp.json`'s working tree say, and it is a second program with a
+broker of its own, sizing its pool from the whole licence (#59). Consider how a change affects
+the session you are typing into — and note that it keeps running the code it loaded at
+startup, however many times you rebuild.
 
 ## Code Review Rules
 

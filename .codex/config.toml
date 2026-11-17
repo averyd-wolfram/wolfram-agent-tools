@@ -1,45 +1,60 @@
 # Codex's project layer for this repository. Codex loads it only when the user has marked the
 # repository trusted (`[projects."<path>"] trust_level = "trusted"` in ~/.codex/config.toml);
-# untrusted, it silently ignores this file and .codex/agents/ alike.
+# untrusted, it silently ignores this file.
 #
 # No `model`: Codex then uses the newest default model, which is what reviews here should run
 # on. A pin here would go stale the day a newer model ships, as 6.1 did on 2026-11-17.
 
-# Reviews and red teams are most of what Codex does here, and the default (medium) misses
-# what a second round then finds.
+# Reviews are most of what Codex does here, and the default (medium) misses what a second
+# round then finds.
 model_reasoning_effort = "high"
 
-# The same server as .mcp.json, which Codex does not read; the suite fails when the two differ.
-# It gives Codex the Wolfram tools a Claude Code session gets from the plugin, so a review can
-# lint a .wl file or look a symbol up rather than guess. A tool call starts a kernel, which
-# costs a licence seat, and so does a session's first tool listing while no list is cached:
-# Codex lists tools as it starts, as Claude Code does, and the list is cached on disk for both.
+# Codex gives an optional server one second to list its tools before a session's first turn,
+# and a cold list waits for a kernel to start, so the first turn would go without the Wolfram
+# tools. 0 waits up to the server's own startup_timeout_sec; a cached list answers at once.
+mcp_optional_startup_grace_ms = 0
+
+# The plugin's own server, from the tree `npm run release:artifacts` assembles: what Claude
+# Code runs in this repository too (`.claude/settings.json`). The same bytes, so the two share
+# one broker and one pool of seats where two programs would be two pools against one licence.
+# And opening a branch runs none of its code: release/ is untracked and changes only when
+# someone assembles it, where .mcp.json's `npm run mcp` would run the checked-out branch's own
+# package.json and launcher, outside Codex's sandbox, before anyone had reviewed them. Until
+# it is assembled the server fails to start, and Codex goes on without it. The suite fails
+# when this entry drifts from the plugin's manifest.
 #
-# Not .mcp.json's name: Codex merges a table of the same name from the user's own config into
-# this one, so a user with a `WolframLanguage` server of their own, an HTTP one say, would have
+# A name of its own: Codex merges a table of the same name from the user's config into this
+# one, so a user with a `WolframLanguage` server of their own, an HTTP one say, would have
 # Codex refuse the whole configuration and not start in this repository at all.
 [mcp_servers.wolfram-agent-tools-dev]
-command = "npm"
-args = ["run", "--silent", "mcp"]
-env = { MCP_SERVER_NAME = "WolframLanguage", WOLFRAM_MCP_IDLE_MINUTES = "15" }
-# Codex passes a server only a short allow-list of its environment, so without this every
-# setting a user exported, and the directories the broker and cache live in, would vanish:
-# a different kernel, a different flavour, a different broker. Every variable src/ reads, less
-# the Windows ones and those `env` sets; the suite fails when one is missing. A variable that
-# WOLFRAM_MCP_KERNEL_ENV names must be added here by hand.
+command = "node"
+args = ["release/plugin/wolfram-mcp-server.mjs"]
+# Relative to this .codex/ folder, so the repository's root wherever Codex was started.
+cwd = ".."
+env = { WOLFRAM_MCP_DEFAULT_SERVER = "WolframLanguage" }
+# Codex passes a server only a short allow-list of its environment, where Claude Code passes
+# all of it, so without this every setting a user exported, and the directories the broker
+# and cache live in, would vanish: a different kernel, a different flavour, a different broker.
+# Every variable src/ reads, less the Windows ones and those `env` sets, and the three Node's
+# tmpdir() reads, which decides the broker's directory when nothing names one. The suite fails
+# when one is missing. A variable that WOLFRAM_MCP_KERNEL_ENV names must be added by hand.
 env_vars = [
-  "LLMKIT_ENABLED", "MCP_APPS_ENABLED", "MCP_APPS_NOTEBOOK_METHOD", "MCP_TOOL_OPTIONS",
-  "WOLFRAMINIT", "WOLFRAMSCRIPT_CONFIGURATIONPATH", "WOLFRAMSCRIPT_KERNELPATH", "WOLFRAM_BASE",
-  "WOLFRAM_CALL_TIMEOUT_SECONDS", "WOLFRAM_CLOUDBASE", "WOLFRAM_HOME", "WOLFRAM_IDLE_MINUTES",
-  "WOLFRAM_INSTALLATION_DIRECTORY", "WOLFRAM_KERNEL_PATH", "WOLFRAM_LOCALBASE",
-  "WOLFRAM_MCP_CACHE", "WOLFRAM_MCP_CALL_TIMEOUT_SECONDS", "WOLFRAM_MCP_DEFAULT_SERVER",
-  "WOLFRAM_MCP_INSPECT", "WOLFRAM_MCP_KERNEL", "WOLFRAM_MCP_KERNEL_ENV",
-  "WOLFRAM_MCP_LICENSE_LIMIT", "WOLFRAM_MCP_LOG", "WOLFRAM_MCP_LSP", "WOLFRAM_MCP_MAX_KERNELS",
-  "WOLFRAM_MCP_MIN_VERSION", "WOLFRAM_MCP_RESERVE_SEATS", "WOLFRAM_MCP_RUNTIME_DIR",
-  "WOLFRAM_MCP_SERVER_NAME", "WOLFRAM_MCP_SHARE", "WOLFRAM_MCP_START_TIMEOUT_SECONDS",
-  "WOLFRAM_MCP_VERSION", "WOLFRAM_MIN_VERSION", "WOLFRAM_START_TIMEOUT_SECONDS",
-  "WOLFRAM_USERBASE", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR",
+  "LLMKIT_ENABLED", "MCP_APPS_ENABLED", "MCP_APPS_NOTEBOOK_METHOD", "MCP_SERVER_NAME",
+  "MCP_TOOL_OPTIONS", "TEMP", "TMP", "TMPDIR", "WOLFRAMINIT", "WOLFRAMSCRIPT_CONFIGURATIONPATH",
+  "WOLFRAMSCRIPT_KERNELPATH", "WOLFRAM_BASE", "WOLFRAM_CALL_TIMEOUT_SECONDS",
+  "WOLFRAM_CLOUDBASE", "WOLFRAM_HOME", "WOLFRAM_IDLE_MINUTES", "WOLFRAM_INSTALLATION_DIRECTORY",
+  "WOLFRAM_KERNEL_PATH", "WOLFRAM_LOCALBASE", "WOLFRAM_MCP_CACHE",
+  "WOLFRAM_MCP_CALL_TIMEOUT_SECONDS", "WOLFRAM_MCP_IDLE_MINUTES", "WOLFRAM_MCP_INSPECT",
+  "WOLFRAM_MCP_KERNEL", "WOLFRAM_MCP_KERNEL_ENV", "WOLFRAM_MCP_LICENSE_LIMIT", "WOLFRAM_MCP_LOG",
+  "WOLFRAM_MCP_LSP", "WOLFRAM_MCP_MAX_KERNELS", "WOLFRAM_MCP_MIN_VERSION",
+  "WOLFRAM_MCP_RESERVE_SEATS", "WOLFRAM_MCP_RUNTIME_DIR", "WOLFRAM_MCP_SERVER_NAME",
+  "WOLFRAM_MCP_SHARE", "WOLFRAM_MCP_START_TIMEOUT_SECONDS", "WOLFRAM_MCP_VERSION",
+  "WOLFRAM_MIN_VERSION", "WOLFRAM_START_TIMEOUT_SECONDS", "WOLFRAM_USERBASE", "XDG_CACHE_HOME",
+  "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR",
 ]
+# A cold list waits for a kernel's start, which WOLFRAM_MCP_START_TIMEOUT_SECONDS bounds at
+# 120 s by default.
+startup_timeout_sec = 150
 # The server answers every call by its own ceiling (`evaluationCeilingMs`), which a requested
 # timeConstraint raises as far as MAX_TIME_MS, 24 days, so Codex's timeout must never be the one
 # that fires: at its default of 60 s, a cold kernel start alone would outlast it. A minute past
