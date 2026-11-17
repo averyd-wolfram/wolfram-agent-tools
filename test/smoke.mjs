@@ -11045,6 +11045,42 @@ heading("CLI");
     unreported.length ? `not in CONFIG_VARS: ${unreported.join(", ")}` : "",
   );
 
+  // .codex/config.toml serves .mcp.json's server to Codex, which reads only its
+  // own config and passes a server only the variables `env_vars` names. A
+  // setting added to src/ and not there works in Claude Code and silently not in
+  // Codex; an entry that drifts from .mcp.json runs a differently configured
+  // server. Read as text: Node has no TOML parser, and the file is ours.
+  {
+    const mcpJson = JSON.parse(readFileSync(join(root, ".mcp.json"), "utf8")).mcpServers.WolframLanguage;
+    const entry =
+      readFileSync(join(root, ".codex", "config.toml"), "utf8").split(/^\[mcp_servers\.WolframLanguage\]$/m)[1] ?? "";
+    const pairs = Object.entries(mcpJson.env).map(([name, value]) => `${name} = ${JSON.stringify(value)}`);
+    const drifted = [
+      ["command", `command = ${JSON.stringify(mcpJson.command)}`],
+      ["args", `args = [${mcpJson.args.map((arg) => JSON.stringify(arg)).join(", ")}]`],
+      ["env", `env = { ${pairs.join(", ")} }`],
+    ]
+      .filter(([, line]) => !entry.includes(line))
+      .map(([field]) => field);
+    check(
+      "Codex's copy of .mcp.json's server matches it",
+      entry !== "" && drifted.length === 0,
+      drifted.length ? `differs in: ${drifted.join(", ")}` : "",
+    );
+    const forwarded = new Set(
+      [...(/env_vars = \[([\s\S]*?)\]/.exec(entry)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map(([, name]) => name),
+    );
+    const windowsOnly = new Set(["LOCALAPPDATA", "APPDATA", "ProgramFiles"]);
+    const unforwarded = [...envNames(sourceText)]
+      .filter((name) => !windowsOnly.has(name) && !(name in mcpJson.env) && !forwarded.has(name))
+      .sort();
+    check(
+      "Codex forwards every variable the code reads",
+      forwarded.size > 0 && unforwarded.length === 0,
+      unforwarded.length ? `not in env_vars: ${unforwarded.join(", ")}` : `${forwarded.size} forwarded`,
+    );
+  }
+
   const version = run(["--version"]);
   check("--version prints the package version", version.stdout.trim() === lib.PKG.version);
 

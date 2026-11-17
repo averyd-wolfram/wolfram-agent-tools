@@ -240,7 +240,9 @@ built-ins, which is the bug it exists for.
 - `.agents/skills/`: skills Codex and Claude Code share, where Codex reads them;
   `.claude/skills/` links each one Claude Code should load, since it reads only its own.
   `red-team` attacks a design or a change for every way its promise can fail;
-  `wolfram-language` links the plugin's own, so Codex knows the Wolfram tools too
+  `wolfram-language` links the plugin's own, so Codex knows the Wolfram tools too. That one is
+  written for Claude Code until §5 MA renders skills per client (D30): in Codex, its
+  `/wolfram:doctor` is `npm run doctor`
 - `.github/dependabot.yml`: weekly npm and Actions updates, and security updates; its header
   says how their titles fit the release pipeline
 - `.github/workflows/`: `ci.yml` runs `npm test` (hermetic, no seat) matrixed over the Node floor
@@ -349,7 +351,9 @@ Use the official specification when working on `proxy.ts` or `transport.ts`.
 
 Every knob is an environment variable, so the command line stays argument-free. Adding one means
 updating `CONFIG_VARS` in `doctor.ts` and the `HELP` text in `index.ts` — the suite's CLI
-section fails otherwise, because those are what a stuck user sees — plus `docs/environment.md`.
+section fails otherwise, because those are what a stuck user sees — plus `docs/environment.md`,
+and `env_vars` in `.codex/config.toml`, without which Codex never passes it on (the suite fails
+there too).
 
 `MCP_SERVER_NAME` and `MCP_TOOL_OPTIONS` are Wolfram's own variables, not ours. A server
 name is **not** restricted to `MCP_SERVERS`: the paclet resolves a user's own server out of
@@ -416,7 +420,9 @@ repo runs the working tree through the plugin (`wolfram@wolfram`) and only throu
 once. `.mcp.json` stays committed as the harness-agnostic entry: it is what an MCP client
 without Claude Code's plugin system points at, and the command `.codex/config.toml` gives a
 Codex session: the working tree, a different program from the plugin's bundle, so its broker
-and kernels are its own. Consider how a change affects the session you are typing into — and
+and kernels are its own. Each broker sizes its pool from the whole licence, so a Claude Code
+and a Codex session at once are two pools against one licence (#59): on a licence of two or
+four seats they can together start a kernel the licence refuses. Consider how a change affects the session you are typing into — and
 note that it keeps running the code it loaded at startup, however many times you rebuild.
 
 ## Code Review Rules
@@ -425,8 +431,8 @@ What GitHub's Codex review checks on every pull request. It posts only P0 and P1
 these are the consequential ones; formatting, lint and types are CI's.
 
 - **A seat spent unasked.** Flag a new path that starts a Wolfram kernel outside the pool's
-  budget, and a `locateKernel` call outside `doctor` that leaves `allowWolframScript` on: each
-  spends a licence seat the user may not have, and discovery's step 7 is `doctor`'s alone.
+  budget, and any path outside `doctor` that can reach discovery's step 7 (`wolframscript`):
+  each spends a licence seat the user may not have.
 - **The four invariants.** Flag output on stdout that is not a JSON-RPC frame, a kernel started
   on the `initialize` path, a broker failure that does not fall back to a private kernel, and
   sessions of different flavours sharing a kernel.

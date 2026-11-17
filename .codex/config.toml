@@ -9,14 +9,33 @@
 # what a second round then finds.
 model_reasoning_effort = "high"
 
-# The same server as .mcp.json, which Codex does not read: keep the two in step. It gives
-# Codex the Wolfram tools a Claude Code session gets from the plugin, so a review can lint a
-# .wl file or look a symbol up rather than guess. A tool call starts a kernel, which costs a
-# licence seat.
+# The same server as .mcp.json, which Codex does not read; the suite fails when the two differ.
+# It gives Codex the Wolfram tools a Claude Code session gets from the plugin, so a review can
+# lint a .wl file or look a symbol up rather than guess. A tool call starts a kernel, which
+# costs a licence seat.
 [mcp_servers.WolframLanguage]
 command = "npm"
 args = ["run", "--silent", "mcp"]
 env = { MCP_SERVER_NAME = "WolframLanguage", WOLFRAM_MCP_IDLE_MINUTES = "15" }
-# Codex's default of 60 s is shorter than a cold kernel start, and than the server's own call
-# ceiling, which answers the caller itself when it passes (WOLFRAM_MCP_CALL_TIMEOUT_SECONDS).
-tool_timeout_sec = 330
+# Codex passes a server only a short allow-list of its environment, so without this every
+# setting a user exported, and the directories the broker and cache live in, would vanish:
+# a different kernel, a different flavour, a different broker. Every variable src/ reads, less
+# the Windows ones and those `env` sets; the suite fails when one is missing. A variable that
+# WOLFRAM_MCP_KERNEL_ENV names must be added here by hand.
+env_vars = [
+  "LLMKIT_ENABLED", "MCP_APPS_ENABLED", "MCP_APPS_NOTEBOOK_METHOD", "MCP_TOOL_OPTIONS",
+  "WOLFRAMINIT", "WOLFRAMSCRIPT_CONFIGURATIONPATH", "WOLFRAMSCRIPT_KERNELPATH", "WOLFRAM_BASE",
+  "WOLFRAM_CALL_TIMEOUT_SECONDS", "WOLFRAM_CLOUDBASE", "WOLFRAM_HOME", "WOLFRAM_IDLE_MINUTES",
+  "WOLFRAM_INSTALLATION_DIRECTORY", "WOLFRAM_KERNEL_PATH", "WOLFRAM_LOCALBASE",
+  "WOLFRAM_MCP_CACHE", "WOLFRAM_MCP_CALL_TIMEOUT_SECONDS", "WOLFRAM_MCP_DEFAULT_SERVER",
+  "WOLFRAM_MCP_INSPECT", "WOLFRAM_MCP_KERNEL", "WOLFRAM_MCP_KERNEL_ENV",
+  "WOLFRAM_MCP_LICENSE_LIMIT", "WOLFRAM_MCP_LOG", "WOLFRAM_MCP_LSP", "WOLFRAM_MCP_MAX_KERNELS",
+  "WOLFRAM_MCP_MIN_VERSION", "WOLFRAM_MCP_RESERVE_SEATS", "WOLFRAM_MCP_RUNTIME_DIR",
+  "WOLFRAM_MCP_SERVER_NAME", "WOLFRAM_MCP_SHARE", "WOLFRAM_MCP_START_TIMEOUT_SECONDS",
+  "WOLFRAM_MCP_VERSION", "WOLFRAM_MIN_VERSION", "WOLFRAM_START_TIMEOUT_SECONDS",
+  "WOLFRAM_USERBASE", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR",
+]
+# The server answers every call by its own ceiling (`evaluationCeilingMs`), which a requested
+# timeConstraint raises past any fixed figure, so Codex's timeout must never be the one that
+# fires: at its default of 60 s, a cold kernel start alone would outlast it.
+tool_timeout_sec = 86400

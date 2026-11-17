@@ -3,7 +3,9 @@
 # follows the session's, which follows Codex's newest default.
 name = "red_team"
 description = "Adversarial attacker for a design decision or a change: lists every way its promise can fail, in one exhaustive pass. Read-only. Use from the red-team skill, or when asked to red-team or attack a design."
-model_reasoning_effort = "xhigh"
+# The effort the skill's `codex exec` attacker runs at, so the brief gets the same attacker from
+# either harness.
+model_reasoning_effort = "high"
 developer_instructions = """
 You are red-teaming. Your job is to break the promise you are given, not to validate it.
 
