@@ -233,6 +233,14 @@ built-ins, which is the bug it exists for.
   in this repo — what they run is what was last assembled, which is what ships — and disables
   `.mcp.json`'s copy of the same server, so the tools appear once
 - `.mcp.json`: committed, so this repo runs its own working tree as an MCP server
+- `.codex/`: Codex's project layer, which it loads only once the user marks the repository
+  trusted in `~/.codex/config.toml`, and otherwise ignores without a word. `config.toml` sets
+  the reasoning effort reviews run at and serves `.mcp.json`'s server to Codex, which does not
+  read `.mcp.json`: keep the two in step. `agents/` holds the custom agents the skills spawn
+- `.agents/skills/`: skills Codex and Claude Code share, where Codex reads them;
+  `.claude/skills/` links each one Claude Code should load, since it reads only its own.
+  `red-team` attacks a design or a change for every way its promise can fail;
+  `wolfram-language` links the plugin's own, so Codex knows the Wolfram tools too
 - `.github/dependabot.yml`: weekly npm and Actions updates, and security updates; its header
   says how their titles fit the release pipeline
 - `.github/workflows/`: `ci.yml` runs `npm test` (hermetic, no seat) matrixed over the Node floor
@@ -406,6 +414,28 @@ conversation).
 repo runs the working tree through the plugin (`wolfram@wolfram`) and only through it —
 `.claude/settings.json` retires `.mcp.json`'s copy of the same server so the tools appear
 once. `.mcp.json` stays committed as the harness-agnostic entry: it is what an MCP client
-without Claude Code's plugin system points at. Consider how a change affects the session you
-are typing into — and note that it keeps running the code it loaded at startup, however many
-times you rebuild.
+without Claude Code's plugin system points at, and the command `.codex/config.toml` gives a
+Codex session: the working tree, a different program from the plugin's bundle, so its broker
+and kernels are its own. Consider how a change affects the session you are typing into — and
+note that it keeps running the code it loaded at startup, however many times you rebuild.
+
+## Code Review Rules
+
+What GitHub's Codex review checks on every pull request. It posts only P0 and P1 findings, so
+these are the consequential ones; formatting, lint and types are CI's.
+
+- **A seat spent unasked.** Flag a new path that starts a Wolfram kernel outside the pool's
+  budget, and a `locateKernel` call outside `doctor` that leaves `allowWolframScript` on: each
+  spends a licence seat the user may not have, and discovery's step 7 is `doctor`'s alone.
+- **The four invariants.** Flag output on stdout that is not a JSON-RPC frame, a kernel started
+  on the `initialize` path, a broker failure that does not fall back to a private kernel, and
+  sessions of different flavours sharing a kernel.
+- **Broker protocol.** Flag a frame that changes shape without a `BROKER_PROTOCOL` bump, and a
+  bump for a new op alone, which strands running brokers holding seats.
+- **One answer on both paths.** Flag a kernel message paraphrased, and the private and broker
+  paths disagreeing on what is a protocol error and what is an `isError` result.
+- **A promise wider than its paths.** In code or in `docs/`, flag a guarantee about every
+  kernel, session or release that is not checked against every path in `src/` it covers, and a
+  figure asserted in prose rather than derived by `npm run metrics`.
+- **A fix without its check.** Flag a fix with no check that fails without it, and a check that
+  passes only because the fake kernel answers instantly.

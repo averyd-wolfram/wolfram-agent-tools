@@ -153,7 +153,10 @@ in `docs/design.md`.
   can keep producing them for round after round. When the fix itself is settled and the rounds
   are about the new design, revert that design, record what was tried and found in an issue
   (#19, #22), and merge the fix. And ask whether the fault is code at all: #25's rounds were
-  about imitating GitHub, and ended when the squash setting turned out to contradict D16.
+  about imitating GitHub, and ended when the squash setting turned out to contradict D16. When
+  the rounds are about a design's promise, run the `red-team` skill: it asks for every way the
+  promise fails in one pass, from attackers who do not see each other's work, where a review
+  reports its strongest few a round. Run it before a design is marked decided, too.
 - **Issues and labels.** Label every issue and PR as it is filed: a type where one fits (`bug`,
   `enhancement`, `documentation`, `refactor`, `ci`; release-please's PRs carry its own
   `autorelease:` labels), `needs design` when the approach must be agreed before code, `blocked`

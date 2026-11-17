@@ -1,0 +1,22 @@
+# Codex's project layer for this repository. Codex loads it only when the user has marked the
+# repository trusted (`[projects."<path>"] trust_level = "trusted"` in ~/.codex/config.toml);
+# untrusted, it silently ignores this file and .codex/agents/ alike.
+#
+# No `model`: Codex then uses the newest default model, which is what reviews here should run
+# on. A pin here would go stale the day a newer model ships, as 6.1 did on 2026-11-17.
+
+# Reviews and red teams are most of what Codex does here, and the default (medium) misses
+# what a second round then finds.
+model_reasoning_effort = "high"
+
+# The same server as .mcp.json, which Codex does not read: keep the two in step. It gives
+# Codex the Wolfram tools a Claude Code session gets from the plugin, so a review can lint a
+# .wl file or look a symbol up rather than guess. A tool call starts a kernel, which costs a
+# licence seat.
+[mcp_servers.WolframLanguage]
+command = "npm"
+args = ["run", "--silent", "mcp"]
+env = { MCP_SERVER_NAME = "WolframLanguage", WOLFRAM_MCP_IDLE_MINUTES = "15" }
+# Codex's default of 60 s is shorter than a cold kernel start, and than the server's own call
+# ceiling, which answers the caller itself when it passes (WOLFRAM_MCP_CALL_TIMEOUT_SECONDS).
+tool_timeout_sec = 330
