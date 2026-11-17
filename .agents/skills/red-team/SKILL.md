@@ -46,15 +46,16 @@ At least two attackers on the same brief, neither shown the other's output:
 
 - **Codex.** From Codex, spawn the `red_team` agent (`.codex/agents/red-team.toml`); an agent
   cannot drop the session's MCP servers, so its brief alone keeps it off the Wolfram tools.
-  From anywhere else, run it in the background, with the Wolfram server switched off so no
-  call of its can start a kernel:
+  From anywhere else, run it in the background. `--ignore-user-config` leaves out the user's
+  Codex config, and with it this repository's trust, so the run has no MCP server at all: no
+  Wolfram server, of this repository's or the user's, can start a kernel even to list its tools.
+  Sign-in still works, and the skills still load:
 
   ```bash
   BRIEF=<scratch>/red-team-brief.md     # the brief from step 2
   OUT=<scratch>/red-team-codex.out
-  codex exec -s read-only -c model_reasoning_effort=high \
-    -c mcp_servers.WolframLanguage.enabled=false -C "$(git rev-parse --show-toplevel)" \
-    "$(cat "$BRIEF")" < /dev/null > "$OUT" 2>&1
+  codex exec --ignore-user-config -s read-only -c model_reasoning_effort=high \
+    -C "$(git rev-parse --show-toplevel)" "$(cat "$BRIEF")" < /dev/null > "$OUT" 2>&1
   ```
 
   Without `< /dev/null` it prints `Reading additional input from stdin...` and waits forever. Check

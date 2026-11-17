@@ -236,7 +236,10 @@ built-ins, which is the bug it exists for.
 - `.codex/`: Codex's project layer, which it loads only once the user marks the repository
   trusted in `~/.codex/config.toml`, and otherwise ignores without a word. `config.toml` sets
   the reasoning effort reviews run at and serves `.mcp.json`'s server to Codex, which does not
-  read `.mcp.json`: keep the two in step. `agents/` holds the custom agents the skills spawn
+  read `.mcp.json`, under a name of its own so a user's server of the same name cannot clash:
+  keep the two in step. Codex lists tools as a session starts, as Claude Code does, so on a
+  cold cache its first session starts a kernel to learn them. `agents/` holds the custom
+  agents the skills spawn
 - `.agents/skills/`: skills Codex and Claude Code share, where Codex reads them;
   `.claude/skills/` links each one Claude Code should load, since it reads only its own.
   `red-team` attacks a design or a change for every way its promise can fail;

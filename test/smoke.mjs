@@ -11049,11 +11049,16 @@ heading("CLI");
   // own config and passes a server only the variables `env_vars` names. A
   // setting added to src/ and not there works in Claude Code and silently not in
   // Codex; an entry that drifts from .mcp.json runs a differently configured
-  // server. Read as text: Node has no TOML parser, and the file is ours.
+  // server. Read as text: Node has no TOML parser, and the file is ours. Its
+  // comments go first, so a commented-out value does not count as one set; no
+  // value in the entry holds a `#`.
   {
     const mcpJson = JSON.parse(readFileSync(join(root, ".mcp.json"), "utf8")).mcpServers.WolframLanguage;
-    const entry =
-      readFileSync(join(root, ".codex", "config.toml"), "utf8").split(/^\[mcp_servers\.WolframLanguage\]$/m)[1] ?? "";
+    const entry = (
+      readFileSync(join(root, ".codex", "config.toml"), "utf8").split(
+        /^\[mcp_servers\.wolfram-agent-tools-dev\]$/m,
+      )[1] ?? ""
+    ).replace(/#.*$/gm, "");
     const pairs = Object.entries(mcpJson.env).map(([name, value]) => `${name} = ${JSON.stringify(value)}`);
     const drifted = [
       ["command", `command = ${JSON.stringify(mcpJson.command)}`],
