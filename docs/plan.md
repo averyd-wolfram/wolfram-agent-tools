@@ -51,7 +51,7 @@ whole series is recorded here rather than left to another rediscovery.
 | S7 paginated cursors have no kernel affinity | **fixed** — both backends drain inside the hold they already have and answer complete lists; no `nextCursor` leaves either. Reproduced first with a paging fake kernel: page 1 only, and a cursor handed to the client |
 | S8 `timeoutMs ? … : …` makes `0` behave oppositely | **fixed**, and worse than recorded: `0` means "no ceiling" privately, and on the shared path `0 ?? DEFAULT` kept the zero and made the ceiling 2 s. Measured before the fix: `isError after 2211ms` on a call that needed 3 s |
 | S9 the last unterminated line is lost | **fixed** — the buffer is flushed on child exit and on close, before the error that carries it is built. Reproduced with a kernel that writes its reason without a newline and exits |
-| S10 `FrameReader` has no buffer cap | **fixed** — 4 MB, mirroring `transport.ts`. No test: the difference is memory retention, which a check cannot see without measuring the heap |
+| S10 `FrameReader` has no buffer cap | **fixed** — capped, at first mirroring `transport.ts`; since #200 at `FRAME_CAP`, above a kernel's line so a reply the broker writes again still fits, with both readers on one splitter (`lines.ts`) |
 | S11 the socket digest omits `PKG.version` | **fixed** — and it now NUL-separates its inputs, because a server name may contain spaces and `("/Apps/K My", "Prime Finder")` hashed the same as `("/Apps/K", "My Prime Finder")`. No test for the version itself: it is a constant at runtime |
 | S12 the suite leaks detached brokers | **fixed** — every broker section kills its own, scoped by runtime directory, and `reapAll` runs on an escaped rejection |
 

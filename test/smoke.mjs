@@ -3093,6 +3093,7 @@ if (socketsHere()) {
   // that is not JSON, then a frame over the cap.
   const { FRAME_CAP } = await import(join(root, "dist", "broker-protocol.js"));
   const overCap = `${"x".repeat(FRAME_CAP + 1)}\n`;
+  let callsSeen = 0;
   const stub = createServer((socket) => {
     socket.setEncoding("utf8");
     socket.on("error", () => socket.destroy());
@@ -3107,6 +3108,7 @@ if (socketsHere()) {
         } else if (frame.op === "ping") {
           send(`${JSON.stringify({ id: frame.id, ok: true, result: {} })}\n`);
         } else if (frame.op === "callTool") {
+          callsSeen++;
           send(`not a frame\n${overCap}`);
         }
       }
@@ -3153,6 +3155,21 @@ if (socketsHere()) {
     "a call whose arguments JSON cannot hold rejects, as any failure of a call does, rather than throwing",
     rejected !== null && threw === null,
     `rejected: ${rejected}; threw: ${threw}`,
+  );
+  // The proxy refuses such a call first; this is the socket's own guard, for a
+  // caller that drives a BrokerBackend itself.
+  const callsBefore = callsSeen;
+  const tooLong = await backend
+    ?.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "x".repeat(FRAME_CAP) } }, { timeoutMs: 5_000 })
+    .then(
+      () => "answered",
+      (err) => err.message,
+    );
+  await new Promise((r) => setTimeout(r, 200));
+  check(
+    "a call too long for the socket is refused before it is sent, naming its length",
+    /over the \d+ the broker's socket carries/.test(tooLong ?? "") && callsSeen === callsBefore,
+    `${callsSeen - callsBefore} sent; ${String(tooLong).slice(0, 120)}`,
   );
   // Stopped first, which fails the call now rather than at its ceiling.
   await backend?.stop();
@@ -3269,38 +3286,38 @@ if (socketsHere()) {
 heading("A request or reply too long for a kernel's stdout or the broker's socket is answered at once, alike on both paths (#200)");
 {
   const { KERNEL_LINE_CAP } = await import(join(root, "dist", "transport.js"));
-  const { FRAME_CAP } = await import(join(root, "dist", "broker-protocol.js"));
+  const { FRAME_CAP, REQUEST_CAP, LIST_CAP } = await import(join(root, "dist", "broker-protocol.js"));
   // A call whose code is "long" is answered past a kernel's line; one whose
   // code is "growing" within it, in numbers that, written again at 22
   // characters each, run past twice a kernel's line, and stay within the
   // 10 MB the SDK's own client reads.
+  const methods = join(home, "200-methods.log");
   const env = {
     WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "20",
     WOLFRAM_MCP_CACHE: "0",
     FAKE_LONG_REPLY: String(KERNEL_LINE_CAP),
     FAKE_GROWING_REPLY: String(Math.floor((2 * KERNEL_LINE_CAP) / 20)),
+    FAKE_METHOD_LOG: methods,
   };
+  const callsReached = () => methodLog(methods).filter((m) => m === "tools/call").length;
   // Timed, and bounded on this side too, so a run of the code before this
   // fails in seconds rather than hanging where a call has no ceiling.
-  const timed = async (client, code, meta) => {
+  const timed = async (client, code) => {
     const began = Date.now();
     const text = await client
-      .callTool(
-        { name: "WolframLanguageEvaluator", arguments: { code }, ...(meta ? { _meta: meta } : {}) },
-        undefined,
-        { timeout: 30_000 },
-      )
+      .callTool({ name: "WolframLanguageEvaluator", arguments: { code } }, undefined, { timeout: 30_000 })
       .then(
         (r) => `${r.isError ? "isError: " : ""}${r.content?.[0]?.text ?? ""}`,
         (err) => `failed: ${err.message}`,
       );
     return { text, ms: Date.now() - began, short: text.slice(0, 160) };
   };
-  const overlong = "x".repeat(KERNEL_LINE_CAP + 1);
+  // Past a kernel's line and within the 10 MB a stdio client or server reads.
+  const pastLine = "x".repeat(KERNEL_LINE_CAP + 1);
   const named = (answer) => /longer than the \d+ this server reads from a kernel/.test(answer.text);
-  const refused = (answer) => /^failed: .*longer than the \d+ a kernel is sent/.test(answer.text);
 
   wipeCache();
+  rmSync(methods, { force: true });
   const startsBefore = startCount();
   const own = await connect({ ...env, WOLFRAM_MCP_SHARE: "0" });
   const ownReply = await timed(own.client, "long");
@@ -3315,23 +3332,22 @@ heading("A request or reply too long for a kernel's stdout or the broker's socke
     answeredByFake({ content: [{ text: ownNext.text }] }) && startCount() === startsBefore + 1,
     `${startCount() - startsBefore} start(s); ${ownNext.short}`,
   );
-  const ownRequest = await timed(own.client, overlong);
+  const ownReached = callsReached();
+  const ownPastLine = await timed(own.client, pastLine);
   check(
-    "a request longer than a kernel's line is refused at once, naming its length, and sent to no kernel",
-    refused(ownRequest) && ownRequest.ms < 10_000 && startCount() === startsBefore + 1,
-    `${ownRequest.ms} ms, ${startCount() - startsBefore} start(s): ${ownRequest.short}`,
-  );
-  const ownMeta = await timed(own.client, "1+1", { note: overlong });
-  check(
-    "but a call is measured as it is sent: a client's own long _meta, which is not, refuses nothing",
-    answeredByFake({ content: [{ text: ownMeta.text }] }),
-    ownMeta.short,
+    "a request past a kernel's line, within what a frame carries, reaches the kernel",
+    callsReached() === ownReached + 1 && ownPastLine.ms < 10_000,
+    `${callsReached() - ownReached} reached; ${ownPastLine.short}`,
   );
   const ownGrowing = await timed(own.client, "growing");
+  check(
+    "a reply of numbers that grow written again is answered on a private session",
+    ownGrowing.text === "grown",
+    ownGrowing.short,
+  );
   await own.client.close();
 
   // Each page within a kernel's line, and too long joined.
-  const { LIST_CAP } = await import(join(root, "dist", "kernel.js"));
   const pages = Math.ceil(LIST_CAP / (KERNEL_LINE_CAP * 0.9)) + 1;
   const toolsFile = join(home, "200-long-tools.json");
   writeFileSync(
@@ -3373,17 +3389,17 @@ heading("A request or reply too long for a kernel's stdout or the broker's socke
       sharedReply.text === ownReply.text && sharedReply.ms < 10_000,
       `${sharedReply.ms} ms: ${sharedReply.short}`,
     );
-    const sharedStarts = startCount();
-    const sharedRequest = await timed(shared.client, overlong);
+    const sharedReached = callsReached();
+    const sharedPastLine = await timed(shared.client, pastLine);
     check(
-      "and a request longer than a kernel's line is refused as a private session refuses it, with no kernel started",
-      sharedRequest.text === ownRequest.text && sharedRequest.ms < 10_000 && startCount() === sharedStarts,
-      `${sharedRequest.ms} ms: ${sharedRequest.short}`,
+      "and a request past a kernel's line reaches the broker's kernel, answered as a private session's is",
+      sharedPastLine.text === ownPastLine.text && callsReached() === sharedReached + 1 && sharedPastLine.ms < 10_000,
+      `${sharedPastLine.ms} ms, ${callsReached() - sharedReached} reached: ${sharedPastLine.short}`,
     );
     const sharedGrowing = await timed(shared.client, "growing");
     check(
-      "a reply that grows as the broker writes it again is answered, as a private session answers it",
-      sharedGrowing.text === "grown" && ownGrowing.text === "grown",
+      "and a reply that grows as the broker writes it again is answered, as a private session answers it",
+      sharedGrowing.text === ownGrowing.text,
       `shared: ${sharedGrowing.short}; private: ${ownGrowing.short}`,
     );
     await shared.client.close();
@@ -3399,22 +3415,72 @@ heading("A request or reply too long for a kernel's stdout or the broker's socke
     );
   }
 
-  // resources/list forwards its cursor, so it is measured too. Advertised only
-  // once a kernel has said it serves resources, which the cache then holds.
-  wipeCache();
-  await warmCache({ FAKE_RESOURCES: "1", WOLFRAM_MCP_SHARE: "0" });
-  const listing = await connect({ FAKE_RESOURCES: "1", WOLFRAM_MCP_SHARE: "0" });
-  const listingStarts = startCount();
-  const resources = await listing.client.listResources({ cursor: overlong }, { timeout: 30_000 }).then(
-    () => "listed",
-    (err) => `failed: ${err.message}`,
-  );
-  check(
-    "a resources/list longer than a kernel's line is refused before any kernel is asked",
-    /^failed: .*longer than the \d+ a kernel is sent/.test(resources) && startCount() === listingStarts,
-    resources.slice(0, 160),
-  );
-  await listing.client.close();
+  // A request past REQUEST_CAP is past the 10 MB a stdio server reads, so an
+  // embedder's is driven in process, against a backend that records what it is
+  // asked. Refused ahead of either backend, it is answered alike on both paths.
+  {
+    const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+    const { sessionSource } = await import(join(root, "dist", "server-source.js"));
+    wipeCache();
+    const empty = join(home, "200-paclets");
+    mkdirSync(empty, { recursive: true });
+    const config = {
+      ...lib.loadConfig(() => {}),
+      kernelPath: fakeKernel,
+      serverName: "WolframLanguage",
+      inspect: false,
+      cacheEnabled: true,
+      flavour: lib.kernelFlavour({ ...process.env, MCP_SERVER_NAME: "WolframLanguage", WOLFRAM_USERBASE: empty, WOLFRAM_BASE: empty }),
+    };
+    const asked = [];
+    let ready;
+    const lists = (source) => ({
+      capabilities: async () => (asked.push("capabilities"), { tools: {}, prompts: {}, resources: {} }),
+      listTools: async () => (asked.push("tools/list"), { tools: [{ name: "Demo", inputSchema: { type: "object" } }], source }),
+      listPrompts: async () => (asked.push("prompts/list"), { prompts: [{ name: "DemoPrompt" }], source }),
+    });
+    const stub = () => ({
+      ...lists(undefined),
+      onKernelReady: (handler) => {
+        ready = handler;
+      },
+      getPrompt: async () => (asked.push("prompts/get"), { messages: [] }),
+      listResources: async () => (asked.push("resources/list"), { resources: [] }),
+      readResource: async () => (asked.push("resources/read"), { contents: [] }),
+      callTool: async () => (asked.push("tools/call"), { content: [{ type: "text", text: "called" }] }),
+      stop: async () => {},
+    });
+    // Seeded as a kernel's start leaves the cache, so prompts and resources are offered.
+    const seeding = lib.createWolframServer(config, () => {}, stub);
+    await ready(lists(sessionSource(config.serverName, config.flavour, seeding.install.bin, config.inspect).digest));
+    const { server } = lib.createWolframServer(config, () => {}, stub);
+    const client = new Client({ name: "smoke", version: "1.0.0" }, { capabilities: {} });
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverSide);
+    await client.connect(clientSide);
+    const overlong = "x".repeat(REQUEST_CAP + 1);
+    const outcome = (request) => request.then(() => "answered", (err) => `failed: ${err.message}`);
+    asked.length = 0;
+    const refusals = {
+      "tools/call": await outcome(client.callTool({ name: "Demo", arguments: { code: overlong } })),
+      "prompts/get": await outcome(client.getPrompt({ name: "DemoPrompt", arguments: { text: overlong } })),
+      "resources/read": await outcome(client.readResource({ uri: `ui://${overlong}` })),
+      "resources/list": await outcome(client.listResources({ cursor: overlong })),
+    };
+    check(
+      "a request whose parameters pass the cap is refused, naming their length, before any backend is asked",
+      Object.values(refusals).every((r) => /longer than the \d+ this server sends/.test(r)) && asked.length === 0,
+      `asked: ${asked.join(", ") || "nothing"}; ${Object.entries(refusals).map(([m, r]) => `${m}: ${r.slice(0, 50)}`).join(" | ")}`,
+    );
+    const meta = await outcome(client.callTool({ name: "Demo", arguments: { code: "1+1" }, _meta: { note: overlong } }));
+    check(
+      "but a call is measured as it is sent: a client's own long _meta, which is not, refuses nothing",
+      meta === "answered" && asked.includes("tools/call"),
+      `${meta}; asked: ${asked.join(", ")}`,
+    );
+    await client.close();
+    wipeCache();
+  }
 
   // The transport alone, against a child that prints what a kernel might.
   // Only a dropped line that begins as the reply to a request outstanding

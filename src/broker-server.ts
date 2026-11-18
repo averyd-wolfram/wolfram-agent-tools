@@ -22,6 +22,7 @@ import {
   encodeFrame,
   FRAME_CAP,
   FrameReader,
+  overCap,
   type BrokerEvent,
   type BrokerOp,
   type BrokerRequest,
@@ -211,6 +212,38 @@ function resolveLicence(options: BrokerOptions): LicenceInfo {
 }
 
 /**
+ * A response as the socket can carry it. One over `FRAME_CAP` is answered in
+ * its place, with an error naming its length: sent, the session dropped it
+ * and its caller waited out the ceiling, or with none waited for ever, for an
+ * answer the broker already had (#200). The last guard, not the limit: a reply
+ * a kernel's line held fits written again, and `drainPages` holds each list to
+ * `LIST_CAP`, so only capabilities that grow past their room reach it.
+ */
+export function fitted(response: BrokerResponse): string {
+  const frame = encodeFrame(response);
+  if (!overCap(frame)) return frame;
+  return encodeFrame({
+    id: response.id,
+    ok: false,
+    error:
+      `the kernel's reply was ${frame.length - 1} characters as the broker sends it, ` +
+      `over the ${FRAME_CAP} its socket carries`,
+    ...(response.source === undefined ? {} : { source: response.source }),
+  });
+}
+
+/**
+ * An event as the socket can carry it, or undefined for one over `FRAME_CAP`,
+ * which is not sent rather than dropped unread at the other end. The last guard,
+ * as `fitted` is: a kernel's start sends its tools and its prompts in one event,
+ * and `LIST_CAP` holds each list to half the room there is.
+ */
+export function eventFrame(event: BrokerEvent): string | undefined {
+  const frame = encodeFrame(event);
+  return overCap(frame) ? undefined : frame;
+}
+
+/**
  * Serve kernels to proxies at `options.address`, or return null when another
  * broker already does, or the address cannot be used safely.
  *
@@ -219,38 +252,6 @@ function resolveLicence(options: BrokerOptions): LicenceInfo {
  * `EMPTY_GRACE_MS`, and as soon as its address no longer holds its socket
  * (`ADDRESS_CHECK_MS`) and what its sessions asked is answered.
  */
-/**
- * A response as the socket can carry it. One over `FRAME_CAP` is answered in
- * its place, with an error naming its length: sent, the session dropped it
- * and its caller waited out the ceiling, or with none waited for ever, for an
- * answer the broker already had (#200). The last guard, not the limit: a reply
- * a kernel's line held fits written again, and `drainPages` holds a list to a
- * line, so no kernel's answer reaches it.
- */
-export function fitted(response: BrokerResponse): string {
-  const frame = encodeFrame(response);
-  if (frame.length <= FRAME_CAP) return frame;
-  return encodeFrame({
-    id: response.id,
-    ok: false,
-    error:
-      `the kernel's reply was ${frame.length} characters as the broker sends it, ` +
-      `over the ${FRAME_CAP} its socket carries`,
-    ...(response.source === undefined ? {} : { source: response.source }),
-  });
-}
-
-/**
- * An event as the socket can carry it, or undefined for one over `FRAME_CAP`,
- * which is not sent rather than dropped unread at the other end: an event only
- * spares a session asking, and it asks for what it needs. The last guard, as
- * `fitted` is.
- */
-export function eventFrame(event: BrokerEvent): string | undefined {
-  const frame = encodeFrame(event);
-  return frame.length > FRAME_CAP ? undefined : frame;
-}
-
 export async function startBroker(options: BrokerOptions): Promise<RunningBroker | null> {
   const { address, log } = options;
   /**

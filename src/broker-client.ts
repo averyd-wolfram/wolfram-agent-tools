@@ -33,9 +33,9 @@ import type {
 } from "./backend.js";
 import {
   encodeFrame,
-  FRAME_CAP,
   FrameReader,
   FrameTooLarge,
+  overCap,
   isEvent,
   type BrokerFrame,
   type BrokerOp,
@@ -719,7 +719,7 @@ export class BrokerBackend implements KernelBackend {
     // Refused before it is sent: sent, the broker dropped it unread and this
     // waited out its ceiling (#200). The proxy refuses such a request before
     // it reaches a backend; this guards the socket for a caller that does not.
-    if (frame.length > FRAME_CAP) return Promise.reject(new FrameTooLarge(op, frame.length));
+    if (overCap(frame)) return Promise.reject(new FrameTooLarge(op, frame.length - 1));
     // A null expiry is no ceiling, whatever `timeoutMs` says, as the broker's
     // kernel session reads it: timed here, it failed what a private kernel
     // waited for.

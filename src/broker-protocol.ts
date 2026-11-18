@@ -480,8 +480,31 @@ export const SOCKET_MODE = 0o600;
 export const FRAME_CAP = 6 * KERNEL_LINE_CAP;
 
 /**
+ * The longest a request's parameters may run to, on either path, so the frame
+ * that carries them fits with room for its other fields (#200). Not a kernel's
+ * line: nothing caps what a kernel is sent, only what it answers.
+ */
+export const REQUEST_CAP = FRAME_CAP - KERNEL_LINE_CAP;
+
+/**
+ * The longest list joined from pages, written as a broker writes it: half the
+ * room a request has, since a kernel's start sends its tools and its prompts in
+ * one event (`kernelReady`). A list on one page fits, unless its numbers grow
+ * written again as no tool list's do.
+ */
+export const LIST_CAP = REQUEST_CAP / 2;
+
+/**
+ * Whether a frame, as `encodeFrame` writes it, is longer than the other end
+ * reads: measured without its newline, as `FrameReader` measures it.
+ */
+export function overCap(frame: string): boolean {
+  return frame.length - 1 > FRAME_CAP;
+}
+
+/**
  * A request too long for the socket, refused before it is sent, so nothing ran.
- * The proxy refuses any request longer than a kernel's line before it reaches a
+ * The proxy refuses one whose parameters pass `REQUEST_CAP` before it reaches a
  * backend, on both paths alike, so this guards the socket for a caller that
  * drives a `BrokerBackend` itself.
  */

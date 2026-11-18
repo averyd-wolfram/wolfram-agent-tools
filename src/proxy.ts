@@ -35,7 +35,7 @@ import { drainPages } from "./kernel.js";
 import { exampleKernelPath, listKernels, locateKernel, type KernelInstall } from "./locate.js";
 import { bareMcpText, errorText, type Logger } from "./log.js";
 import { sessionSource } from "./server-source.js";
-import { KERNEL_LINE_CAP } from "./transport.js";
+import { REQUEST_CAP } from "./broker-protocol.js";
 import { PKG } from "./version.js";
 
 /**
@@ -188,20 +188,26 @@ function relayable(err: McpError): Error {
 }
 
 /**
- * A request whose parameters are no longer than a kernel's line (#200): as long
- * as any reply a kernel may send, and so, with the few fields around them,
- * always within the broker's socket. Refused here, ahead of
+ * A request whose parameters are no longer than `REQUEST_CAP` (#200), so the
+ * frame carrying them always fits the broker's socket. Refused here, ahead of
  * either backend, so both paths answer it alike and no kernel is asked. Longer,
  * a private kernel read it from stdin while the broker dropped it unread and its
  * caller waited out the ceiling.
  */
 function refuseOverlong(method: string, params: unknown): void {
-  const length = JSON.stringify(params ?? {}).length;
-  if (length <= KERNEL_LINE_CAP) return;
+  let length: number;
+  try {
+    length = JSON.stringify(params ?? {}).length;
+  } catch {
+    // A value JSON cannot hold fails where it is sent, as it did, and as a
+    // failed call: an embedder's BigInt is no protocol error.
+    return;
+  }
+  if (length <= REQUEST_CAP) return;
   throw relayable(
     new McpError(
       ErrorCode.InvalidParams,
-      `the ${method} request's parameters are ${length} characters, longer than the ${KERNEL_LINE_CAP} a kernel is sent`,
+      `the ${method} request's parameters are ${length} characters, longer than the ${REQUEST_CAP} this server sends`,
     ),
   );
 }

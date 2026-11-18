@@ -23,7 +23,8 @@ import { CappedLines } from "./lines.js";
 /**
  * Longest stdout line read from a kernel, in characters: what an interactive
  * prompt that never ends its line can make this process hold. The broker's
- * socket carries twice this (`FRAME_CAP`), so a reply read here fits there.
+ * socket carries more (`FRAME_CAP`), so a reply read here fits there once the
+ * broker has written it again.
  */
 export const KERNEL_LINE_CAP = 4 * 1024 * 1024;
 
@@ -72,8 +73,8 @@ export class FilteringStdioTransport implements Transport {
     (length, ends, ended) => this.#dropped(length, ends, ended),
   );
   /**
-   * Requests sent and not yet answered, by id. A kernel is serial, so a reply
-   * dropped for its length while one is outstanding was that one's.
+   * Requests sent and not yet answered, by id: what a reply dropped for its
+   * length may name, by the id it began or ended with (`replyId`).
    */
   readonly #unanswered = new Set<string | number>();
   #closing = false;
@@ -164,7 +165,7 @@ export class FilteringStdioTransport implements Transport {
     child.stdin?.on("error", (err) => this.#record(`stdin: ${err.message}`));
 
     child.stdout?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk: string) => this.#ingest(chunk));
+    child.stdout?.on("data", (chunk: string) => this.#lines.push(chunk));
 
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string) => {
@@ -295,10 +296,6 @@ export class FilteringStdioTransport implements Transport {
     if (tail.trim()) this.#emit(tail);
   }
 
-  #ingest(chunk: string): void {
-    this.#lines.push(chunk);
-  }
-
   /**
    * A line over the cap, by its length alone. Where it was the reply to a
    * request outstanding, that request is answered with an error naming its
@@ -357,9 +354,17 @@ export class FilteringStdioTransport implements Transport {
     // array among it, and `in` throws on that.
     // Only what the SDK takes for a reply answers a request, by its own test: a
     // stray line holding the id, taken for one here, left the real reply,
-    // dropped for its length, matching nothing.
-    if (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message)) {
-      if (message.id !== undefined) this.#unanswered.delete(message.id);
+    // dropped for its length, matching nothing. Tested only where the id is
+    // one awaited, which nearly no notification's is.
+    if (
+      typeof message === "object" &&
+      message !== null &&
+      "id" in message &&
+      message.id !== undefined &&
+      this.#unanswered.has(message.id) &&
+      (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message))
+    ) {
+      this.#unanswered.delete(message.id);
     }
     try {
       this.onmessage?.(message);
