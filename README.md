@@ -247,9 +247,9 @@ Resolution order, with the first match winning:
 6. `wolfram` or `WolframKernel` on `PATH`, then the installation `doctor` recorded, if
    step 7 is what found it
 7. `wolframscript -code '$InstallationDirectory'` — the only step that starts a kernel, so
-   only `doctor` runs it. A session, the LSP and the library's `createWolframServer` stop at
-   step 6; a kernel only `wolframscript` knows about is reached by running `doctor` once,
-   which records it
+   only an explicit command runs it: `locateKernel` stops at step 6 unless its caller asks,
+   and only `doctor` and `npm run test:custom` do. A kernel only `wolframscript` knows about
+   is reached by running `doctor` once, which records it
 
 Step 4 outranks the scan deliberately: it is a preference somebody recorded through
 Wolfram's own tooling, whereas "highest version number on disk" is a guess. On a machine

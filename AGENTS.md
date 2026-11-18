@@ -311,9 +311,9 @@ installation that cannot be used stops discovery rather than substituting anothe
 6. `wolfram` or `WolframKernel` on `PATH`, then the installation `doctor` recorded, if
    step 7 is what found it
 7. `wolframscript -code '$InstallationDirectory'` — the only step that starts a kernel, so
-   only `doctor` runs it. A session, the LSP and the library's `createWolframServer` stop at
-   step 6; a kernel only `wolframscript` knows about is reached by running `doctor` once,
-   which records it
+   only an explicit command runs it: `locateKernel` stops at step 6 unless its caller asks,
+   and only `doctor` and `npm run test:custom` do. A kernel only `wolframscript` knows about
+   is reached by running `doctor` once, which records it
 
 The 14.3 floor applies in every auto-detection branch (3–7). An explicit `WOLFRAM_MCP_KERNEL`
 path or `WOLFRAM_MCP_VERSION` pin is honoured as named — the fake kernel has no version, so the

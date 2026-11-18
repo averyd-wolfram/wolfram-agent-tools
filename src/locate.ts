@@ -462,7 +462,8 @@ export interface LocateOptions {
    * only an explicit user action (`doctor`) asks for it. Defaults to false: it
    * defaulted to true, so a caller that had not chosen kept the old behaviour,
    * and `broker` run by hand without `--kernel` was such a caller, spending a
-   * seat before it had bound its socket (#179).
+   * seat before it had bound its socket (#179). Callers on a session's path
+   * still pass false, so the choice reads where it is made.
    */
   allowWolframScript?: boolean;
 }

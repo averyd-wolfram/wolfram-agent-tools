@@ -49,6 +49,9 @@ const install = lib.locateKernel({
   override: config.kernelPath,
   version: config.version,
   minVersion: config.minVersion,
+  // An explicit, opt-in run on a real kernel that runs wolframscript itself, so
+  // it may ask it where the kernel is, as doctor does (#179).
+  allowWolframScript: true,
 });
 if (!install) {
   console.log("\nNo usable Wolfram installation was found; run npm run doctor.\n");
