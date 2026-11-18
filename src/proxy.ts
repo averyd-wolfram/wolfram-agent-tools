@@ -457,9 +457,8 @@ export function createWolframServer(
   const usableCache = install && config.cacheEnabled ? readCache(key) : null;
 
   // Capabilities are frozen at `initialize`, before we may start a kernel, so
-  // prompts and resources come from the cache when we have one and from the
-  // known shape of the serverName when we do not.
-  // Only what a kernel has actually been seen to offer. Advertising prompts
+  // prompts and resources come from the cache when we have one, and are not
+  // offered when we do not: only what a kernel has actually been seen to offer. Advertising prompts
   // from a static table meant a cold first run either answered prompts/list
   // with -32601 (no installation) or started a kernel to enumerate them
   // (installation present) — one a protocol violation, the other the end of
