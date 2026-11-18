@@ -235,8 +235,15 @@ built-ins, which is the bug it exists for.
   third-party review plugins, each marketplace pinned to the commit trialled on #188 and moved
   only on purpose: claudex-loop (a plan reviewed by the other provider, Codex for a Claude
   session, which `.codex/config.toml` enables for Codex too) and Trail of Bits'
-  `spec-to-code-compliance` (code checked against the document that specifies it). A
-  contributor installs each once, `claude plugin install <name>@<marketplace> --scope project`
+  `spec-to-code-compliance` (code checked against the document that specifies it). A pin by
+  commit needs Claude Code 2.1.324 or newer; older ones pass the SHA to `git clone --branch`
+  and register neither. A session started in the trusted folder registers both (the larger
+  clone may outlast a short one), and then a contributor installs each once, `claude plugin
+  install <name>@<marketplace> --scope project`, which rewrites `.claude/settings.json`'s
+  formatting: restore it with `git checkout`. A same-named marketplace in user settings may keep
+  its own checkout, so remove it first with `claude plugin marketplace remove <name> --scope
+  user`; without `--scope` that removes this file's declaration too. `git -C
+  ~/.claude/plugins/marketplaces/<name> rev-parse HEAD` shows the commit actually in use
 - `.mcp.json`: committed, so this repo runs its own working tree as an MCP server
 - `.codex/`: Codex's project layer, which it loads only once the user marks the repository
   trusted in `~/.codex/config.toml`, and otherwise ignores without a word. `config.toml` sets
