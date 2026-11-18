@@ -240,10 +240,12 @@ built-ins, which is the bug it exists for.
   and register neither. A session started in the trusted folder registers both (the larger
   clone may outlast a short one), and then a contributor installs each once, `claude plugin
   install <name>@<marketplace> --scope project`, which rewrites `.claude/settings.json`'s
-  formatting: restore it with `git checkout`. A same-named marketplace in user settings may keep
-  its own checkout, so remove it first with `claude plugin marketplace remove <name> --scope
-  user`; without `--scope` that removes this file's declaration too. `git -C
-  ~/.claude/plugins/marketplaces/<name> rev-parse HEAD` shows the commit actually in use
+  formatting: restore it with `git checkout`. A user-scope copy from before may survive the
+  pin, marketplace and installed files alike, so first `claude plugin uninstall
+  <name>@<marketplace> --scope user` and `claude plugin marketplace remove <name> --scope user`
+  (without `--scope` that removes this file's declaration too). The commit in use is the
+  installed copy's `gitCommitSha` in `~/.claude/plugins/installed_plugins.json`, not the
+  marketplace's clone
 - `.mcp.json`: committed, so this repo runs its own working tree as an MCP server
 - `.codex/`: Codex's project layer, which it loads only once the user marks the repository
   trusted in `~/.codex/config.toml`, and otherwise ignores without a word. `config.toml` sets

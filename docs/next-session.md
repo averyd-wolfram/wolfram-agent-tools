@@ -144,8 +144,9 @@ in `docs/design.md`.
   Codex from Claude Code, and to Claude from Codex, read-only with every MCP server off, and
   returns a verdict with evidenced findings; on D35 it found the blockers #176's red team
   ranked first (the trial is on #188). When the question is whether code does what a
-  document says, `/spec-to-code-compliance:spec-compliance` checks each requirement in its own
-  agent and refutes a divergence before reporting it; run against `AGENTS.md`, it found #179
+  document says, `/spec-to-code-compliance:spec-compliance` checks each requirement it selects,
+  up to the run's limit, in its own agent, and refutes a divergence before reporting it; read
+  its `notChecked` before taking a clean report as covering the whole document; run against `AGENTS.md`, it found #179
   unprompted, and #180 and #182–#187. Both are pinned in `.claude/settings.json`; neither
   replaces the reviews above.
 - **Milestones.** Each release has a milestone named for its version, holding every issue it
