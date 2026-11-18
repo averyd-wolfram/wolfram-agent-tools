@@ -715,9 +715,14 @@ cloner has no reason to know about, and it mutates global state.
 - **No `uncaughtException` handler.** An escaped rejection is logged, because the request
   that caused it was already answered. An uncaught exception is left to crash, so the
   client restarts a server whose state is no longer trustworthy.
-- **Cold-start capabilities are a static table.** `MCP_SERVERS` in `config.ts` carries
-  measured per-server capabilities for the first run, and the cache replaces them once a
-  kernel has actually run.
+- **A cold session advertises tools only.** Capabilities are fixed at `initialize`, before
+  a kernel may start. Advertising prompts from a table instead answered `prompts/list` with
+  Method not found where there is no installation, and started a kernel to list them where
+  there is, which ends lazy start for every client that lists prompts at launch. So a session
+  advertises what the cache says a kernel reported: tools only when it is cold, and prompts
+  once a kernel has listed them and the cache holds that, which it does not under
+  `WOLFRAM_MCP_CACHE=0`. `MCP_SERVERS` in `config.ts` records what each built-in server was
+  measured to offer, for diagnostics, never for advertising.
 - **The SDK is heavy for what we use.** `npm run metrics` sizes the production tree; most
   of it is express, hono, cors, jose and eventsource, serving HTTP/SSE transports and OAuth
   this server never touches. We already hand-roll the stdio transport, so dropping the

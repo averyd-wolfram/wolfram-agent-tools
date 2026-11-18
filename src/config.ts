@@ -344,7 +344,6 @@ export function loadConfig(log: Logger): Config {
   };
 }
 
-/** The capabilities to assume for a serverName before any kernel has been seen. */
 /**
  * What a server is known to offer, for diagnostics and documentation.
  *
