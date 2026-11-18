@@ -363,7 +363,8 @@ Use the official specification when working on `proxy.ts` or `transport.ts`.
   attaching to the broker or waiting for it to prepare, since a private kernel started with no
   time left would spend a second seat only to fail, and a request already sent to a broker that
   goes, which fails rather than run again since it may have run (resending one the broker never
-  read is #102).
+  read is #102). A request or reply too large for the broker's socket does not fall back yet
+  either, and that is a bug (#200).
 - **Sharing may never change an answer.** A kernel reads its environment at startup, so two
   sessions share only where their *flavour* matches (`flavour.ts`); the broker starts a kernel
   per flavour and its pool retires an idle one of another flavour rather than exceed the seat
