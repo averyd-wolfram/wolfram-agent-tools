@@ -82,10 +82,11 @@ export interface KernelPoolOptions {
   /** Extra kernel environment, e.g. the WOLFRAM_*BASE trio. */
   extraEnv?: Record<string, string> | undefined;
   /**
-   * Names every kernel this pool starts also runs without, read as it starts
-   * one: a broker's union of every name any session has declared, so a kernel
-   * started for one session cannot inherit another's variable from the broker's
-   * environment. A request is still matched on the names its own session
+   * Names every kernel this pool adds also runs without, read as it adds one: a
+   * broker's union of every name any session has declared, so a kernel added
+   * for one session cannot inherit another's variable from the broker's
+   * environment. A slot keeps the names it was added with when its kernel
+   * restarts after idling, and the record of what it inherited (#192). A request is still matched on the names its own session
    * declared, so this widens what a kernel strips, never whom it may serve.
    */
   stripAlso?: (() => Iterable<string>) | undefined;
