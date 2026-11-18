@@ -343,17 +343,21 @@ export async function drainPages<T>(
   stop?: AbortSignal,
 ): Promise<T[]> {
   const all: T[] = [];
-  let length = 0;
+  // As `JSON.stringify(all)` would write it: its brackets, each item, a comma
+  // between each two.
+  let length = 2;
   let cursor: string | undefined;
   for (let guard = 0; guard < 50; guard++) {
     stopIfLate(stop);
     const result = await page(cursor);
-    all.push(...result.items);
     // No longer, joined, than one page may be, as it will be written again: a
     // broker sends the whole list in one frame, which a longer one outgrew,
     // and refused where a private kernel listed it (#200). Here, so both paths
     // refuse it alike.
-    length += JSON.stringify(result.items).length;
+    for (const item of result.items) {
+      length += JSON.stringify(item).length + (all.length > 0 ? 1 : 0);
+      all.push(item);
+    }
     if (length > KERNEL_LINE_CAP) {
       throw new Error(
         `the list is over ${length} characters joined from its pages, ` +

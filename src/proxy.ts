@@ -188,8 +188,9 @@ function relayable(err: McpError): Error {
 }
 
 /**
- * A request no longer than a kernel's line (#200): as long as any reply a kernel
- * may send, and so always within the broker's socket. Refused here, ahead of
+ * A request whose parameters are no longer than a kernel's line (#200): as long
+ * as any reply a kernel may send, and so, with the few fields around them,
+ * always within the broker's socket. Refused here, ahead of
  * either backend, so both paths answer it alike and no kernel is asked. Longer,
  * a private kernel read it from stdin while the broker dropped it unread and its
  * caller waited out the ceiling.
@@ -200,7 +201,7 @@ function refuseOverlong(method: string, params: unknown): void {
   throw relayable(
     new McpError(
       ErrorCode.InvalidParams,
-      `the ${method} request is ${length} characters, longer than the ${KERNEL_LINE_CAP} a kernel is sent`,
+      `the ${method} request's parameters are ${length} characters, longer than the ${KERNEL_LINE_CAP} a kernel is sent`,
     ),
   );
 }

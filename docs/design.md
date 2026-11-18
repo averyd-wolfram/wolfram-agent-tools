@@ -366,9 +366,9 @@ A frame either end receives that is not JSON, or is over the socket's cap, is dr
 logged by its size, never its content, and neither end sends one over it (#200). Everything a
 session and a broker exchange is held to a kernel's longest line (`transport.ts`), alike on
 both paths, so the socket never decides an answer:
-- **A request** longer than that line is refused by the proxy before any backend sees it. A
-  private kernel would have read it from stdin while the broker dropped it unread, and a
-  kernel started for it alone would spend a seat outside the pool's budget.
+- **A request** whose parameters are longer than that line is refused by the proxy before any
+  backend sees it. A private kernel would have read it from stdin while the broker dropped it
+  unread, and a kernel started for it alone would spend a seat outside the pool's budget.
 - **A reply** longer than that line is dropped by the kernel's transport, and the request it
   began by naming is answered at once with an error giving its length; the kernel, which
   answered, is kept.

@@ -514,7 +514,7 @@ export class FrameReader {
     this.#lines = new CappedLines(
       FRAME_CAP,
       (line) => this.#read(line.trim()),
-      (length, _head, ended) =>
+      (length, _ends, ended) =>
         this.#report(
           ended
             ? `dropped a frame of ${length} characters, over the ${FRAME_CAP} cap`

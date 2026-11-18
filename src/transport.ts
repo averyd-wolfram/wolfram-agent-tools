@@ -64,7 +64,7 @@ export class FilteringStdioTransport implements Transport {
   readonly #lines = new CappedLines(
     KERNEL_LINE_CAP,
     (line) => this.#emit(line),
-    (length, head, ended) => this.#dropped(length, head, ended),
+    (length, ends, ended) => this.#dropped(length, ends, ended),
   );
   /**
    * Requests sent and not yet answered, by id. A kernel is serial, so a reply
@@ -302,7 +302,7 @@ export class FilteringStdioTransport implements Transport {
    * kernel's side of the protocol, so both paths report it alike and neither
    * takes the kernel for a hung one.
    */
-  #dropped(length: number, head: string, ended: boolean): void {
+  #dropped(length: number, ends: { head: string; tail: string }, ended: boolean): void {
     if (!ended) {
       this.#record(`dropping kernel output over the ${KERNEL_LINE_CAP} a line may run to`);
       return;
@@ -311,7 +311,7 @@ export class FilteringStdioTransport implements Transport {
       `dropped a line of ${length} characters of kernel output, ` +
         `over the ${KERNEL_LINE_CAP} a line may run to`,
     );
-    const id = replyId(head);
+    const id = replyId(ends);
     if (id === undefined || !this.#unanswered.has(id)) return;
     this.#unanswered.delete(id);
     this.#deliver({
@@ -350,9 +350,13 @@ export class FilteringStdioTransport implements Transport {
   #deliver(message: JSONRPCMessage): void {
     // Anything at all a kernel printed as JSON reaches here, a bare number in an
     // array among it, and `in` throws on that.
+    // Only a JSON-RPC reply answers a request: the SDK takes nothing else for
+    // one, and a stray line holding its id left the real reply, dropped for its
+    // length, matching nothing.
     if (
       typeof message === "object" &&
       message !== null &&
+      message.jsonrpc === "2.0" &&
       !("method" in message) &&
       ("result" in message || "error" in message) &&
       "id" in message &&
@@ -369,21 +373,32 @@ export class FilteringStdioTransport implements Transport {
 }
 
 /**
- * The id a dropped line answered, read from how it began, or undefined where it
- * did not begin as a reply. A reply's members ahead of its `result` or `error`
- * are `jsonrpc` and `id`, in either order; AgentTools writes `<|"jsonrpc" ->
- * "2.0", "id" -> id, "result" | "error" -> ...|>`, so the id comes first. A line
- * that begins any other way is not taken for one: a notification, a kernel's
- * own request, or something else it printed, which no request awaits.
+ * The id a dropped line answered, read from how it began and how it ended, or
+ * undefined where it was not a JSON-RPC reply. Its top-level members other than
+ * `result` or `error` are `jsonrpc` and `id`, and come before it or after it, in
+ * either order; AgentTools writes `<|"jsonrpc" -> "2.0", "id" -> id, "result" |
+ * "error" -> ...|>`. A line that is not one is never taken for one: a
+ * notification, a kernel's own request, or anything else it printed, which no
+ * request awaits.
  */
-export function replyId(head: string): string | number | undefined {
+export function replyId({
+  head,
+  tail,
+}: {
+  head: string;
+  tail: string;
+}): string | number | undefined {
   const value = String.raw`(?:-?\d+|"(?:[^"\\]|\\.)*")`;
-  const member = String.raw`\s*"(jsonrpc|id)"\s*:\s*(${value})\s*,`;
-  const begins = new RegExp(String.raw`^\s*\{((?:${member}){1,2})\s*"(?:result|error)"\s*:`).exec(
+  const member = String.raw`\s*"(?:jsonrpc|id)"\s*:\s*${value}\s*`;
+  // Before: `{` members `,` then the result. After: the result, then `,` members `}` at the end.
+  const before = new RegExp(String.raw`^\s*\{((?:${member},){0,2})\s*"(?:result|error)"\s*:`).exec(
     head,
   );
-  if (!begins?.[1]) return undefined;
-  const found = new RegExp(String.raw`"id"\s*:\s*(${value})`).exec(begins[1]);
+  if (!before) return undefined;
+  const after = new RegExp(String.raw`,((?:${member},?){1,2})\}\s*$`).exec(tail);
+  const members = `${before[1] ?? ""},${after?.[1] ?? ""}`;
+  if (!new RegExp(String.raw`"jsonrpc"\s*:\s*"2\.0"`).test(members)) return undefined;
+  const found = new RegExp(String.raw`"id"\s*:\s*(${value})`).exec(members);
   if (!found?.[1]) return undefined;
   try {
     const id: unknown = JSON.parse(found[1]);
