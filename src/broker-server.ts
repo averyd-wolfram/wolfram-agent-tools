@@ -271,6 +271,9 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
       reserveSeats: options.reserveSeats,
       licence,
       extraEnv,
+      // Every name any session has declared, stripped from each kernel the pool
+      // starts, read as it starts one.
+      stripAlso: () => declaredNames,
       learnFromKernels: options.allowInspect,
       licenceConfigured: options.licenceOverride !== undefined,
       onFacts: (facts, chosen) => {
@@ -387,13 +390,11 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
         error: "this session has not declared the environment its kernels need",
       };
     }
-    // Widened to every name anybody declared, so a kernel started for this
-    // session cannot inherit another session's variable from this process. The
-    // digest is untouched: it still identifies which kernels are this session's.
-    const flavour: KernelFlavour = {
-      ...declared,
-      names: [...new Set([...declared.names, ...declaredNames])],
-    };
+    // The session's own names: the pool strips every name anybody declared
+    // from each kernel it starts (`stripAlso`), and matches a session against
+    // only the names it declared itself, so a session that never declared one
+    // is not turned away from a kernel that holds it (#180).
+    const flavour = declared;
     // An evaluation is registered as its frame is read, before anything here
     // awaits, so a `cancel` frame that follows it can reach it. Registered
     // after `await preparing`, a cancel read first — in the same chunk, or

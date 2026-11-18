@@ -15,7 +15,7 @@
  */
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
-import type { KernelFlavour } from "./flavour.js";
+import { settingValue, type KernelFlavour } from "./flavour.js";
 import {
   isServerNotResolved,
   KernelSession,
@@ -81,6 +81,14 @@ export interface KernelPoolOptions {
   log: Logger;
   /** Extra kernel environment, e.g. the WOLFRAM_*BASE trio. */
   extraEnv?: Record<string, string> | undefined;
+  /**
+   * Names every kernel this pool starts also runs without, read as it starts
+   * one: a broker's union of every name any session has declared, so a kernel
+   * started for one session cannot inherit another's variable from the broker's
+   * environment. A request is still matched on the names its own session
+   * declared, so this widens what a kernel strips, never whom it may serve.
+   */
+  stripAlso?: (() => Iterable<string>) | undefined;
   /** Explicit cap. When unset, it is derived from the licence. */
   maxKernels?: number | undefined;
   /** Seats to leave free for interactive use. */
@@ -129,6 +137,12 @@ interface Slot {
    * flavours are two kernels however alike they look from here.
    */
   flavour: KernelFlavour;
+  /**
+   * The names this process's environment gave a value as the kernel started,
+   * and its flavour did not strip: what it may hold that a session stripping
+   * one of them must not see (#180). Blank counts as unset, as everywhere.
+   */
+  inherited: ReadonlySet<string>;
 }
 
 interface Waiter {
@@ -313,9 +327,15 @@ export class KernelPool {
     this.#schedule();
   }
 
-  async #grow(flavour: KernelFlavour): Promise<Slot> {
+  async #grow(requested: KernelFlavour): Promise<Slot> {
     const index = this.#slots.length + 1;
     const { log } = this.#options;
+    // Applied as a kernel starts, not as its request arrived: a name declared
+    // while the request waited is stripped too.
+    const also = this.#options.stripAlso?.();
+    const flavour: KernelFlavour = also
+      ? { ...requested, names: [...new Set([...requested.names, ...also])] }
+      : requested;
     const session = new KernelSession({
       bin: this.#options.bin,
       serverName: this.#options.serverName,
@@ -340,7 +360,12 @@ export class KernelPool {
         await this.#options.onKernelReady?.(client, flavour.digest, late, session.source);
       },
     });
-    const slot: Slot = { session, busy: true, flavour };
+    const inherited = new Set(
+      Object.keys(process.env).filter(
+        (name) => !flavour.names.includes(name) && settingValue(process.env[name]) !== undefined,
+      ),
+    );
+    const slot: Slot = { session, busy: true, flavour, inherited };
     this.#slots.push(slot);
     log(
       `pool grew to ${this.#slots.length} kernel(s) for environment ${flavour.digest}, ` +
@@ -426,21 +451,16 @@ export class KernelPool {
   }
 
   /**
-   * Whether a slot's kernel may hold a value for a name this request strips: a
-   * name it did not strip as it started, which what a kernel inherits, this
-   * process's environment, sets. A broker widens each request's names to every
-   * one any session has declared, but a kernel keeps the names it started with,
-   * so one started before a name was first declared kept the broker's value,
-   * and a session declaring it unset, of the same digest, was handed it (#180).
-   * Only a name with a value here: the many a declaration adds that this
-   * process never had leave a kernel as it was, and its session's state with it.
+   * Whether a slot's kernel may hold a value for a name this request's own
+   * session strips: one it inherited, unstripped, from this process as it
+   * started. A kernel started before a name was first declared kept the
+   * broker's value for it, and a session declaring it unset, of the same
+   * digest, was handed it (#180). Only that session's own names, so a session
+   * that never declared it keeps the kernels it had; and only a name this
+   * process gave a value, so a declaration of one it never had retires nothing.
    */
   #inherits(slot: Slot, flavour: KernelFlavour): boolean {
-    return flavour.names.some(
-      (name) =>
-        !slot.flavour.names.includes(name) &&
-        (process.env[name] !== undefined || this.#extraEnv?.[name] !== undefined),
-    );
+    return flavour.names.some((name) => slot.inherited.has(name));
   }
 
   /**
