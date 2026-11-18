@@ -81,6 +81,15 @@ export interface KernelPoolOptions {
   log: Logger;
   /** Extra kernel environment, e.g. the WOLFRAM_*BASE trio. */
   extraEnv?: Record<string, string> | undefined;
+  /**
+   * Names every kernel this pool adds also runs without, read as it adds one: a
+   * broker's union of every name any session has declared, so a kernel added
+   * for one session cannot inherit another's variable from the broker's
+   * environment. A slot keeps the names it was added with when its kernel
+   * restarts after idling, and the record of what it inherited (#192). A request is still matched on the names its own session
+   * declared, so this widens what a kernel strips, never whom it may serve.
+   */
+  stripAlso?: (() => Iterable<string>) | undefined;
   /** Explicit cap. When unset, it is derived from the licence. */
   maxKernels?: number | undefined;
   /** Seats to leave free for interactive use. */
@@ -129,6 +138,14 @@ interface Slot {
    * flavours are two kernels however alike they look from here.
    */
   flavour: KernelFlavour;
+  /**
+   * The names this process's environment held as the kernel started, and its
+   * flavour did not strip: what it may hold that a session stripping one of
+   * them must not see (#180). Any value counts, blank or an unsubstituted
+   * `${...}` included: a name a flavour sets is stripped when it reads as
+   * unset, but an inherited one reaches the kernel as it is.
+   */
+  inherited: ReadonlySet<string>;
 }
 
 interface Waiter {
@@ -313,9 +330,15 @@ export class KernelPool {
     this.#schedule();
   }
 
-  async #grow(flavour: KernelFlavour): Promise<Slot> {
+  async #grow(requested: KernelFlavour): Promise<Slot> {
     const index = this.#slots.length + 1;
     const { log } = this.#options;
+    // Applied as a kernel starts, not as its request arrived: a name declared
+    // while the request waited is stripped too.
+    const also = this.#options.stripAlso?.();
+    const flavour: KernelFlavour = also
+      ? { ...requested, names: [...new Set([...requested.names, ...also])] }
+      : requested;
     const session = new KernelSession({
       bin: this.#options.bin,
       serverName: this.#options.serverName,
@@ -340,7 +363,10 @@ export class KernelPool {
         await this.#options.onKernelReady?.(client, flavour.digest, late, session.source);
       },
     });
-    const slot: Slot = { session, busy: true, flavour };
+    const inherited = new Set(
+      Object.keys(process.env).filter((name) => !flavour.names.includes(name)),
+    );
+    const slot: Slot = { session, busy: true, flavour, inherited };
     this.#slots.push(slot);
     log(
       `pool grew to ${this.#slots.length} kernel(s) for environment ${flavour.digest}, ` +
@@ -407,16 +433,35 @@ export class KernelPool {
   /**
    * Whether a slot's kernel can serve this flavour: one of it whose running
    * kernel's source has not changed on disk since it started
-   * (`KernelSession.sourceChanged`). One started before a paclet upgrade serves
-   * the old definition, so it is treated as another flavour's: never handed
-   * out, and retired as one is (#3).
+   * (`KernelSession.sourceChanged`), and that holds no value for a name this
+   * request strips (`#inherits`). Either kind is treated as another flavour's:
+   * never handed out, and retired as one is. One started before a paclet
+   * upgrade serves the old definition (#3); one started before a name was
+   * declared may hold this process's value for it (#180).
    * Decided as a slot is chosen, so a request queued before an upgrade and
    * served after it gets a kernel started after it. A slot whose kernel stopped
    * for idleness reads the source again as it restarts, so it is still this
    * flavour's.
    */
   #mine(slot: Slot, flavour: KernelFlavour): boolean {
-    return slot.flavour.digest === flavour.digest && !this.#replaced(slot);
+    return (
+      slot.flavour.digest === flavour.digest &&
+      !this.#inherits(slot, flavour) &&
+      !this.#replaced(slot)
+    );
+  }
+
+  /**
+   * Whether a slot's kernel may hold a value for a name this request's own
+   * session strips: one it inherited, unstripped, from this process as it
+   * started. A kernel started before a name was first declared kept the
+   * broker's value for it, and a session declaring it unset, of the same
+   * digest, was handed it (#180). Only that session's own names, so a session
+   * that never declared it keeps the kernels it had; and only a name this
+   * process held, so a declaration of one it never had retires nothing.
+   */
+  #inherits(slot: Slot, flavour: KernelFlavour): boolean {
+    return flavour.names.some((name) => slot.inherited.has(name));
   }
 
   /**
@@ -516,17 +561,21 @@ export class KernelPool {
       case "grow":
         return this.#grow(flavour);
       case "swap": {
-        // A victim of this very environment is one only because what its server
-        // is served from changed — an installed paclet, or the user's own server
-        // file — since it started, or while it did, when which it loaded is
-        // unknown (`#mine`). So the log names the change, not its order. Logged
-        // as another environment's, the broker said it retired a kernel of X to
-        // make room for X.
+        // A victim of this very environment is one for one of two reasons
+        // (`#mine`): what its server is served from changed — an installed
+        // paclet, or the user's own server file — since it started, or while it
+        // did, when which it loaded is unknown; or it holds this process's value
+        // for a name declared since it started. So the log names the reason, not
+        // its order. Logged as another environment's, the broker said it retired
+        // a kernel of X to make room for X.
         const stale = plan.victim.flavour.digest === flavour.digest;
+        const why = this.#inherits(plan.victim, flavour)
+          ? "it holds a variable declared since it started"
+          : "its server's paclets or definition changed";
         this.#options.log(
           stale
             ? `budget reached; retiring an idle kernel for environment ${flavour.digest} ` +
-                `whose server's paclets or definition changed, to make room`
+                `because ${why}, to make room`
             : `budget reached and no kernel for environment ${flavour.digest}; retiring an idle ` +
                 `kernel for ${plan.victim.flavour.digest} to make room`,
         );
@@ -536,9 +585,7 @@ export class KernelPool {
         // could: three kernels on two seats.
         this.#retire(
           plan.victim,
-          stale
-            ? "its server's paclets or definition changed"
-            : "a session with a different environment needed the seat",
+          stale ? why : "a session with a different environment needed the seat",
           false,
         );
         const replacement = this.#grow(flavour);

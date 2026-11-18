@@ -1279,6 +1279,114 @@ heading("A session's own directories stay that session's");
 }
 
 // ---------------------------------------------------------------------------
+// A broker strips every name any session has declared from each kernel it
+// starts, but a kernel keeps what it started with: one started before a name
+// was first declared kept the broker's value for it. A session declaring it
+// unset has the same digest as one that never declared it, and matched on the
+// digest alone it was handed that kernel, and the value (#180). This process
+// stands in for the broker: its environment is what the pool's kernels inherit,
+// and `stripAlso` is its union of declared names, as broker-server passes it.
+heading("A kernel holding a variable declared since it started is not handed to a session that strips it");
+{
+  wipeCache();
+  const keys = ["FAKE_MARKER", "FAKE_REPORT_ENV", "MY_MODE", "MY_OTHER", "MY_BLANK", "MY_PLACEHOLDER"];
+  const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  const declaredNow = new Set();
+  const poolOf = () =>
+    new lib.KernelPool({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 10_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: "unknown", type: null },
+      learnFromKernels: false,
+      stripAlso: () => declaredNow,
+    });
+  const pools = [];
+  try {
+    process.env.FAKE_MARKER = marker;
+    process.env.FAKE_REPORT_ENV = "MY_MODE";
+    process.env.MY_MODE = "the-brokers";
+    process.env.MY_BLANK = "";
+    process.env.MY_PLACEHOLDER = "${user_config.mode}";
+    delete process.env.MY_OTHER;
+    const pool = poolOf();
+    pools.push(pool);
+    const said = async (target, flavour) =>
+      (await target.run(flavour, (client) =>
+        client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }),
+      )).content?.[0]?.text ?? "";
+    const plain = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" });
+    const declaring = (names) =>
+      lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage", WOLFRAM_MCP_KERNEL_ENV: names });
+
+    const first = await said(pool, plain);
+    check(
+      "a kernel started before anyone declared MY_MODE holds this process's value",
+      first.includes("MY_MODE=the-brokers"),
+      first.slice(-40),
+    );
+    declaredNow.add("MY_MODE");
+    const declared = await said(pool, declaring("MY_MODE"));
+    check(
+      "a session that declares MY_MODE unset, of the same digest, never sees it",
+      declaring("MY_MODE").digest === plain.digest && declared.includes("MY_MODE=(unset)"),
+      declared.slice(-40),
+    );
+    const kept = startCount();
+    await said(pool, plain);
+    check(
+      "a session that never declared it is not turned away from the kernels it had",
+      startCount() === kept,
+      `${startCount() - kept} start(s)`,
+    );
+    // Most names a declaration adds were never in the broker's environment, so
+    // no kernel could hold them.
+    declaredNow.add("MY_OTHER");
+    const quiet = startCount();
+    await said(pool, declaring("MY_OTHER"));
+    check(
+      "a declared name this process never held retires no kernel",
+      startCount() === quiet,
+      `${startCount() - quiet} start(s)`,
+    );
+    // Blank, or an unsubstituted `${...}`, reads as unset where a flavour sets a
+    // name, since a flavour strips it then; inherited, it reaches the kernel as
+    // it is, which a session declaring the name unset must not be handed.
+    // One at a time: a kernel started for the first would strip both.
+    for (const name of ["MY_BLANK", "MY_PLACEHOLDER"]) {
+      declaredNow.add(name);
+      const before = startCount();
+      await said(pool, declaring(name));
+      check(
+        `a ${name === "MY_BLANK" ? "blank" : "`${...}`"} value a kernel inherited counts as one it holds`,
+        startCount() === before + 1,
+        `${startCount() - before} start(s)`,
+      );
+    }
+    // The union is read as a kernel starts: one started after a declaration
+    // runs without the name, for whichever session it is started for.
+    const fresh = poolOf();
+    pools.push(fresh);
+    const later = await said(fresh, plain);
+    check(
+      "a kernel started after MY_MODE was declared runs without it, for any session",
+      later.includes("MY_MODE=(unset)"),
+      later.slice(-40),
+    );
+  } finally {
+    for (const pool of pools) await pool.stop();
+    for (const key of keys) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // The broker's address and its kernels read WOLFRAMINIT with blank and an
 // unsubstituted `${...}` as unset; its licence read any non-blank value as an
 // entitlement, ignored the installation's cached licence, and started at one
