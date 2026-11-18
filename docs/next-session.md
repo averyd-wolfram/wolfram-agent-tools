@@ -141,12 +141,14 @@ in `docs/design.md`.
   missed until the maintainer pointed to it.
 - **Before a design is marked decided**, have the other provider review it: claudex-loop's
   plan review (`claudex-loop`, or its runner's `review` mode on a plan file) puts the plan to
-  Codex from Claude Code, and to Claude from Codex, read-only with every MCP server off, and
+  Codex from Claude Code, and to Claude from Codex, read-only with apps, plugins and every MCP
+  server off (a Codex hook the user trusts still runs), and
   returns a verdict with evidenced findings; on D35 it found the blockers #176's red team
   ranked first (the trial is on #188). When the question is whether code does what a
   document says, `/spec-to-code-compliance:spec-compliance` checks each requirement it selects,
   up to the run's limit, in its own agent, and refutes a divergence before reporting it; read
-  its `notChecked` before taking a clean report as covering the whole document; run against `AGENTS.md`, it found #179
+  its `notChecked`, `checksFailed` and `unreadableDocuments` before taking a report with no
+  divergences as covering the whole document; run against `AGENTS.md`, it found #179
   unprompted, and #180 and #182–#187. Both are pinned in `.claude/settings.json`; neither
   replaces the reviews above.
 - **Milestones.** Each release has a milestone named for its version, holding every issue it

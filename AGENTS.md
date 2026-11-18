@@ -243,9 +243,10 @@ built-ins, which is the bug it exists for.
   formatting: restore it with `git checkout`. A user-scope copy from before may survive the
   pin, marketplace and installed files alike, so first `claude plugin uninstall
   <name>@<marketplace> --scope user` and `claude plugin marketplace remove <name> --scope user`
-  (without `--scope` that removes this file's declaration too). The commit in use is the
-  installed copy's `gitCommitSha` in `~/.claude/plugins/installed_plugins.json`, not the
-  marketplace's clone
+  (without `--scope` that removes this file's declaration too). The pin is the commit
+  declared, not a guarantee of the files run: `gitCommitSha` in
+  `~/.claude/plugins/installed_plugins.json` names what was installed, and Claude Code keeps one
+  copy per plugin version, so another project pinning another commit of it can replace them
 - `.mcp.json`: committed, so this repo runs its own working tree as an MCP server
 - `.codex/`: Codex's project layer, which it loads only once the user marks the repository
   trusted in `~/.codex/config.toml`, and otherwise ignores without a word. `config.toml` sets
