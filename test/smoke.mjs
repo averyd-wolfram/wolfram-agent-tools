@@ -1289,7 +1289,7 @@ heading("A session's own directories stay that session's");
 heading("A kernel holding a variable declared since it started is not handed to a session that strips it");
 {
   wipeCache();
-  const keys = ["FAKE_MARKER", "FAKE_REPORT_ENV", "MY_MODE", "MY_OTHER", "MY_BLANK"];
+  const keys = ["FAKE_MARKER", "FAKE_REPORT_ENV", "MY_MODE", "MY_OTHER", "MY_BLANK", "MY_PLACEHOLDER"];
   const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   const declaredNow = new Set();
   const poolOf = () =>
@@ -1311,6 +1311,7 @@ heading("A kernel holding a variable declared since it started is not handed to 
     process.env.FAKE_REPORT_ENV = "MY_MODE";
     process.env.MY_MODE = "the-brokers";
     process.env.MY_BLANK = "";
+    process.env.MY_PLACEHOLDER = "${user_config.mode}";
     delete process.env.MY_OTHER;
     const pool = poolOf();
     pools.push(pool);
@@ -1342,16 +1343,30 @@ heading("A kernel holding a variable declared since it started is not handed to 
       startCount() === kept,
       `${startCount() - kept} start(s)`,
     );
-    // Most names a declaration adds were never in the broker's environment, or
-    // are blank there, which is unset; no kernel could hold a value for them.
-    declaredNow.add("MY_OTHER").add("MY_BLANK");
+    // Most names a declaration adds were never in the broker's environment, so
+    // no kernel could hold them.
+    declaredNow.add("MY_OTHER");
     const quiet = startCount();
-    await said(pool, declaring("MY_OTHER,MY_BLANK"));
+    await said(pool, declaring("MY_OTHER"));
     check(
-      "a declared name this process holds no value for, or a blank one, retires no kernel",
+      "a declared name this process never held retires no kernel",
       startCount() === quiet,
       `${startCount() - quiet} start(s)`,
     );
+    // Blank, or an unsubstituted `${...}`, reads as unset where a flavour sets a
+    // name, since a flavour strips it then; inherited, it reaches the kernel as
+    // it is, which a session declaring the name unset must not be handed.
+    // One at a time: a kernel started for the first would strip both.
+    for (const name of ["MY_BLANK", "MY_PLACEHOLDER"]) {
+      declaredNow.add(name);
+      const before = startCount();
+      await said(pool, declaring(name));
+      check(
+        `a ${name === "MY_BLANK" ? "blank" : "`${...}`"} value a kernel inherited counts as one it holds`,
+        startCount() === before + 1,
+        `${startCount() - before} start(s)`,
+      );
+    }
     // The union is read as a kernel starts: one started after a declaration
     // runs without the name, for whichever session it is started for.
     const fresh = poolOf();

@@ -15,7 +15,7 @@
  */
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
-import { settingValue, type KernelFlavour } from "./flavour.js";
+import type { KernelFlavour } from "./flavour.js";
 import {
   isServerNotResolved,
   KernelSession,
@@ -139,9 +139,11 @@ interface Slot {
    */
   flavour: KernelFlavour;
   /**
-   * The names this process's environment gave a value as the kernel started,
-   * and its flavour did not strip: what it may hold that a session stripping
-   * one of them must not see (#180). Blank counts as unset, as everywhere.
+   * The names this process's environment held as the kernel started, and its
+   * flavour did not strip: what it may hold that a session stripping one of
+   * them must not see (#180). Any value counts, blank or an unsubstituted
+   * `${...}` included: a name a flavour sets is stripped when it reads as
+   * unset, but an inherited one reaches the kernel as it is.
    */
   inherited: ReadonlySet<string>;
 }
@@ -362,9 +364,7 @@ export class KernelPool {
       },
     });
     const inherited = new Set(
-      Object.keys(process.env).filter(
-        (name) => !flavour.names.includes(name) && settingValue(process.env[name]) !== undefined,
-      ),
+      Object.keys(process.env).filter((name) => !flavour.names.includes(name)),
     );
     const slot: Slot = { session, busy: true, flavour, inherited };
     this.#slots.push(slot);
@@ -458,7 +458,7 @@ export class KernelPool {
    * broker's value for it, and a session declaring it unset, of the same
    * digest, was handed it (#180). Only that session's own names, so a session
    * that never declared it keeps the kernels it had; and only a name this
-   * process gave a value, so a declaration of one it never had retires nothing.
+   * process held, so a declaration of one it never had retires nothing.
    */
   #inherits(slot: Slot, flavour: KernelFlavour): boolean {
     return flavour.names.some((name) => slot.inherited.has(name));
