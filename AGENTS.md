@@ -359,7 +359,10 @@ Use the official specification when working on `proxy.ts` or `transport.ts`.
   cache holds that; `tools/list` is served from cache when one is warm. Work added to
   `createWolframServer` must not block and must not spawn.
 - **Sharing is an optimisation, never a dependency.** Every broker failure must fall back to a
-  private kernel, with the reason logged.
+  private kernel, with the reason logged, but for two, each deliberate: a start deadline spent
+  while attaching, since a private kernel started with no time left would spend a second seat
+  only to fail, and a request already sent to a broker that goes, which fails rather than run
+  again since it may have run (resending one the broker never read is #102).
 - **Sharing may never change an answer.** A kernel reads its environment at startup, so two
   sessions share only where their *flavour* matches (`flavour.ts`); the broker starts a kernel
   per flavour and its pool retires an idle one of another flavour rather than exceed the seat
@@ -453,8 +456,8 @@ these are the consequential ones; formatting, lint and types are CI's.
   budget, and any path outside `doctor` that can reach discovery's step 7 (`wolframscript`):
   each spends a licence seat the user may not have.
 - **The four invariants.** Flag output on stdout that is not a JSON-RPC frame, a kernel started
-  on the `initialize` path, a broker failure that does not fall back to a private kernel, and
-  sessions of different flavours sharing a kernel.
+  on the `initialize` path, a broker failure other than the invariant's two exceptions that does
+  not fall back to a private kernel, and sessions of different flavours sharing a kernel.
 - **Broker protocol.** Flag a frame that changes shape without a `BROKER_PROTOCOL` bump, and a
   bump for a new op alone, which strands running brokers holding seats.
 - **One answer on both paths.** Flag a kernel message paraphrased, and the private and broker

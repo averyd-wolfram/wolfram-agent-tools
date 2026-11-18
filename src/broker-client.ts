@@ -586,7 +586,10 @@ export class BrokerBackend implements KernelBackend {
 
   #attach(socket: Socket): void {
     socket.setEncoding("utf8");
-    const reader = new FrameReader((raw) => this.#onFrame(raw as BrokerFrame));
+    const reader = new FrameReader(
+      (raw) => this.#onFrame(raw as BrokerFrame),
+      (why) => this.#options.log(`broker connection: ${why}`),
+    );
     socket.on("data", (chunk: string) => reader.push(chunk));
     socket.on("close", () => this.#failAll(new Error("the Wolfram broker closed the connection")));
     socket.on("error", (err) => this.#failAll(err));

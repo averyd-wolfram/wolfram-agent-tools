@@ -2995,6 +2995,90 @@ heading("A session that stops closes a connection still draining, at once");
 }
 
 // ---------------------------------------------------------------------------
+// Dropped silently, a reply over the size cap left its request to wait out its
+// whole ceiling, with nothing in either log to say why (#186).
+heading("A frame either end cannot read is dropped and logged with its size (#186)");
+if (socketsHere()) {
+  // The session's end, against a stub broker that answers a call with a line
+  // that is not JSON, then a frame over the cap.
+  const unterminated = "x".repeat(4 * 1024 * 1024 + 1);
+  const stub = createServer((socket) => {
+    socket.setEncoding("utf8");
+    socket.on("error", () => socket.destroy());
+    const send = (text) => socket.writable && socket.write(text);
+    let buffered = "";
+    socket.on("data", (chunk) => {
+      buffered += chunk;
+      for (let at; (at = buffered.indexOf("\n")) !== -1; buffered = buffered.slice(at + 1)) {
+        const frame = JSON.parse(buffered.slice(0, at));
+        if (frame.op === "hello") {
+          send(`${JSON.stringify({ id: frame.id, ok: true, result: { flavours: true, flavour: frame.params?.digest } })}\n`);
+        } else if (frame.op === "ping") {
+          send(`${JSON.stringify({ id: frame.id, ok: true, result: {} })}\n`);
+        } else if (frame.op === "callTool") {
+          send(`not a frame\n${unterminated}`);
+        }
+      }
+    });
+  });
+  const stubAddress = join(privateDir(join(home, "run-dropped-frames-stub")), "broker.sock");
+  await listening(stub, stubAddress);
+  const sessionLog = [];
+  const backend = await lib.BrokerBackend.attachIfRunning({
+    address: stubAddress,
+    flavour: lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" }),
+    spawnCommand: join(home, "definitely-not-a-binary"),
+    spawnArgs: [],
+    spawnEnv: {},
+    log: (message) => sessionLog.push(message),
+  });
+  const call = backend
+    ?.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, { timeoutMs: 1_000 })
+    .catch(() => {});
+  const dropped = () => sessionLog.filter((m) => /dropped a frame/.test(m));
+  await until(() => dropped().length >= 2, 5_000);
+  check(
+    "the session logs a frame from the broker that is not JSON, with its size",
+    sessionLog.some((m) => /^broker connection: dropped a frame of 11 characters: /.test(m)),
+    dropped().join(" | ").slice(0, 160) || "nothing logged",
+  );
+  check(
+    "and a frame over the size cap, with its size",
+    sessionLog.some((m) => /^broker connection: dropped a frame of \d+ characters and no newline yet, over the \d+ cap$/.test(m)),
+    dropped().join(" | ").slice(0, 160) || "nothing logged",
+  );
+  await call;
+  await backend?.stop();
+  stub.close();
+
+  // The broker's end, sent a line that is not JSON by a proxy.
+  const brokerLog = [];
+  const brokerAddress = join(privateDir(join(home, "run-dropped-frames-broker")), "broker.sock");
+  const broker = await lib.startBroker({
+    address: brokerAddress,
+    bin: fakeKernel,
+    serverName: "WolframLanguage",
+    idleMs: 60_000,
+    startTimeoutMs: 10_000,
+    reserveSeats: 0,
+    allowInspect: false,
+    clientInfo: { name: "smoke", version: "1.0.0" },
+    log: (message) => brokerLog.push(message),
+  });
+  const probe = connectSocket(brokerAddress);
+  probe.on("error", () => {});
+  probe.write("not a frame\n");
+  await until(() => brokerLog.some((m) => /dropped a frame/.test(m)), 5_000);
+  check(
+    "the broker logs a frame from a session that is not JSON, with its size",
+    brokerLog.some((m) => /^proxy connection: dropped a frame of 11 characters: /.test(m)),
+    brokerLog.find((m) => /dropped a frame/.test(m)) ?? "nothing logged",
+  );
+  probe.destroy();
+  await broker.stop();
+}
+
+// ---------------------------------------------------------------------------
 // The connection itself, against a stub broker that says shuttingDown as soon
 // as it is given a call. Retired, it keeps the socket until that call is
 // answered and closes it then; it takes no part in the session's capability

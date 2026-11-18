@@ -353,7 +353,15 @@ immediately, because its canned reply does not parse.
 
 **Sharing is never a dependency.** Any failure to reach or start a broker falls back to a
 private kernel, with the reason logged. It is an optimisation of a scarce resource, not a
-requirement for the server to work.
+requirement for the server to work. Two failures do not fall back, deliberately:
+- **A start deadline spent while attaching** is backed off like any stage that ran out of
+  time, naming the stage. A private kernel started with no time left would spend a second
+  seat only to fail.
+- **A request already sent to a broker that goes** fails rather than run again, since it may
+  already have run. One the broker never read could be sent again safely, which is #102.
+
+A frame either end cannot read, one over the size cap included, is dropped and logged with
+its size, and a request whose reply was dropped waits out its ceiling.
 
 **What it does not fix.** A kernel is single-threaded, so requests beyond the budget
 queue. With a 2-seat licence that means one kernel serving every session; agent calls are

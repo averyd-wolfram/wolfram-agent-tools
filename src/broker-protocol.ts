@@ -20,6 +20,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { cacheDir } from "./cache.js";
 import { settingValue } from "./flavour.js";
+import { errorText } from "./log.js";
 import { PKG } from "./version.js";
 
 /**
@@ -476,13 +477,25 @@ const MAX_UNTERMINATED_BYTES = 4 * 1024 * 1024;
 export class FrameReader {
   #buffer = "";
 
-  constructor(private readonly onFrame: (frame: unknown) => void) {}
+  /**
+   * @param onDropped told of each frame dropped, and why. Dropped silently, a
+   * reply over the cap left its request to wait out its whole ceiling with
+   * nothing in either log to say why (#186).
+   */
+  constructor(
+    private readonly onFrame: (frame: unknown) => void,
+    private readonly onDropped: (why: string) => void = () => {},
+  ) {}
 
   push(chunk: string): void {
     this.#buffer += chunk;
     if (this.#buffer.length > MAX_UNTERMINATED_BYTES) {
       // Dropped whole: a partial frame is not JSON, and keeping the tail would
       // only feed a corrupt line to the parser on the next newline.
+      this.onDropped(
+        `dropped a frame of ${this.#buffer.length} characters and no newline yet, ` +
+          `over the ${MAX_UNTERMINATED_BYTES} cap`,
+      );
       this.#buffer = "";
       return;
     }
@@ -493,8 +506,9 @@ export class FrameReader {
       if (!line) continue;
       try {
         this.onFrame(JSON.parse(line));
-      } catch {
+      } catch (err) {
         // A corrupt frame is not recoverable in-band; drop it and continue.
+        this.onDropped(`dropped a frame of ${line.length} characters: ${errorText(err)}`);
       }
     }
   }
