@@ -510,13 +510,23 @@ export function createWolframServer(
 
   const backend = makeBackend(install);
 
+  // Requests a list answered from this server's own copy. No kernel answered
+  // them, so there is nothing to follow: following one re-read the lists
+  // through the backend, which started a kernel, idled out or never started, to
+  // serve a list the cache had just served (#185).
+  const fromCache = new WeakSet<object>();
+
   // The one way a handler the kernel answers is registered, so each relays a
   // kernel's protocol error once. Wrapped one by one, a handler added later
   // could forget, and its errors would arrive doubled again (#62). `tools/call`
   // is the exception: it alone has an `isError` form, and decides for itself.
   const fromKernel: typeof server.setRequestHandler = (schema, handler) =>
     server.setRequestHandler(schema, (request, extra) =>
-      relayed(Promise.resolve(handler(request, extra)).finally(follow)),
+      relayed(
+        Promise.resolve(handler(request, extra)).finally(() => {
+          if (!fromCache.has(extra)) follow();
+        }),
+      ),
     );
 
   let toolCache: Tool[] | null = usableCache?.tools ?? null;
@@ -668,13 +678,14 @@ export function createWolframServer(
     });
   }
 
-  fromKernel(ListToolsRequestSchema, async () => {
+  fromKernel(ListToolsRequestSchema, async (_request, extra) => {
     // Deliberately no cursor handling, and none advertised: see `fullToolList`.
     // A cursor is upstream paging state belonging to one kernel, and the pool
     // hands out whichever kernel is free — so page 2 could be asked of a kernel
     // that never issued page 1.
 
     if (toolCache) {
+      fromCache.add(extra);
       log(`tools/list served from cache (${toolCache.length} tools), kernel not started`);
       return { tools: [...toolCache, STATUS_TOOL] };
     }
@@ -791,11 +802,14 @@ export function createWolframServer(
   });
 
   if (capabilities.prompts) {
-    fromKernel(ListPromptsRequestSchema, async () => {
+    fromKernel(ListPromptsRequestSchema, async (_request, extra) => {
       // No cursor handling, for the reason tools/list has none: the backends
       // drain inside one hold on a kernel and answer complete lists, so there is
       // no upstream paging state for anyone to page through.
-      if (promptCache) return { prompts: promptCache };
+      if (promptCache) {
+        fromCache.add(extra);
+        return { prompts: promptCache };
+      }
       // The list alone: its source is this server's bookkeeping, not the client's.
       const { prompts } = await backend.listPrompts();
       return { prompts };
