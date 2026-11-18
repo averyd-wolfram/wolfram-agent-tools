@@ -354,9 +354,9 @@ Use the official specification when working on `proxy.ts` or `transport.ts`.
   session. There is no `console.log` in `src/` and there must not be — everything goes through
   `log.ts`, to stderr. `FilteringStdioTransport` exists because the kernel prints banners and
   messages to *its* stdout.
-- **Nothing on the `initialize` path starts a kernel.** Capabilities come from the disk cache,
-  and a cold session advertises tools only, picking prompts up once a kernel has reported them;
-  `tools/list` is served from cache when one is warm. Work added to
+- **Nothing on the `initialize` path starts a kernel.** Capabilities come from the disk cache:
+  a cold session advertises tools only, and prompts once a kernel has reported them and the
+  cache holds that; `tools/list` is served from cache when one is warm. Work added to
   `createWolframServer` must not block and must not spawn.
 - **Sharing is an optimisation, never a dependency.** Every broker failure must fall back to a
   private kernel, with the reason logged.
