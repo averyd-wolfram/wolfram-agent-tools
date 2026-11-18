@@ -8101,6 +8101,43 @@ heading("A kernel on PATH is discoverable on its own");
       lib.resolveKernelBinary(join(install, "wolfram")),
     `${lib.resolveKernelBinary(join(binDir, "wolfram"))} vs ${lib.resolveKernelBinary(join(install, "wolfram"))}`,
   );
+
+  // A pinned version was matched against the platform scan alone, so a kernel
+  // reachable only through PATH could not be pinned, and was reported as none
+  // found (#182).
+  process.env.PATH = `${dir}:/usr/bin:/bin`;
+  let pinned;
+  try {
+    pinned = lib.locateKernel({ version: "10000", log: () => {} });
+  } finally {
+    process.env.PATH = saved;
+  }
+  check(
+    "a pinned version matches a kernel found only on PATH",
+    pinned?.bin === realpathSync(join(dir, "wolfram")),
+    pinned?.bin ?? "null — matched against the scan alone",
+  );
+
+  // Building a server runs this lookup before `initialize` is answered, where
+  // nothing may spawn: it ran `which`, twice where nothing earlier found a
+  // kernel, each for up to a 5 s timeout (#183). A `which` first on PATH that
+  // only records it ran, and finds nothing, shows the search is this process's.
+  const whichStub = join(home, "which-stub");
+  mkdirSync(whichStub, { recursive: true });
+  const whichRan = join(whichStub, "ran");
+  writeFileSync(join(whichStub, "which"), `#!/bin/sh\necho ran >> '${whichRan}'\nexit 1\n`, { mode: 0o755 });
+  process.env.PATH = `${whichStub}:${dir}:/usr/bin:/bin`;
+  let searched;
+  try {
+    searched = lib.locateKernel({ minVersion: "9999", log: () => {} });
+  } finally {
+    process.env.PATH = saved;
+  }
+  check(
+    "a kernel on PATH is found without running which",
+    searched?.bin === realpathSync(join(dir, "wolfram")) && !existsSync(whichRan),
+    existsSync(whichRan) ? "which ran" : (searched?.bin ?? "null"),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -8410,6 +8447,16 @@ heading("Configuration that names a kernel fails closed");
     "and a version pin outranks it, as all three documents say",
     pinned === null,
     pinned ? `ignored the pin and used ${pinned.bin}` : "null",
+  );
+  // Matched against every installation found, the scan's and WOLFRAM_HOME's
+  // alike, as the same documents say: it was the scan's alone (#182). A version
+  // no installation on this machine can have, so only the stub answers.
+  const pinnedHome = isolated({ WOLFRAM_HOME: stub("10000.1.0") }, () =>
+    lib.locateKernel({ version: "10000.1", log: () => {} }));
+  check(
+    "a pin matches an installation WOLFRAM_HOME names, which the scan does not see",
+    pinnedHome?.version === "10000.1.0",
+    pinnedHome ? `${pinnedHome.bin} version=${pinnedHome.version}` : "null — matched against the scan alone",
   );
 }
 

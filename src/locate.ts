@@ -30,7 +30,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import os from "node:os";
 import type { Logger } from "./log.js";
 import { DEFAULT_MIN_VERSION } from "./config.js";
@@ -347,20 +347,12 @@ function fromInstallDirEnv(): { install: KernelInstall | null; asked: string } |
  * and they are not the same thing: `wolframscript` is a separate application
  * that can be present without a kernel, and absent when a kernel is on `PATH`.
  * A Linux install placing `wolfram` on `PATH`, or a container with the kernel
- * and nothing else, became undiscoverable. This costs one `which` and starts
+ * and nothing else, became undiscoverable. This searches `PATH` and starts
  * nothing.
  */
 function fromPathLookup(minVersion: string, log: Logger): KernelInstall | null {
-  const which = process.platform === "win32" ? "where" : "which";
   for (const name of ["wolfram", "WolframKernel"]) {
-    let found: string | undefined;
-    try {
-      found = execFileSync(which, [name], { encoding: "utf8", timeout: 5000, windowsHide: true })
-        .split(/\r?\n/)[0]
-        ?.trim();
-    } catch {
-      continue; // not on PATH
-    }
+    const found = onPath(name);
     if (!found) continue;
     const bin = resolveKernelBinary(found);
     if (!bin) continue;
@@ -376,6 +368,36 @@ function fromPathLookup(minVersion: string, log: Logger): KernelInstall | null {
     return { bin, version, source: `PATH (${name})` };
   }
   return null;
+}
+
+/**
+ * The first `name` on `PATH`, as `which` finds it: the directories searched in
+ * this process, in order. This runs while a server is being built, before
+ * `initialize` is answered, and the invariant there is that nothing spawns: it
+ * ran `which`, a child process, twice where nothing earlier found a kernel, as
+ * on any machine without Wolfram, each for up to its 5 s timeout (#183). A stat
+ * on a hung network mount blocks here as the platform scan's reads already
+ * would. Windows keeps `where`, which also applies PATHEXT.
+ */
+function onPath(name: string): string | undefined {
+  if (process.platform === "win32") {
+    try {
+      const found = execFileSync("where", [name], {
+        encoding: "utf8",
+        timeout: 5000,
+        windowsHide: true,
+      });
+      return found.split(/\r?\n/)[0]?.trim() || undefined;
+    } catch {
+      return undefined; // not on PATH
+    }
+  }
+  for (const dir of (process.env["PATH"] ?? "").split(delimiter)) {
+    // An empty entry is the working directory, as a shell reads it.
+    const candidate = join(dir || ".", name);
+    if (isExecutableFile(candidate)) return candidate;
+  }
+  return undefined;
 }
 
 /**
@@ -637,16 +659,40 @@ export function locateKernel({
   }
 
   // A pinned version outranks the environment below it, matching what
-  // locate.ts, README.md and docs/environment.md all describe.
+  // locate.ts, README.md and docs/environment.md all describe, and is matched
+  // against every installation steps 3-6 can name, as they also say: it was
+  // matched against the platform scan alone, so an installation reached only
+  // by WOLFRAM_HOME or PATH could not be pinned, and was reported as none
+  // found (#182). The scan comes first, so a pin it satisfies selects what it
+  // always did; the rest are seat-free, and their own logging is not wanted.
   if (version) {
-    const matched = listKernels("0").filter((c) => versionMatches(c.version, version));
+    const quiet: Logger = () => {};
+    const preferred = preferredKernel();
+    const preferredBin = preferred ? resolveKernelBinary(preferred.path) : null;
+    const named: (KernelInstall | null | undefined)[] = [
+      fromInstallDirEnv()?.install,
+      preferred && preferredBin
+        ? {
+            bin: preferredBin,
+            version: versionForBinary(preferredBin),
+            source: `wolframscript preference (${preferred.source})`,
+          }
+        : null,
+      fromPathLookup("0", quiet),
+      fromDiscoveryHint("0", quiet),
+    ];
+    const candidates = [
+      ...listKernels("0"),
+      ...named.filter((c): c is KernelInstall => !!c),
+    ].filter(
+      (candidate, index, all) => all.findIndex((other) => other.bin === candidate.bin) === index,
+    );
+    const matched = candidates.filter((c) => versionMatches(c.version, version));
     if (matched[0]) {
       log(`pinned to version ${version}: ${matched[0].bin}`);
       return matched[0];
     }
-    const seen = listKernels("0")
-      .map((c) => c.version ?? "unknown")
-      .join(", ");
+    const seen = candidates.map((c) => c.version ?? "unknown").join(", ");
     log(
       `no installation matches WOLFRAM_MCP_VERSION=${version}. ` +
         `Versions found: ${seen || "none"}`,
