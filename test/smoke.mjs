@@ -3191,8 +3191,8 @@ if (socketsHere()) {
   const over = read("x".repeat(cap + 1), "x".repeat(1000), `rest of it\n${JSON.stringify({ id: 8, ok: true })}\n`);
   check(
     "the rest of a frame over the cap is dropped with it, not reported as another, and a reply after it is read",
-    over.dropped.length === 1 &&
-      over.dropped[0] === `dropped a frame of ${cap + 1 + 1000 + 10} characters, over the ${cap} cap` &&
+    over.dropped.length === 2 &&
+      over.dropped[1] === `dropped a frame of ${cap + 1 + 1000 + 10} characters, over the ${cap} cap` &&
       over.frames.some((f) => f?.id === 8),
     `frames: ${JSON.stringify(over.frames)}; dropped: ${over.dropped.join(" | ")}`,
   );
@@ -3204,9 +3204,21 @@ if (socketsHere()) {
     read(oversized, "\n"),
   ];
   check(
-    "a valid frame over the cap is dropped and logged, whichever chunk its newline arrives in",
-    splits.every((r) => r.frames.length === 0 && r.dropped.length === 1 && /cap/.test(r.dropped[0])),
+    "a valid frame over the cap is dropped and logged with its length, whichever chunk its newline arrives in",
+    splits.every(
+      (r) =>
+        r.frames.length === 0 &&
+        r.dropped.at(-1) === `dropped a frame of ${oversized.length} characters, over the ${cap} cap`,
+    ),
     splits.map((r) => `read ${r.frames.length}, dropped: ${r.dropped.join(" | ") || "nothing"}`).join("; "),
+  );
+  // A peer that never ends its frame: logged as it passes the cap, since its
+  // end, which says how long it was, may never come.
+  const unended = read("x".repeat(cap + 1));
+  check(
+    "a frame over the cap is logged as it passes it, though it never ends",
+    unended.dropped.length === 1 && /^dropping a frame over the \d+ cap, \d+ characters in with no newline yet$/.test(unended.dropped[0]),
+    unended.dropped.join(" | ") || "nothing logged",
   );
   // BrokerBackend is public and takes its logger from its caller.
   const kept = [];
@@ -3238,13 +3250,17 @@ if (socketsHere()) {
 // ---------------------------------------------------------------------------
 // A frame the broker's socket could not carry was dropped unread, and its
 // request waited out its ceiling, or with none for ever, where a private
-// kernel answered it: sharing changed an answer (#200). The fake echoes a
-// call's arguments, so a long `code` makes a long reply.
+// kernel answered it: sharing changed an answer (#200).
 heading("A request or reply too long for a kernel's stdout or the broker's socket is answered at once, alike on both paths (#200)");
 {
   const { KERNEL_LINE_CAP } = await import(join(root, "dist", "transport.js"));
   const { FRAME_CAP } = await import(join(root, "dist", "broker-protocol.js"));
-  const ceiling = { WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "20", WOLFRAM_MCP_CACHE: "0" };
+  // FAKE_LONG_REPLY: a call whose code is "long" is answered past the cap.
+  const env = {
+    WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "20",
+    WOLFRAM_MCP_CACHE: "0",
+    FAKE_LONG_REPLY: String(KERNEL_LINE_CAP),
+  };
   // Timed, and bounded on this side too, so a run of the code before this
   // fails in seconds rather than hanging where a call has no ceiling.
   const timed = async (client, code) => {
@@ -3257,14 +3273,14 @@ heading("A request or reply too long for a kernel's stdout or the broker's socke
       );
     return { text, ms: Date.now() - began, short: text.slice(0, 160) };
   };
-  const longReply = "x".repeat(KERNEL_LINE_CAP);
-  const longRequest = "x".repeat(FRAME_CAP + 1);
+  const overlong = "x".repeat(KERNEL_LINE_CAP + 1);
   const named = (answer) => /longer than the \d+ this server reads from a kernel/.test(answer.text);
+  const refused = (answer) => /^failed: .*longer than the \d+ a kernel is sent/.test(answer.text);
 
   wipeCache();
   const startsBefore = startCount();
-  const own = await connect({ ...ceiling, WOLFRAM_MCP_SHARE: "0" });
-  const ownReply = await timed(own.client, longReply);
+  const own = await connect({ ...env, WOLFRAM_MCP_SHARE: "0" });
+  const ownReply = await timed(own.client, "long");
   check(
     "a private session's reply too long for the kernel's stdout is answered at once, naming its length",
     named(ownReply) && ownReply.ms < 10_000,
@@ -3276,28 +3292,32 @@ heading("A request or reply too long for a kernel's stdout or the broker's socke
     answeredByFake({ content: [{ text: ownNext.text }] }) && startCount() === startsBefore + 1,
     `${startCount() - startsBefore} start(s); ${ownNext.short}`,
   );
-  const ownRequest = await timed(own.client, longRequest);
+  const ownRequest = await timed(own.client, overlong);
+  check(
+    "a request longer than a kernel's line is refused at once, naming its length, and sent to no kernel",
+    refused(ownRequest) && ownRequest.ms < 10_000 && startCount() === startsBefore + 1,
+    `${ownRequest.ms} ms, ${startCount() - startsBefore} start(s): ${ownRequest.short}`,
+  );
   await own.client.close();
 
   if (socketsHere("the shared half")) {
     const shared = await connect({
-      ...ceiling,
+      ...env,
       WOLFRAM_MCP_SHARE: "1",
       WOLFRAM_MCP_RUNTIME_DIR: privateDir(join(home, "run-200-shared")),
     });
-    const sharedReply = await timed(shared.client, longReply);
+    const sharedReply = await timed(shared.client, "long");
     check(
       "a shared session's reply too long for the kernel's stdout is answered at once, as a private one is",
       sharedReply.text === ownReply.text && sharedReply.ms < 10_000,
       `${sharedReply.ms} ms: ${sharedReply.short}`,
     );
-    const sharedRequest = await timed(shared.client, longRequest);
+    const sharedStarts = startCount();
+    const sharedRequest = await timed(shared.client, overlong);
     check(
-      "a request too long for the broker's socket runs on a private kernel, answered as a private session answers it",
-      sharedRequest.text === ownRequest.text &&
-        sharedRequest.ms < 10_000 &&
-        /over the \d+ the broker's socket carries; serving it on a private kernel/.test(shared.stderr()),
-      `${sharedRequest.ms} ms: ${sharedRequest.short}; private: ${ownRequest.short}`,
+      "and a request longer than a kernel's line is refused as a private session refuses it, with no kernel started",
+      sharedRequest.text === ownRequest.text && sharedRequest.ms < 10_000 && startCount() === sharedStarts,
+      `${sharedRequest.ms} ms: ${sharedRequest.short}`,
     );
     await shared.client.close();
 
@@ -3316,7 +3336,7 @@ heading("A request or reply too long for a kernel's stdout or the broker's socke
       ),
     );
     const paged = await connect({
-      ...ceiling,
+      ...env,
       WOLFRAM_MCP_SHARE: "1",
       WOLFRAM_MCP_RUNTIME_DIR: privateDir(join(home, "run-200-paged")),
       FAKE_MODE: "paged-tools",
@@ -3335,6 +3355,45 @@ heading("A request or reply too long for a kernel's stdout or the broker's socke
     );
     await paged.client.close();
   }
+
+  // The transport alone, against a child that prints what a kernel might:
+  // a JSON array of bare values, then a notification too long to read, then
+  // the reply. Only a dropped line that begins as the reply to a request
+  // outstanding answers it; anything else leaves it to its own reply.
+  const { FilteringStdioTransport, replyId } = await import(join(root, "dist", "transport.js"));
+  const child = [
+    "process.stdin.once('data', (d) => {",
+    "  const { id } = JSON.parse(String(d).split('\\n')[0]);",
+    "  process.stdout.write('[1,2]\\n');",
+    `  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/message', params: { data: 'y'.repeat(${KERNEL_LINE_CAP}) } }) + '\\n');`,
+    "  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result: { said: 'its own' } }) + '\\n');",
+    "});",
+    "setTimeout(() => {}, 10000);",
+  ].join("\n");
+  const transport = new FilteringStdioTransport({ command: process.execPath, args: ["-e", child] });
+  const received = [];
+  const errors = [];
+  transport.onmessage = (message) => received.push(message);
+  transport.onerror = (err) => errors.push(err.message);
+  await transport.start();
+  await transport.send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: {} });
+  await until(() => received.some((m) => m?.id === 1), 10_000);
+  const answer = received.find((m) => m?.id === 1);
+  check(
+    "a line too long for the kernel's stdout that is not a reply fails no request, and stray JSON on stdout ends nothing",
+    answer?.result?.said === "its own" && errors.length === 0,
+    `answer: ${JSON.stringify(answer ?? null).slice(0, 120)}; errors: ${errors.join(" | ") || "none"}`,
+  );
+  await transport.close();
+  check(
+    "a dropped reply is matched to its request by the id it began with, and nothing else is taken for one",
+    replyId('{"jsonrpc":"2.0","id":7,"result":{"content"') === 7 &&
+      replyId('{"jsonrpc":"2.0","id":"a\\"b","error":{') === 'a"b' &&
+      replyId('{"jsonrpc":"2.0","method":"notifications/message","params"') === undefined &&
+      replyId('{"jsonrpc":"2.0","id":3,"method":"roots/list"') === undefined &&
+      replyId("yyyy") === undefined,
+    "",
+  );
   wipeCache();
 }
 

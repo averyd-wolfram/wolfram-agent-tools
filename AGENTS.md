@@ -366,8 +366,8 @@ Use the official specification when working on `proxy.ts` or `transport.ts`.
   time left would spend a second seat only to fail, and a request the broker already had, which
   fails rather than run again since it may have run: one sent to a broker that goes (resending
   one it never read is #102), or one whose reply is too long for the socket, which the broker
-  answers at once with an error. A request too long for the socket is never sent; it runs on a
-  private kernel (#200).
+  answers at once with an error. A request longer than a kernel's line is refused on both paths
+  alike, before any kernel sees it (#200).
 - **Sharing may never change an answer.** A kernel reads its environment at startup, so two
   sessions share only where their *flavour* matches (`flavour.ts`); the broker starts a kernel
   per flavour and its pool retires an idle one of another flavour rather than exceed the seat

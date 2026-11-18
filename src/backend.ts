@@ -26,7 +26,7 @@ import type {
   ServerCapabilities,
 } from "@modelcontextprotocol/sdk/types.js";
 import { BrokerBackend, type BrokerClientOptions } from "./broker-client.js";
-import { brokerAddress, FrameTooLarge } from "./broker-protocol.js";
+import { brokerAddress } from "./broker-protocol.js";
 import { deadlineDelay, DEFAULT_START_TIMEOUT_MS, type Config } from "./config.js";
 import { doctorCommand } from "./doctor.js";
 import { installationEnv, recordFacts, type KernelFacts } from "./inspect.js";
@@ -417,11 +417,6 @@ export interface DeferredOptions {
   /** For the suite, which cannot wait ten minutes for a window to pass. */
   clock?: () => number;
   backoffMs?: number;
-  /**
-   * A private kernel's backend, for a call too large for the broker's socket
-   * (`FrameTooLarge`). Without one, that call fails at once, naming its length.
-   */
-  privately?: () => Promise<KernelBackend>;
 }
 
 /**
@@ -485,15 +480,6 @@ export class DeferredBackend implements KernelBackend {
   #abort: AbortController | null = null;
   #stopped = false;
   #onReady: KernelReadyHandler | undefined;
-  /** What this backend was made with, which a private one for oversized calls is too. */
-  readonly #options: DeferredOptions;
-  /**
-   * A private kernel for the calls too large for the broker's socket: sent
-   * anyway, the broker dropped each unread and it waited out its ceiling, where
-   * a private kernel answers it (#200). Made at the first, prepared and backed
-   * off as this backend is, and idled out like any private kernel.
-   */
-  #oversize: DeferredBackend | null = null;
 
   constructor(
     factory: (deadline: Deadline) => Promise<KernelBackend>,
@@ -507,7 +493,6 @@ export class DeferredBackend implements KernelBackend {
     this.#source = options.source;
     this.#clock = options.clock ?? Date.now;
     this.#backoff = new Backoff(options.backoffMs ?? PREPARATION_BACKOFF_MS, this.#clock);
-    this.#options = options;
   }
 
   /** The backend actually in use, once one has been chosen. */
@@ -642,16 +627,6 @@ export class DeferredBackend implements KernelBackend {
     try {
       return await fn(backend);
     } catch (err) {
-      // Refused before it was sent, so nothing ran.
-      const { privately } = this.#options;
-      if (err instanceof FrameTooLarge && privately) {
-        this.#log?.(`${err.message}; serving it on a private kernel`);
-        this.#oversize ??= new DeferredBackend(privately, this.#log, {
-          ...this.#options,
-          privately: undefined,
-        });
-        return fn(this.#oversize);
-      }
       if (isKernelStartFailed(err) && this.#startFailedOn(backend, err)) {
         // Recorded, now or as it failed. The first caller to see it has the
         // kernel's words; one that only shared it, queued behind the start,
@@ -817,7 +792,7 @@ export class DeferredBackend implements KernelBackend {
     // Each caught, as `#retire` catches its own: one that fails to stop must
     // not stop the others, or cut short the bounded wait below for a
     // preparation still holding a seat.
-    const backends = [this.#preparing, this.#resolved, this.#oversize, ...this.#retiring].filter(
+    const backends = [this.#preparing, this.#resolved, ...this.#retiring].filter(
       (backend): backend is KernelBackend => backend !== null,
     );
     await Promise.all(
@@ -866,7 +841,6 @@ export function deferredBackend(
     startTimeoutMs: config.startTimeoutMs,
     bin: install.bin,
     source: () => sessionSourceRead(config.serverName, config.flavour, install.bin, config.inspect),
-    privately: async () => privateBackend(config, install, log),
   });
 }
 
@@ -899,23 +873,6 @@ export function brokerLaunch(
   };
 }
 
-/** A private kernel for an installation, as a session that does not share runs one. */
-export function privateBackend(config: Config, install: KernelInstall, log: Logger): LocalBackend {
-  return new LocalBackend({
-    bin: install.bin,
-    serverName: config.serverName,
-    idleMs: config.idleMs,
-    startTimeoutMs: config.startTimeoutMs,
-    clientInfo: { name: PKG.name, version: PKG.version },
-    log,
-    extraEnv: installationEnv(install.bin, config.inspect),
-    onFacts: (facts, chosen) => {
-      if (config.inspect) recordFacts(install.bin, facts, chosen, log);
-    },
-    sourceFromFacts: config.inspect,
-  });
-}
-
 /**
  * Pick the backend for an installation: a shared broker when sharing is on and
  * one can be reached, a private kernel otherwise.
@@ -942,7 +899,22 @@ export async function createBackend(
   //
   // Only computed for a kernel this process is about to own; a broker works
   // out its own.
-  const local = async () => privateBackend(config, install, log);
+  const local = async () => {
+    const extraEnv = installationEnv(install.bin, config.inspect);
+    return new LocalBackend({
+      bin: install.bin,
+      serverName: config.serverName,
+      idleMs: config.idleMs,
+      startTimeoutMs: config.startTimeoutMs,
+      clientInfo: { name: PKG.name, version: PKG.version },
+      log,
+      extraEnv,
+      onFacts: (facts, chosen) => {
+        if (config.inspect) recordFacts(install.bin, facts, chosen, log);
+      },
+      sourceFromFacts: config.inspect,
+    });
+  };
 
   if (!config.share) {
     log("kernel sharing disabled; using a private kernel");

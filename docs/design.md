@@ -363,13 +363,14 @@ requirement for the server to work. Two failures do not fall back, deliberately:
   could be sent again safely, which is #102.
 
 A frame either end receives that is not JSON, or is over the socket's cap, is dropped and
-logged by its size, never its content, and neither end sends one over it (#200). A request
-too long for the socket is never sent: it runs on a private kernel, as a session that does not
-share runs it, rather than be dropped unread while its caller waited out the ceiling. The cap
-is twice a kernel's longest line (`transport.ts`), so a reply the kernel's transport read fits
-once the broker has wrapped it. A reply longer than that line is dropped there, on either path,
-and its request answered at once with an error naming its length: the kernel is serial, so
-the request it answered is the one outstanding, and it is kept, since it answered.
+logged by its size, never its content, and neither end sends one over it (#200). The cap is
+twice a kernel's longest line (`transport.ts`), and the proxy refuses a request longer than
+that line on both paths alike, before any backend sees it, so a request always fits the socket.
+A private kernel would have read a longer one from stdin while the broker dropped it unread,
+and a kernel started for it alone would spend a seat outside the pool's budget. A reply the
+kernel's transport read fits too, once the broker has wrapped it. A reply longer than that line
+is dropped there, on either path, and the request it began by naming is answered at once with
+an error giving its length; the kernel, which answered, is kept.
 
 **What it does not fix.** A kernel is single-threaded, so requests beyond the budget
 queue. With a 2-seat licence that means one kernel serving every session; agent calls are

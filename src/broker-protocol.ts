@@ -478,8 +478,10 @@ export const SOCKET_MODE = 0o600;
 export const FRAME_CAP = 2 * KERNEL_LINE_CAP;
 
 /**
- * A request too long for the socket, refused before it is sent: nothing ran,
- * and the session serves it on a private kernel instead (`DeferredBackend`).
+ * A request too long for the socket, refused before it is sent, so nothing ran.
+ * The proxy refuses any request longer than a kernel's line before it reaches a
+ * backend, on both paths alike, so this guards the socket for a caller that
+ * drives a `BrokerBackend` itself.
  */
 export class FrameTooLarge extends Error {
   constructor(
@@ -510,8 +512,12 @@ export class FrameReader {
     this.#lines = new CappedLines(
       FRAME_CAP,
       (line) => this.#read(line.trim()),
-      (length) =>
-        this.#report(`dropped a frame of ${length} characters, over the ${FRAME_CAP} cap`),
+      (length, _head, ended) =>
+        this.#report(
+          ended
+            ? `dropped a frame of ${length} characters, over the ${FRAME_CAP} cap`
+            : `dropping a frame over the ${FRAME_CAP} cap, ${length} characters in with no newline yet`,
+        ),
     );
   }
 

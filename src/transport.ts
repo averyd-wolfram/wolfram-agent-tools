@@ -64,7 +64,7 @@ export class FilteringStdioTransport implements Transport {
   readonly #lines = new CappedLines(
     KERNEL_LINE_CAP,
     (line) => this.#emit(line),
-    (length, head) => this.#dropped(length, head),
+    (length, head, ended) => this.#dropped(length, head, ended),
   );
   /**
    * Requests sent and not yet answered, by id. A kernel is serial, so a reply
@@ -295,20 +295,24 @@ export class FilteringStdioTransport implements Transport {
   }
 
   /**
-   * A line over the cap, by its length alone. Where it was the reply to the one
-   * request outstanding, that request is answered now with an error naming its
-   * length: left unanswered, it waited out its ceiling, and with none waited
-   * for ever, though the kernel had answered and was free (#200). An error
-   * from the kernel's side of the protocol, so both paths report it alike and
-   * neither takes the kernel for a hung one.
+   * A line over the cap, by its length alone. Where it was the reply to a
+   * request outstanding, that request is answered with an error naming its
+   * length: left unanswered, it waited out its ceiling, and with none waited for
+   * ever, though the kernel had answered and was free (#200). An error from the
+   * kernel's side of the protocol, so both paths report it alike and neither
+   * takes the kernel for a hung one.
    */
-  #dropped(length: number, head: string): void {
+  #dropped(length: number, head: string, ended: boolean): void {
+    if (!ended) {
+      this.#record(`dropping kernel output over the ${KERNEL_LINE_CAP} a line may run to`);
+      return;
+    }
     this.#record(
       `dropped a line of ${length} characters of kernel output, ` +
         `over the ${KERNEL_LINE_CAP} a line may run to`,
     );
-    const [id, ...others] = this.#unanswered;
-    if (id === undefined || others.length > 0 || !head.trimStart().startsWith("{")) return;
+    const id = replyId(head);
+    if (id === undefined || !this.#unanswered.has(id)) return;
     this.#unanswered.delete(id);
     this.#deliver({
       jsonrpc: "2.0",
@@ -344,7 +348,15 @@ export class FilteringStdioTransport implements Transport {
   }
 
   #deliver(message: JSONRPCMessage): void {
-    if (!("method" in message) && "id" in message && message.id !== undefined) {
+    // Anything at all a kernel printed as JSON reaches here, a bare number in an
+    // array among it, and `in` throws on that.
+    if (
+      typeof message === "object" &&
+      message !== null &&
+      !("method" in message) &&
+      "id" in message &&
+      message.id !== undefined
+    ) {
       this.#unanswered.delete(message.id);
     }
     try {
@@ -352,5 +364,25 @@ export class FilteringStdioTransport implements Transport {
     } catch (err) {
       this.onerror?.(err instanceof Error ? err : new Error(String(err)));
     }
+  }
+}
+
+/**
+ * The id a dropped line answered, read from how it began, or undefined where it
+ * did not begin as a reply. AgentTools writes each one as `<|"jsonrpc" -> "2.0",
+ * "id" -> id, "result" | "error" -> ...|>`, compact, so the id comes first, and
+ * a line that begins any other way is not taken for one: a notification, a
+ * kernel's own request, or something else it printed, which no request awaits.
+ */
+export function replyId(head: string): string | number | undefined {
+  const match = /^\s*\{"jsonrpc":"2\.0","id":(-?\d+|"(?:[^"\\]|\\.)*"),"(?:result|error)":/.exec(
+    head,
+  );
+  if (!match?.[1]) return undefined;
+  try {
+    const id: unknown = JSON.parse(match[1]);
+    return typeof id === "number" || typeof id === "string" ? id : undefined;
+  } catch {
+    return undefined;
   }
 }
