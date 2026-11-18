@@ -231,7 +231,22 @@ built-ins, which is the bug it exists for.
 - `.claude-plugin/marketplace.json`: makes the repo its own marketplace, serving
   `release/plugin/` in place: `.claude/settings.json` enables `wolfram@wolfram` for sessions
   in this repo — what they run is what was last assembled, which is what ships — and disables
-  `.mcp.json`'s copy of the same server, so the tools appear once
+  `.mcp.json`'s copy of the same server, so the tools appear once. It also declares two
+  third-party review plugins, each marketplace pinned to the commit trialled on #188 and moved
+  only on purpose: claudex-loop (a plan reviewed by the other provider, Codex for a Claude
+  session, which `.codex/config.toml` enables for Codex too) and Trail of Bits'
+  `spec-to-code-compliance` (code checked against the document that specifies it). A pin by
+  commit needs Claude Code 2.1.324 or newer; older ones pass the SHA to `git clone --branch`
+  and register neither. A session started in the trusted folder registers both (the larger
+  clone may outlast a short one), and then a contributor installs each once, `claude plugin
+  install <name>@<marketplace> --scope project`, which rewrites `.claude/settings.json`'s
+  formatting: restore it with `git checkout`. A user-scope copy from before may survive the
+  pin, marketplace and installed files alike, so first `claude plugin uninstall
+  <name>@<marketplace> --scope user` and `claude plugin marketplace remove <name> --scope user`
+  (without `--scope` that removes this file's declaration too). The pin is the commit
+  declared, not a guarantee of the files run: `gitCommitSha` in
+  `~/.claude/plugins/installed_plugins.json` names what was installed, and Claude Code keeps one
+  copy per plugin version, so another project pinning another commit of it can replace them
 - `.mcp.json`: committed, so this repo runs its own working tree as an MCP server
 - `.codex/`: Codex's project layer, which it loads only once the user marks the repository
   trusted in `~/.codex/config.toml`, and otherwise ignores without a word. `config.toml` sets

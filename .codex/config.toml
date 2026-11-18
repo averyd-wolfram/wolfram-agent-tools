@@ -68,3 +68,16 @@ startup_timeout_sec = 200
 # that fires: at its default of 60 s, a cold kernel start alone would outlast it. A minute past
 # that; it is the only bound left on a call when the user configured no ceiling at all.
 tool_timeout_sec = 2073660
+
+# claudex-loop, the cross-provider plan review the Claude Code side enables too
+# (`.claude/settings.json`): pinned to the commit trialled on #188, and moved only on purpose,
+# as every action in the workflows is. Codex installs a plugin a trusted project configures as
+# its marketplaces refresh; a refresh that fails keeps whatever it fetched last, which
+# `git -C ~/.codex/.tmp/marketplaces/claudex-loop rev-parse HEAD` shows.
+[marketplaces.claudex-loop]
+source_type = "git"
+source = "https://github.com/chaseai-yt/claudex-loop.git"
+ref = "53cddc42e39346fb8c6d5d612281a3b1add14e66"
+
+[plugins."claudex-loop@claudex-loop"]
+enabled = true

@@ -1,13 +1,29 @@
 {
   "enabledPlugins": {
     "typescript-lsp@claude-plugins-official": true,
-    "wolfram@wolfram": true
+    "wolfram@wolfram": true,
+    "claudex-loop@claudex-loop": true,
+    "spec-to-code-compliance@trailofbits": true
   },
   "extraKnownMarketplaces": {
     "wolfram": {
       "source": {
         "source": "directory",
         "path": "."
+      }
+    },
+    "claudex-loop": {
+      "source": {
+        "source": "github",
+        "repo": "chaseai-yt/claudex-loop",
+        "ref": "53cddc42e39346fb8c6d5d612281a3b1add14e66"
+      }
+    },
+    "trailofbits": {
+      "source": {
+        "source": "github",
+        "repo": "trailofbits/skills",
+        "ref": "149d7b21f4067765b82e67029730b42d228ef4b4"
       }
     }
   },
