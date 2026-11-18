@@ -179,9 +179,17 @@ export class FilteringStdioTransport implements Transport {
   async send(message: JSONRPCMessage, _options?: TransportSendOptions): Promise<void> {
     const stdin = this.#child?.stdin;
     if (!stdin?.writable) throw new Error("the Wolfram kernel is not running");
-    if ("method" in message && "id" in message) this.#unanswered.add(message.id);
+    // Written first: a request that cannot be, a BigInt in it say, is never
+    // answered, and awaited would stay in `#unanswered` for the kernel's life.
+    const line = `${JSON.stringify(message)}\n`;
+    const id = "method" in message && "id" in message ? message.id : undefined;
+    if (id !== undefined) this.#unanswered.add(id);
     await new Promise<void>((resolve, reject) => {
-      stdin.write(`${JSON.stringify(message)}\n`, (err) => (err ? reject(err) : resolve()));
+      stdin.write(line, (err) => {
+        if (!err) return resolve();
+        if (id !== undefined) this.#unanswered.delete(id);
+        reject(err);
+      });
     });
   }
 

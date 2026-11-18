@@ -70,7 +70,7 @@ export class CappedLines {
     const dropping = this.#dropping;
     if (dropping) {
       dropping.length += piece.length;
-      dropping.tail = (dropping.tail + piece).slice(-ENDS);
+      dropping.tail = own((dropping.tail + piece).slice(-ENDS));
       return;
     }
     this.#recent.push(piece);
@@ -135,7 +135,7 @@ export class CappedLines {
       tail = (pieces[i] ?? "").slice(-(ENDS - tail.length)) + tail;
     }
     this.#reset();
-    return { head, tail };
+    return { head: own(head), tail: own(tail) };
   }
 }
 
@@ -144,3 +144,12 @@ const ENDS = 128;
 
 /** How many pieces of a line are held apart before they are joined into one. */
 const BLOCK = 256;
+
+/**
+ * A few characters as a string of their own. A slice can keep the whole string
+ * it was cut from alive, and kept of a dropped line it held a block of it after
+ * the rest was let go.
+ */
+function own(text: string): string {
+  return Array.from(text).join("");
+}
