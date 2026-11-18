@@ -3038,13 +3038,14 @@ if (socketsHere()) {
   const dropped = () => sessionLog.filter((m) => /dropped a frame/.test(m));
   await until(() => dropped().length >= 2, 5_000);
   check(
-    "the session logs a frame from the broker that is not JSON, with its size",
-    sessionLog.some((m) => /^broker connection: dropped a frame of 11 characters: /.test(m)),
+    "the session logs a frame from the broker that is not JSON, by its size and not its content",
+    sessionLog.includes("broker connection: dropped a frame of 11 characters that is not JSON") &&
+      !sessionLog.some((m) => /not a frame/.test(m)),
     dropped().join(" | ").slice(0, 160) || "nothing logged",
   );
   check(
-    "and a frame over the size cap, with its size",
-    sessionLog.some((m) => /^broker connection: dropped a frame of \d+ characters and no newline yet, over the \d+ cap$/.test(m)),
+    "and a frame over the size cap",
+    sessionLog.some((m) => /^broker connection: dropped a frame of over \d+ characters, the cap, with no newline yet$/.test(m)),
     dropped().join(" | ").slice(0, 160) || "nothing logged",
   );
   await call;
@@ -3071,11 +3072,37 @@ if (socketsHere()) {
   await until(() => brokerLog.some((m) => /dropped a frame/.test(m)), 5_000);
   check(
     "the broker logs a frame from a session that is not JSON, with its size",
-    brokerLog.some((m) => /^proxy connection: dropped a frame of 11 characters: /.test(m)),
+    brokerLog.includes("proxy connection: dropped a frame of 11 characters that is not JSON"),
     brokerLog.find((m) => /dropped a frame/.test(m)) ?? "nothing logged",
   );
   probe.destroy();
   await broker.stop();
+}
+{
+  // The reader alone, given its chunks exactly as a socket might split them.
+  const { FrameReader } = await import(join(root, "dist", "broker-protocol.js"));
+  const cap = 4 * 1024 * 1024;
+  const read = (...chunks) => {
+    const frames = [];
+    const dropped = [];
+    const reader = new FrameReader((frame) => frames.push(frame), (why) => dropped.push(why));
+    for (const chunk of chunks) reader.push(chunk);
+    return { frames, dropped };
+  };
+  // The chunk that crosses the cap also ends the frame and carries a reply.
+  const crossing = read("x".repeat(cap - 4), `xxxxxxxx\n${JSON.stringify({ id: 7, ok: true })}\n`);
+  check(
+    "a reply in the chunk that crosses the size cap is still read",
+    crossing.frames.some((f) => f?.id === 7),
+    `frames: ${JSON.stringify(crossing.frames)}; dropped: ${crossing.dropped.join(" | ")}`,
+  );
+  // A frame over the cap, its rest in later chunks, then a reply.
+  const over = read("x".repeat(cap + 1), "x".repeat(1000), `rest of it\n${JSON.stringify({ id: 8, ok: true })}\n`);
+  check(
+    "the rest of a frame over the cap is dropped with it, not reported as another, and a reply after it is read",
+    over.dropped.length === 1 && /over \d+ characters/.test(over.dropped[0]) && over.frames.some((f) => f?.id === 8),
+    `frames: ${JSON.stringify(over.frames)}; dropped: ${over.dropped.join(" | ")}`,
+  );
 }
 
 // ---------------------------------------------------------------------------

@@ -360,8 +360,8 @@ requirement for the server to work. Two failures do not fall back, deliberately:
 - **A request already sent to a broker that goes** fails rather than run again, since it may
   already have run. One the broker never read could be sent again safely, which is #102.
 
-A frame either end cannot read, one over the size cap included, is dropped and logged with
-its size, and a request whose reply was dropped waits out its ceiling.
+A frame either end cannot read, one over the size cap included, is dropped and logged by its
+size, never its content, and a request whose reply was dropped waits out its ceiling.
 
 **What it does not fix.** A kernel is single-threaded, so requests beyond the budget
 queue. With a 2-seat licence that means one kernel serving every session; agent calls are
