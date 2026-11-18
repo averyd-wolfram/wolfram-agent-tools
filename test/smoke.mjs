@@ -1647,6 +1647,96 @@ heading("Regression — a transient tools/list failure must not poison the cache
 }
 
 // ---------------------------------------------------------------------------
+heading("A list served from the cache asks the backend nothing, so it starts no kernel (#185)");
+{
+  // After a re-read of the lists failed, they can be another source's than the
+  // kernel the backend last had, and that kernel may since have idled out.
+  // Following a list the cache answered then re-read them through the backend,
+  // which started a kernel to serve what the cache already had. Driven in
+  // process, against a backend that records what it is asked: any request of
+  // it is a kernel start a real one would make.
+  const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+  const { sessionSource } = await import(join(root, "dist", "server-source.js"));
+  wipeCache();
+  // The source is read from these, not the machine's own paclet directories,
+  // so a paclet installed mid-run cannot move the cache key between sessions.
+  const empty = join(home, "185-paclets");
+  mkdirSync(empty, { recursive: true });
+  const config = {
+    ...lib.loadConfig(() => {}),
+    kernelPath: fakeKernel,
+    serverName: "WolframLanguage",
+    inspect: false,
+    cacheEnabled: true,
+    flavour: lib.kernelFlavour({
+      ...process.env,
+      MCP_SERVER_NAME: "WolframLanguage",
+      WOLFRAM_USERBASE: empty,
+      WOLFRAM_BASE: empty,
+    }),
+  };
+  const asked = [];
+  let ready;
+  const lists = (source) => ({
+    capabilities: async () => (asked.push("capabilities"), { tools: {}, prompts: {} }),
+    listTools: async () => (
+      asked.push("tools/list"), { tools: [{ name: "Demo", inputSchema: { type: "object" } }], source }
+    ),
+    listPrompts: async () => (asked.push("prompts/list"), { prompts: [{ name: "DemoPrompt" }], source }),
+  });
+  // `served`: the source of the kernel this backend last had.
+  const stub = (served) => ({
+    ...lists(served),
+    servedFrom: () => served,
+    onKernelReady: (handler) => {
+      ready = handler;
+    },
+    getPrompt: async () => (asked.push("prompts/get"), { messages: [] }),
+    listResources: async () => (asked.push("resources/list"), { resources: [] }),
+    readResource: async () => (asked.push("resources/read"), { contents: [] }),
+    callTool: async () => (asked.push("tools/call"), { content: [] }),
+    stop: async () => {},
+  });
+
+  // The cache, as a kernel started from what is on disk leaves it: tools and
+  // prompts, under that source.
+  const warming = lib.createWolframServer(config, () => {}, () => stub(undefined));
+  const source = sessionSource(config.serverName, config.flavour, warming.install.bin, config.inspect).digest;
+  await ready(lists(source));
+
+  // One session per list, so neither's follow changes what the other finds.
+  const servedFromCache = async (list) => {
+    const logged = [];
+    const { server } = lib.createWolframServer(config, (line) => logged.push(line), () => stub("elsewhere"));
+    const client = new Client({ name: "smoke", version: "1.0.0" }, { capabilities: {} });
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverSide);
+    await client.connect(clientSide);
+    asked.length = 0;
+    // A miss leaves prompts unregistered, and that refusal must fail a check
+    // rather than end the run.
+    const answer = await list(client).catch((err) => ({ error: String(err) }));
+    // Long enough for a re-read the answer set off to reach the backend.
+    await until(() => asked.length > 0, 500);
+    await client.close();
+    return { answer, asked: [...asked], logged };
+  };
+  const tools = await servedFromCache((client) => client.listTools());
+  check(
+    "a tools/list served from the cache, after a kernel of another source, asks the backend nothing",
+    upstreamTools(tools.answer.tools ?? []).map((t) => t.name).join() === "Demo" && tools.asked.length === 0,
+    `asked: ${tools.asked.join(", ") || "nothing"}; ${tools.logged.find((l) => /served from cache/.test(l)) ?? "not served from the cache"}`,
+  );
+  const prompts = await servedFromCache((client) => client.listPrompts());
+  check(
+    "a prompts/list served from the cache, after a kernel of another source, asks the backend nothing",
+    (prompts.answer.prompts ?? []).map((p) => p.name).join() === "DemoPrompt" && prompts.asked.length === 0,
+    prompts.answer.error ?? `asked: ${prompts.asked.join(", ") || "nothing"}`,
+  );
+  wipeCache();
+}
+
+// ---------------------------------------------------------------------------
 heading("Regression — a stale cache must be corrected on kernel start");
 {
   wipeCache();
