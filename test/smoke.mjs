@@ -8101,6 +8101,196 @@ heading("A kernel on PATH is discoverable on its own");
       lib.resolveKernelBinary(join(install, "wolfram")),
     `${lib.resolveKernelBinary(join(binDir, "wolfram"))} vs ${lib.resolveKernelBinary(join(install, "wolfram"))}`,
   );
+
+  // The rest of this section names discovery's every input itself: no
+  // installation variable, preference or hint of the developer's may answer.
+  const discovering = (env, fn) => {
+    const before = { ...process.env };
+    for (const key of ["WOLFRAM_INSTALLATION_DIRECTORY", "WOLFRAM_HOME", "WOLFRAMSCRIPT_KERNELPATH", "WOLFRAMSCRIPT_CONFIGURATIONPATH"]) {
+      delete process.env[key];
+    }
+    Object.assign(process.env, {
+      HOME: join(home, "discovering-home"),
+      XDG_CONFIG_HOME: join(home, "discovering-home", ".config"),
+      XDG_CACHE_HOME: join(home, "discovering-home", ".cache"),
+      ...env,
+    });
+    try {
+      return fn();
+    } finally {
+      for (const key of Object.keys(process.env)) delete process.env[key];
+      Object.assign(process.env, before);
+    }
+  };
+
+  // A pinned version was matched against the platform scan alone, so a kernel
+  // reachable only through PATH could not be pinned, and was reported as none
+  // found (#182).
+  const pinned = discovering({ PATH: `${dir}:/usr/bin:/bin` }, () =>
+    lib.locateKernel({ version: "10000", log: () => {} }),
+  );
+  check(
+    "a pinned version matches a kernel found only on PATH",
+    pinned?.bin === realpathSync(join(dir, "wolfram")),
+    pinned?.bin ?? "null — matched against the scan alone",
+  );
+  // `15` selects the newest 15.x, whichever step names it: matches were taken
+  // in the order they were gathered, so an older one WOLFRAM_HOME named beat a
+  // newer one on PATH.
+  const older = join(home, "install-10000.0.5");
+  mkdirSync(join(older, "Executables"), { recursive: true });
+  writeFileSync(join(older, "Executables", "wolfram"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const newerDir = join(home, "path-kernel-10000.2.0");
+  mkdirSync(newerDir, { recursive: true });
+  writeFileSync(join(newerDir, "wolfram"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const newest = discovering({ PATH: `${newerDir}:/usr/bin:/bin`, WOLFRAM_HOME: older }, () =>
+    lib.locateKernel({ version: "10000", log: () => {} }),
+  );
+  check(
+    "and of several that match, the newest, whichever step names it",
+    newest?.version === "10000.2.0",
+    `${newest?.bin ?? "null"} version=${newest?.version}`,
+  );
+
+  // Building a server runs this lookup before `initialize` is answered, where
+  // nothing may spawn: it ran `which`, twice where nothing earlier found a
+  // kernel, each for up to a 5 s timeout (#183). A `which` first on PATH that
+  // only records it ran, and finds nothing, shows the search is this process's.
+  const whichStub = join(home, "which-stub");
+  mkdirSync(whichStub, { recursive: true });
+  const whichRan = join(whichStub, "ran");
+  writeFileSync(join(whichStub, "which"), `#!/bin/sh\necho ran >> '${whichRan}'\nexit 1\n`, { mode: 0o755 });
+  const searched = discovering({ PATH: `${whichStub}:${dir}:/usr/bin:/bin` }, () =>
+    lib.locateKernel({ minVersion: "9999", log: () => {} }),
+  );
+  check(
+    "a kernel on PATH is found without running which",
+    searched?.bin === realpathSync(join(dir, "wolfram")) && !existsSync(whichRan),
+    existsSync(whichRan) ? "which ran" : (searched?.bin ?? "null"),
+  );
+  // A shell reads an empty or relative PATH entry against the working
+  // directory, and a server's may be any checkout: a `wolfram` there must not
+  // be run as the kernel.
+  const checkout = join(home, "checkout-10000.0.0");
+  mkdirSync(join(checkout, "bin"), { recursive: true });
+  writeFileSync(join(checkout, "wolfram"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  writeFileSync(join(checkout, "bin", "wolfram"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const cwd = process.cwd();
+  process.chdir(checkout);
+  let fromCheckout;
+  try {
+    fromCheckout = discovering({ PATH: `:bin:/usr/bin:/bin` }, () =>
+      lib.locateKernel({ minVersion: "9999", log: () => {} }),
+    );
+  } finally {
+    process.chdir(cwd);
+  }
+  check(
+    "an empty or relative PATH entry never finds a kernel in the working directory",
+    fromCheckout === null,
+    fromCheckout?.bin ?? "null",
+  );
+  // Appended, not joined: an entry through a directory that is gone is one a
+  // shell skips, and `join` collapsed `missing/..` before the filesystem saw it.
+  const throughMissing = discovering({ PATH: `${dir}/missing/..:/usr/bin:/bin` }, () =>
+    lib.locateKernel({ minVersion: "9999", log: () => {} }),
+  );
+  check(
+    "a PATH entry through a directory that is gone finds nothing",
+    throughMissing === null,
+    throughMissing?.bin ?? "null",
+  );
+  // A pin sees both names on PATH, not the first usable one, which a `wolfram`
+  // of another version would otherwise be.
+  const kernelOnly = join(home, "kernel-only-10000.3.0");
+  mkdirSync(kernelOnly, { recursive: true });
+  writeFileSync(join(kernelOnly, "WolframKernel"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const second = discovering({ PATH: `${dir}:${kernelOnly}:/usr/bin:/bin` }, () =>
+    lib.locateKernel({ version: "10000.3", log: () => {} }),
+  );
+  check(
+    "a pin matches a WolframKernel on PATH behind a wolfram of another version",
+    second?.bin === realpathSync(join(kernelOnly, "WolframKernel")),
+    second?.bin ?? "null — only the first name on PATH was matched",
+  );
+  // Two sources can know one binary by two versions: its path's, and the one
+  // doctor recorded. Merged before matching, the recorded one was dropped.
+  const hinted = discovering({ PATH: `${dir}:/usr/bin:/bin` }, () => {
+    const bin = realpathSync(join(dir, "wolfram"));
+    const { mtimeMs, size } = statSync(bin);
+    const hint = join(lib.cacheDir(), "installations", "discovery-hint.json");
+    mkdirSync(dirname(hint), { recursive: true });
+    // As doctor writes it: the binary's mtime rounded, as binaryIdentity reads it back.
+    writeFileSync(hint, JSON.stringify({ bin, version: "10000.0.1", mtimeMs: Math.round(mtimeMs), size }));
+    return lib.locateKernel({ version: "10000.0.1", log: () => {} });
+  });
+  check(
+    "a pin matches the version doctor recorded for a binary its path reads otherwise",
+    hinted?.version === "10000.0.1",
+    hinted ? `${hinted.bin} version=${hinted.version}` : "null",
+  );
+  // A hint file holding JSON `null` read `.bin` off nothing, and threw out of
+  // server construction.
+  let nullHint;
+  try {
+    nullHint = discovering({ PATH: `${dir}:/usr/bin:/bin` }, () => {
+      const hint = join(lib.cacheDir(), "installations", "discovery-hint.json");
+      mkdirSync(dirname(hint), { recursive: true });
+      writeFileSync(hint, "null");
+      return lib.locateKernel({ version: "10000", log: () => {} });
+    });
+  } catch (err) {
+    nullHint = err;
+  }
+  check(
+    "a discovery hint holding null is ignored, not thrown",
+    nullHint?.bin === realpathSync(join(dir, "wolfram")),
+    nullHint instanceof Error ? nullHint.message : (nullHint?.bin ?? "null"),
+  );
+  // Every entry on PATH, for a pin: a `wolfram` earlier on PATH hid a later one.
+  const later = join(home, "path-kernel-10000.4.0");
+  mkdirSync(later, { recursive: true });
+  writeFileSync(join(later, "wolfram"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const behind = discovering({ PATH: `${dir}:${later}:/usr/bin:/bin` }, () =>
+    lib.locateKernel({ version: "10000.4", log: () => {} }),
+  );
+  check(
+    "a pin matches a kernel later on PATH than another of the same name",
+    behind?.bin === realpathSync(join(later, "wolfram")),
+    behind?.bin ?? "null — only the first on PATH was seen",
+  );
+  // The version doctor recorded came from the kernel, so for its binary it
+  // outranks the path's guess: a pin for the path's version may not launch a
+  // kernel that reported another.
+  const hintAt = (bin, version) => {
+    const { mtimeMs, size } = statSync(bin);
+    const hint = join(lib.cacheDir(), "installations", "discovery-hint.json");
+    mkdirSync(dirname(hint), { recursive: true });
+    writeFileSync(hint, JSON.stringify({ bin, version, mtimeMs: Math.round(mtimeMs), size }));
+  };
+  const guessed = discovering({ PATH: `${dir}:/usr/bin:/bin` }, () => {
+    hintAt(realpathSync(join(dir, "wolfram")), "9999.9.9");
+    return lib.locateKernel({ version: "10000.0", log: () => {} });
+  });
+  check(
+    "a pin for a path's version does not match a kernel doctor recorded as another",
+    guessed === null,
+    guessed ? `${guessed.bin} version=${guessed.version}` : "null",
+  );
+  // A kernel that lost its execute bit keeps its size and mtime, so its hint
+  // still matched, and it was chosen and then failed to start.
+  const lapsed = join(home, "lapsed-10000.5.0", "wolfram");
+  mkdirSync(dirname(lapsed), { recursive: true });
+  writeFileSync(lapsed, "#!/bin/sh\nexit 0\n", { mode: 0o644 });
+  const notExecutable = discovering({ PATH: "/usr/bin:/bin" }, () => {
+    hintAt(lapsed, "10000.5.0");
+    return lib.locateKernel({ version: "10000.5", log: () => {} });
+  });
+  check(
+    "a recorded kernel that is no longer executable is not chosen",
+    notExecutable === null,
+    notExecutable?.bin ?? "null",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -8410,6 +8600,16 @@ heading("Configuration that names a kernel fails closed");
     "and a version pin outranks it, as all three documents say",
     pinned === null,
     pinned ? `ignored the pin and used ${pinned.bin}` : "null",
+  );
+  // Matched against every installation found, the scan's and WOLFRAM_HOME's
+  // alike, as the same documents say: it was the scan's alone (#182). A version
+  // no installation on this machine can have, so only the stub answers.
+  const pinnedHome = isolated({ WOLFRAM_HOME: stub("10000.1.0") }, () =>
+    lib.locateKernel({ version: "10000.1", log: () => {} }));
+  check(
+    "a pin matches an installation WOLFRAM_HOME names, which the scan does not see",
+    pinnedHome?.version === "10000.1.0",
+    pinnedHome ? `${pinnedHome.bin} version=${pinnedHome.version}` : "null — matched against the scan alone",
   );
 }
 

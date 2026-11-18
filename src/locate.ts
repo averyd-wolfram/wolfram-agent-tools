@@ -30,7 +30,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, isAbsolute, join } from "node:path";
 import os from "node:os";
 import type { Logger } from "./log.js";
 import { DEFAULT_MIN_VERSION } from "./config.js";
@@ -305,15 +305,26 @@ function scanLinux(): KernelInstall[] {
   return found;
 }
 
+/**
+ * The scan one `locateKernel` call has made, while it runs. `versionForBinary`
+ * looks a binary up in the scan, once per candidate, and each scan is a walk of
+ * the install roots, with `plutil` for a binary plist on macOS: a pinned version
+ * reaches up to four candidates, each of which scanned again.
+ */
+let scanned: KernelInstall[] | null = null;
+/** Whether a `locateKernel` call is running, and so may keep its scan. */
+let locating = false;
+
 function platformScan(): KernelInstall[] {
-  switch (process.platform) {
-    case "darwin":
-      return scanDarwin();
-    case "win32":
-      return scanWin32();
-    default:
-      return scanLinux();
-  }
+  if (scanned) return scanned;
+  const found =
+    process.platform === "darwin"
+      ? scanDarwin()
+      : process.platform === "win32"
+        ? scanWin32()
+        : scanLinux();
+  if (locating) scanned = found;
+  return found;
 }
 
 /**
@@ -341,26 +352,40 @@ function fromInstallDirEnv(): { install: KernelInstall | null; asked: string } |
 }
 
 /**
+ * The kernel `wolframscript` is configured to prefer, by `preferredKernel`, as an
+ * installation: `install` is null when what it names holds no kernel. One copy,
+ * for discovery's step 4 and for a pinned version alike.
+ */
+function fromPreference(): { install: KernelInstall | null; path: string; source: string } | null {
+  const preferred = preferredKernel();
+  if (!preferred) return null;
+  const bin = resolveKernelBinary(preferred.path);
+  return {
+    path: preferred.path,
+    source: preferred.source,
+    install: bin
+      ? {
+          bin,
+          version: versionForBinary(bin),
+          source: `wolframscript preference (${preferred.source})`,
+        }
+      : null,
+  };
+}
+
+/**
  * A kernel on `PATH`, by the names Wolfram installs.
  *
  * The rewrite that introduced `fromWolframScript` dropped these two lookups,
  * and they are not the same thing: `wolframscript` is a separate application
  * that can be present without a kernel, and absent when a kernel is on `PATH`.
  * A Linux install placing `wolfram` on `PATH`, or a container with the kernel
- * and nothing else, became undiscoverable. This costs one `which` and starts
+ * and nothing else, became undiscoverable. This searches `PATH` and starts
  * nothing.
  */
 function fromPathLookup(minVersion: string, log: Logger): KernelInstall | null {
-  const which = process.platform === "win32" ? "where" : "which";
   for (const name of ["wolfram", "WolframKernel"]) {
-    let found: string | undefined;
-    try {
-      found = execFileSync(which, [name], { encoding: "utf8", timeout: 5000, windowsHide: true })
-        .split(/\r?\n/)[0]
-        ?.trim();
-    } catch {
-      continue; // not on PATH
-    }
+    const found = firstOnPath(name);
     if (!found) continue;
     const bin = resolveKernelBinary(found);
     if (!bin) continue;
@@ -376,6 +401,50 @@ function fromPathLookup(minVersion: string, log: Logger): KernelInstall | null {
     return { bin, version, source: `PATH (${name})` };
   }
   return null;
+}
+
+/**
+ * The first `name` on `PATH`, as `which` finds it: the directories searched in
+ * this process, in order. This runs while a server is being built, before
+ * `initialize` is answered, and the invariant there is that nothing spawns: it
+ * ran `which`, a child process, twice where nothing earlier found a kernel, as
+ * on any machine without Wolfram, each for up to its 5 s timeout (#183). A stat
+ * on a hung network mount blocks here as the platform scan's reads already
+ * would. Windows keeps `where`, which also applies PATHEXT.
+ */
+function firstOnPath(name: string): string | undefined {
+  return everyOnPath(name)[0];
+}
+
+/** Every `name` on `PATH`, in order: discovery takes the first, a pin all of them. */
+function everyOnPath(name: string): string[] {
+  if (process.platform === "win32") {
+    try {
+      const found = execFileSync("where", [name], {
+        encoding: "utf8",
+        timeout: 5000,
+        windowsHide: true,
+      });
+      return found
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+    } catch {
+      return []; // not on PATH
+    }
+  }
+  const found: string[] = [];
+  for (const dir of (process.env["PATH"] ?? "").split(delimiter)) {
+    // Absolute directories only. A shell reads an empty entry, or a relative
+    // one, against the working directory, and a server's working directory may
+    // be any checkout: a `wolfram` there would be run as the kernel.
+    if (!isAbsolute(dir)) continue;
+    // Appended, not joined: `join` would collapse `missing/..` before the
+    // filesystem saw it, where a shell skips an entry whose directory is gone.
+    const candidate = dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
+    if (isExecutableFile(candidate)) found.push(candidate);
+  }
+  return found;
 }
 
 /**
@@ -521,10 +590,18 @@ function fromDiscoveryHint(minVersion: string, log: Logger): KernelInstall | nul
   } catch {
     return null;
   }
-  if (typeof hint.bin !== "string") return null;
+  // JSON `null`, or any non-object, read `.bin` off nothing and threw, out of
+  // server construction.
+  if (typeof hint !== "object" || hint === null || typeof hint.bin !== "string") return null;
   const identity = binaryIdentity(hint.bin);
   if (!identity || identity.mtimeMs !== hint.mtimeMs || identity.size !== hint.size) {
     log(`the installation doctor recorded has changed or gone (${hint.bin}); run doctor again`);
+    return null;
+  }
+  // Its mode is not in the identity: one that lost its execute bit still
+  // matches, and would be chosen and then fail to start.
+  if (!isExecutableFile(hint.bin)) {
+    log(`the installation doctor recorded is no longer executable (${hint.bin}); run doctor again`);
     return null;
   }
   const version = typeof hint.version === "string" ? hint.version : null;
@@ -612,13 +689,25 @@ export function bundleOf(bin: string): string {
   return cuts.length ? bin.slice(0, Math.min(...cuts)) : bin;
 }
 
-export function locateKernel({
+export function locateKernel(options: LocateOptions = {}): KernelInstall | null {
+  // One scan for the whole call, made when a step first needs it, and kept for
+  // the rest to reuse: none at all where a named kernel answers first.
+  locating = true;
+  try {
+    return discover(options);
+  } finally {
+    locating = false;
+    scanned = null;
+  }
+}
+
+function discover({
   override,
   version,
   minVersion = DEFAULT_MIN_VERSION,
   log = () => {},
   allowWolframScript = false,
-}: LocateOptions = {}): KernelInstall | null {
+}: LocateOptions): KernelInstall | null {
   // Naming something is a decision, not a hint. Every branch below that was
   // asked for a specific installation either supplies it or stops: falling
   // through to a scan would run a *different* kernel than the one requested,
@@ -637,16 +726,45 @@ export function locateKernel({
   }
 
   // A pinned version outranks the environment below it, matching what
-  // locate.ts, README.md and docs/environment.md all describe.
+  // locate.ts, README.md and docs/environment.md all describe, and is matched
+  // against the installation each of steps 3-6 names, as they also say: it was
+  // matched against the platform scan alone, so one reached only by
+  // WOLFRAM_HOME or PATH could not be pinned, and was reported as none found
+  // (#182). In discovery's order, so of two of one version the one the user
+  // named wins; the newest match first, as `15` selects the newest 15.x. All
+  // seat-free, and their own logging is not wanted here.
   if (version) {
-    const matched = listKernels("0").filter((c) => versionMatches(c.version, version));
+    const quiet: Logger = () => {};
+    const named = (...found: (KernelInstall | null | undefined)[]) =>
+      found.filter((c): c is KernelInstall => !!c);
+    // Both names on PATH, not the first usable one: a `wolfram` of another
+    // version would hide a `WolframKernel` that matches.
+    const onPathNamed = ["wolfram", "WolframKernel"].flatMap((name) =>
+      everyOnPath(name).map((found) => {
+        const bin = resolveKernelBinary(found);
+        return bin ? { bin, version: versionForBinary(bin), source: `PATH (${name})` } : null;
+      }),
+    );
+    // The version doctor recorded came from the kernel itself, so for its
+    // binary it outranks what a path reads as: a pin may not launch a kernel
+    // whose path says one version and which reported another.
+    const hint = fromDiscoveryHint("0", quiet);
+    const candidates = [
+      ...named(fromInstallDirEnv()?.install, fromPreference()?.install),
+      ...listKernels("0"),
+      ...named(...onPathNamed, hint),
+    ].map((c) => (hint && c.bin === hint.bin ? { ...c, version: hint.version } : c));
+    // Stable, so discovery's order breaks a tie. Matched before one binary's
+    // entries are merged, or not at all: two sources can know one binary by
+    // two versions, its path's and the one doctor recorded.
+    const matched = candidates
+      .filter((c) => versionMatches(c.version, version))
+      .sort((a, b) => compareVersions(b.version, a.version));
     if (matched[0]) {
       log(`pinned to version ${version}: ${matched[0].bin}`);
       return matched[0];
     }
-    const seen = listKernels("0")
-      .map((c) => c.version ?? "unknown")
-      .join(", ");
+    const seen = [...new Set(candidates.map((c) => c.version ?? "unknown"))].join(", ");
     log(
       `no installation matches WOLFRAM_MCP_VERSION=${version}. ` +
         `Versions found: ${seen || "none"}`,
@@ -677,22 +795,19 @@ export function locateKernel({
   // rather than a guess, so it outranks "newest version on disk" — a machine
   // with an experimental build alongside a stable one has a highest version
   // that is not the one the user designated.
-  const preferred = preferredKernel();
-  if (preferred) {
-    const bin = resolveKernelBinary(preferred.path);
-    if (bin) {
-      const version = versionForBinary(bin);
-      if (compareVersions(version, minVersion) >= 0) {
-        log(`using the kernel wolframscript prefers, via ${preferred.source}`);
-        return { bin, version, source: `wolframscript preference (${preferred.source})` };
-      }
-      log(
-        `wolframscript prefers ${version ?? "an unknown version"} via ${preferred.source}, ` +
-          `below the ${minVersion} minimum; continuing to scan`,
-      );
-    } else {
-      log(`wolframscript prefers ${preferred.path}, which holds no kernel executable`);
+  const preferred = fromPreference();
+  if (preferred?.install) {
+    const { version } = preferred.install;
+    if (compareVersions(version, minVersion) >= 0) {
+      log(`using the kernel wolframscript prefers, via ${preferred.source}`);
+      return preferred.install;
     }
+    log(
+      `wolframscript prefers ${version ?? "an unknown version"} via ${preferred.source}, ` +
+        `below the ${minVersion} minimum; continuing to scan`,
+    );
+  } else if (preferred) {
+    log(`wolframscript prefers ${preferred.path}, which holds no kernel executable`);
   }
 
   const scanned = listKernels(minVersion);
