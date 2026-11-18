@@ -133,7 +133,10 @@ A server you built yourself may read variables this package has never heard of. 
 ```
 
 Blank and unset are the same flavour, so `MCP_TOOL_OPTIONS=""` shares with a session that
-omits it. `wolfram-mcp-server doctor` prints the flavour in effect.
+omits it. Once any session declares a name, the broker starts every later kernel without it,
+unless that kernel's session sets it, and stops handing out kernels started before, which may
+have it from the broker's own environment. `wolfram-mcp-server doctor` prints the flavour in
+effect.
 
 ## Choosing the installation
 

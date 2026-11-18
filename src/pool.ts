@@ -416,7 +416,17 @@ export class KernelPool {
    * flavour's.
    */
   #mine(slot: Slot, flavour: KernelFlavour): boolean {
-    return slot.flavour.digest === flavour.digest && !this.#replaced(slot);
+    return (
+      slot.flavour.digest === flavour.digest &&
+      // And started without every name this request needs stripped. A broker
+      // widens each request's names to all any session has declared, but a
+      // kernel keeps the names it started with: one started before a name was
+      // first declared inherited the broker's value for it, so a session that
+      // declares it unset, of the same digest, was handed a kernel that had it
+      // (#180). Treated as another flavour's, as a replaced one is.
+      flavour.names.every((name) => slot.flavour.names.includes(name)) &&
+      !this.#replaced(slot)
+    );
   }
 
   /**
