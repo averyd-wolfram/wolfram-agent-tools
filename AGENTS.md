@@ -130,6 +130,8 @@ built-ins, which is the bug it exists for.
     failure means for the kernel
   - `transport.ts`: `FilteringStdioTransport` — splits kernel stdout into JSON-RPC frames and
     noise, keeps the last 15 noise lines for error messages, bounded kill escalation
+  - `lines.ts`: `CappedLines`, the one line splitter behind a kernel's stdout and the broker's
+    socket — a line over its cap is dropped whole, ended or not, and reported by its length
   - `pool.ts`: several kernels behind a licence-derived budget, with FIFO waiters.
     `deriveBudget` is the seat arithmetic and is pure, so the 2- and 4-seat cases test on a
     machine with neither
@@ -361,10 +363,11 @@ Use the official specification when working on `proxy.ts` or `transport.ts`.
 - **Sharing is an optimisation, never a dependency.** Every broker failure must fall back to a
   private kernel, with the reason logged, but for two, each deliberate: a start deadline spent
   attaching to the broker or waiting for it to prepare, since a private kernel started with no
-  time left would spend a second seat only to fail, and a request already sent to a broker that
-  goes, which fails rather than run again since it may have run (resending one the broker never
-  read is #102). A request or reply too large for the broker's socket does not fall back yet
-  either, and that is a bug (#200).
+  time left would spend a second seat only to fail, and a request the broker already had, which
+  fails rather than run again since it may have run: one sent to a broker that goes (resending
+  one it never read is #102), or one whose reply is too long for the socket, which the broker
+  answers at once with an error. A request too long for the socket is never sent; it runs on a
+  private kernel (#200).
 - **Sharing may never change an answer.** A kernel reads its environment at startup, so two
   sessions share only where their *flavour* matches (`flavour.ts`); the broker starts a kernel
   per flavour and its pool retires an idle one of another flavour rather than exceed the seat

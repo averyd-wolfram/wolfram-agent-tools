@@ -20,6 +20,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { cacheDir } from "./cache.js";
 import { settingValue } from "./flavour.js";
+import { CappedLines } from "./lines.js";
+import { KERNEL_LINE_CAP } from "./transport.js";
 import { PKG } from "./version.js";
 
 /**
@@ -462,21 +464,38 @@ function directoryFault(dir: string): string | null {
 /** The mode a socket is created with, so only its owner can connect to it. */
 export const SOCKET_MODE = 0o600;
 
-/** Split a stream into newline-delimited JSON frames. */
 /**
- * Longest unterminated frame to hold before dropping it.
+ * Longest frame either end of the socket reads, in characters.
  *
- * `transport.ts` has capped kernel output at 4 MB since it was written; this
- * reader had no cap at all, so a peer that sends bytes and never a newline grew
- * it until the process died. The socket is local and unauthenticated, which is
- * exactly the reason not to trust it with unbounded memory.
+ * Twice a kernel's longest line (`KERNEL_LINE_CAP`), so a reply the kernel's
+ * transport let through still fits once the broker has wrapped it in a frame
+ * of its own: at the kernel's cap, it was dropped here and its request waited
+ * out its ceiling, which a private kernel answered (#200). The cap bounds what
+ * a peer that never sends a newline can make a process hold; the socket is
+ * local and unauthenticated, which is exactly the reason not to trust it with
+ * unbounded memory.
  */
-const MAX_UNTERMINATED_BYTES = 4 * 1024 * 1024;
+export const FRAME_CAP = 2 * KERNEL_LINE_CAP;
 
+/**
+ * A request too long for the socket, refused before it is sent: nothing ran,
+ * and the session serves it on a private kernel instead (`DeferredBackend`).
+ */
+export class FrameTooLarge extends Error {
+  constructor(
+    readonly op: string,
+    readonly length: number,
+  ) {
+    super(
+      `the ${op} request is ${length} characters, over the ${FRAME_CAP} the broker's socket carries`,
+    );
+    this.name = "FrameTooLarge";
+  }
+}
+
+/** Split a stream into newline-delimited JSON frames. */
 export class FrameReader {
-  #buffer = "";
-  /** Inside a frame dropped for its size: the rest of it goes, up to its newline. */
-  #skipping = false;
+  readonly #lines: CappedLines;
 
   /**
    * @param onDropped told of each frame dropped, and why, by its size alone:
@@ -487,65 +506,40 @@ export class FrameReader {
   constructor(
     private readonly onFrame: (frame: unknown) => void,
     private readonly onDropped: (why: string) => void = () => {},
-  ) {}
+  ) {
+    this.#lines = new CappedLines(
+      FRAME_CAP,
+      (line) => this.#read(line.trim()),
+      (length) =>
+        this.#report(`dropped a frame of ${length} characters, over the ${FRAME_CAP} cap`),
+    );
+  }
 
   push(chunk: string): void {
-    this.#buffer += chunk;
-    if (this.#skipping) {
-      const end = this.#buffer.indexOf("\n");
-      if (end === -1) {
-        this.#buffer = "";
-        return;
-      }
-      this.#buffer = this.#buffer.slice(end + 1);
-      this.#skipping = false;
+    this.#lines.push(chunk);
+  }
+
+  #read(line: string): void {
+    if (!line) return;
+    let frame: unknown;
+    try {
+      frame = JSON.parse(line);
+    } catch {
+      // Not the parser's message, which can quote the frame.
+      this.#report(`dropped a frame of ${line.length} characters that is not JSON`);
+      return;
     }
-    let index: number;
-    while ((index = this.#buffer.indexOf("\n")) !== -1) {
-      const line = this.#buffer.slice(0, index).trim();
-      this.#buffer = this.#buffer.slice(index + 1);
-      // Ended or not, a frame over the cap is dropped: let through when its
-      // newline came in the chunk that crossed the cap, and dropped when it
-      // came in the next, it was read or not by how the socket split it.
-      if (index > MAX_UNTERMINATED_BYTES) {
-        this.#report(
-          `dropped a frame of ${index} characters, over the ${MAX_UNTERMINATED_BYTES} cap`,
-        );
-        continue;
-      }
-      if (!line) continue;
-      let frame: unknown;
-      try {
-        frame = JSON.parse(line);
-      } catch {
-        // Not the parser's message, which can quote the frame.
-        this.#report(`dropped a frame of ${line.length} characters that is not JSON`);
-        continue;
-      }
-      try {
-        this.onFrame(frame);
-      } catch {
-        // A frame its handler cannot take is not recoverable in-band either.
-      }
-    }
-    // After the frames ahead of it are taken: dropping the whole buffer took a
-    // reply that arrived in the same chunk with it. The rest of the frame is
-    // dropped as it arrives, since its tail parsed at that newline would read
-    // as another.
-    if (this.#buffer.length > MAX_UNTERMINATED_BYTES) {
-      this.#buffer = "";
-      this.#skipping = true;
-      this.#report(
-        `dropped a frame of over ${MAX_UNTERMINATED_BYTES} characters, ` +
-          `the cap, with no newline yet`,
-      );
+    try {
+      this.onFrame(frame);
+    } catch {
+      // A frame its handler cannot take is not recoverable in-band either.
     }
   }
 
   /**
-   * After the state is settled, and never thrown past: `BrokerBackend` is public
-   * and takes its logger from the caller, and one that throws here left the cap
-   * unenforced or the frames behind this one unread.
+   * Never thrown past: `BrokerBackend` is public and takes its logger from the
+   * caller, and one that throws here left the cap unenforced or the frames
+   * behind this one unread.
    */
   #report(why: string): void {
     try {

@@ -20,6 +20,7 @@ import { KernelPool, type LicenceInfo } from "./pool.js";
 import { installationEnv, readFacts, recordFacts } from "./inspect.js";
 import {
   encodeFrame,
+  FRAME_CAP,
   FrameReader,
   type BrokerEvent,
   type BrokerOp,
@@ -218,6 +219,25 @@ function resolveLicence(options: BrokerOptions): LicenceInfo {
  * `EMPTY_GRACE_MS`, and as soon as its address no longer holds its socket
  * (`ADDRESS_CHECK_MS`) and what its sessions asked is answered.
  */
+/**
+ * A response as the socket can carry it. One over `FRAME_CAP` is answered in
+ * its place, with an error naming its length: sent, the session dropped it
+ * and its caller waited out the ceiling, or with none waited for ever, for an
+ * answer the broker already had (#200).
+ */
+function fitted(response: BrokerResponse): string {
+  const frame = encodeFrame(response);
+  if (frame.length <= FRAME_CAP) return frame;
+  return encodeFrame({
+    id: response.id,
+    ok: false,
+    error:
+      `the kernel's reply was ${frame.length} characters as the broker sends it, ` +
+      `over the ${FRAME_CAP} its socket carries`,
+    ...(response.source === undefined ? {} : { source: response.source }),
+  });
+}
+
 export async function startBroker(options: BrokerOptions): Promise<RunningBroker | null> {
   const { address, log } = options;
   /**
@@ -609,12 +629,19 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
         return;
       }
       const emit = (frame: BrokerEvent) => {
-        if (socket.writable) socket.write(encodeFrame(frame));
+        const text = encodeFrame(frame);
+        // Not sent, rather than dropped unread at the other end: an event only
+        // spares the session asking, and it asks for what it needs.
+        if (text.length > FRAME_CAP) {
+          log(`not sending a ${frame.event} event of ${text.length} characters, over the cap`);
+          return;
+        }
+        if (socket.writable) socket.write(text);
       };
       outstanding++;
       void handle(request, state, inFlight, emit)
         .then((response) => {
-          if (socket.writable) socket.write(encodeFrame(response));
+          if (socket.writable) socket.write(fitted(response));
         })
         .finally(() => {
           outstanding--;

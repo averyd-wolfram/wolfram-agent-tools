@@ -3091,7 +3091,8 @@ heading("A frame either end cannot read is dropped and logged with its size (#18
 if (socketsHere()) {
   // The session's end, against a stub broker that answers a call with a line
   // that is not JSON, then a frame over the cap.
-  const unterminated = "x".repeat(4 * 1024 * 1024 + 1);
+  const { FRAME_CAP } = await import(join(root, "dist", "broker-protocol.js"));
+  const overCap = `${"x".repeat(FRAME_CAP + 1)}\n`;
   const stub = createServer((socket) => {
     socket.setEncoding("utf8");
     socket.on("error", () => socket.destroy());
@@ -3106,7 +3107,7 @@ if (socketsHere()) {
         } else if (frame.op === "ping") {
           send(`${JSON.stringify({ id: frame.id, ok: true, result: {} })}\n`);
         } else if (frame.op === "callTool") {
-          send(`not a frame\n${unterminated}`);
+          send(`not a frame\n${overCap}`);
         }
       }
     });
@@ -3135,7 +3136,7 @@ if (socketsHere()) {
   );
   check(
     "and a frame over the size cap",
-    sessionLog.some((m) => /^broker connection: dropped a frame of over \d+ characters, the cap, with no newline yet$/.test(m)),
+    sessionLog.includes(`broker connection: dropped a frame of ${FRAME_CAP + 1} characters, over the ${FRAME_CAP} cap`),
     dropped().join(" | ").slice(0, 160) || "nothing logged",
   );
   // Stopped first, which fails the call now rather than at its ceiling.
@@ -3171,8 +3172,7 @@ if (socketsHere()) {
 }
 {
   // The reader alone, given its chunks exactly as a socket might split them.
-  const { FrameReader } = await import(join(root, "dist", "broker-protocol.js"));
-  const cap = 4 * 1024 * 1024;
+  const { FrameReader, FRAME_CAP: cap } = await import(join(root, "dist", "broker-protocol.js"));
   const read = (...chunks) => {
     const frames = [];
     const dropped = [];
@@ -3191,7 +3191,9 @@ if (socketsHere()) {
   const over = read("x".repeat(cap + 1), "x".repeat(1000), `rest of it\n${JSON.stringify({ id: 8, ok: true })}\n`);
   check(
     "the rest of a frame over the cap is dropped with it, not reported as another, and a reply after it is read",
-    over.dropped.length === 1 && /over \d+ characters/.test(over.dropped[0]) && over.frames.some((f) => f?.id === 8),
+    over.dropped.length === 1 &&
+      over.dropped[0] === `dropped a frame of ${cap + 1 + 1000 + 10} characters, over the ${cap} cap` &&
+      over.frames.some((f) => f?.id === 8),
     `frames: ${JSON.stringify(over.frames)}; dropped: ${over.dropped.join(" | ")}`,
   );
   // A valid frame over the cap, its newline in the chunk that crosses the cap
@@ -3231,6 +3233,109 @@ if (socketsHere()) {
     kept.map((f) => f?.id).join() === "9,10" && thrown.length === 0,
     `read: ${kept.map((f) => f?.id).join() || "none"}; thrown: ${thrown.join(" | ") || "nothing"}`,
   );
+}
+
+// ---------------------------------------------------------------------------
+// A frame the broker's socket could not carry was dropped unread, and its
+// request waited out its ceiling, or with none for ever, where a private
+// kernel answered it: sharing changed an answer (#200). The fake echoes a
+// call's arguments, so a long `code` makes a long reply.
+heading("A request or reply too long for a kernel's stdout or the broker's socket is answered at once, alike on both paths (#200)");
+{
+  const { KERNEL_LINE_CAP } = await import(join(root, "dist", "transport.js"));
+  const { FRAME_CAP } = await import(join(root, "dist", "broker-protocol.js"));
+  const ceiling = { WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "20", WOLFRAM_MCP_CACHE: "0" };
+  // Timed, and bounded on this side too, so a run of the code before this
+  // fails in seconds rather than hanging where a call has no ceiling.
+  const timed = async (client, code) => {
+    const began = Date.now();
+    const text = await client
+      .callTool({ name: "WolframLanguageEvaluator", arguments: { code } }, undefined, { timeout: 30_000 })
+      .then(
+        (r) => `${r.isError ? "isError: " : ""}${r.content?.[0]?.text ?? ""}`,
+        (err) => `failed: ${err.message}`,
+      );
+    return { text, ms: Date.now() - began, short: text.slice(0, 160) };
+  };
+  const longReply = "x".repeat(KERNEL_LINE_CAP);
+  const longRequest = "x".repeat(FRAME_CAP + 1);
+  const named = (answer) => /longer than the \d+ this server reads from a kernel/.test(answer.text);
+
+  wipeCache();
+  const startsBefore = startCount();
+  const own = await connect({ ...ceiling, WOLFRAM_MCP_SHARE: "0" });
+  const ownReply = await timed(own.client, longReply);
+  check(
+    "a private session's reply too long for the kernel's stdout is answered at once, naming its length",
+    named(ownReply) && ownReply.ms < 10_000,
+    `${ownReply.ms} ms: ${ownReply.short}`,
+  );
+  const ownNext = await timed(own.client, "1+1");
+  check(
+    "and the kernel, which answered, is kept: the next call is answered by it",
+    answeredByFake({ content: [{ text: ownNext.text }] }) && startCount() === startsBefore + 1,
+    `${startCount() - startsBefore} start(s); ${ownNext.short}`,
+  );
+  const ownRequest = await timed(own.client, longRequest);
+  await own.client.close();
+
+  if (socketsHere("the shared half")) {
+    const shared = await connect({
+      ...ceiling,
+      WOLFRAM_MCP_SHARE: "1",
+      WOLFRAM_MCP_RUNTIME_DIR: privateDir(join(home, "run-200-shared")),
+    });
+    const sharedReply = await timed(shared.client, longReply);
+    check(
+      "a shared session's reply too long for the kernel's stdout is answered at once, as a private one is",
+      sharedReply.text === ownReply.text && sharedReply.ms < 10_000,
+      `${sharedReply.ms} ms: ${sharedReply.short}`,
+    );
+    const sharedRequest = await timed(shared.client, longRequest);
+    check(
+      "a request too long for the broker's socket runs on a private kernel, answered as a private session answers it",
+      sharedRequest.text === ownRequest.text &&
+        sharedRequest.ms < 10_000 &&
+        /over the \d+ the broker's socket carries; serving it on a private kernel/.test(shared.stderr()),
+      `${sharedRequest.ms} ms: ${sharedRequest.short}; private: ${ownRequest.short}`,
+    );
+    await shared.client.close();
+
+    // A list the broker joins from pages, each within a kernel's line, that is
+    // too long for the socket together: the one reply the broker itself makes
+    // too long to send.
+    const toolsFile = join(home, "200-long-tools.json");
+    writeFileSync(
+      toolsFile,
+      JSON.stringify(
+        ["LongOne", "LongTwo", "LongThree"].map((name) => ({
+          name,
+          description: "d".repeat(Math.floor(FRAME_CAP / 3)),
+          inputSchema: { type: "object", properties: {} },
+        })),
+      ),
+    );
+    const paged = await connect({
+      ...ceiling,
+      WOLFRAM_MCP_SHARE: "1",
+      WOLFRAM_MCP_RUNTIME_DIR: privateDir(join(home, "run-200-paged")),
+      FAKE_MODE: "paged-tools",
+      FAKE_TOOLS_FILE: toolsFile,
+    });
+    const began = Date.now();
+    const listed = await paged.client.listTools(undefined, { timeout: 30_000 }).then(
+      (r) => `listed ${r.tools.length}`,
+      (err) => `failed: ${err.message}`,
+    );
+    const listedMs = Date.now() - began;
+    check(
+      "a reply too long for the broker's socket is answered at once with an error naming its length",
+      /over the \d+ its socket carries/.test(listed) && listedMs < 10_000,
+      `${listedMs} ms: ${listed.slice(0, 160)}`,
+    );
+    await paged.client.close();
+  }
+  wipeCache();
 }
 
 // ---------------------------------------------------------------------------

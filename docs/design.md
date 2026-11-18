@@ -357,13 +357,19 @@ requirement for the server to work. Two failures do not fall back, deliberately:
 - **A start deadline spent attaching to the broker or waiting for it to prepare** is backed
   off like any stage that ran out of time, naming the stage. A private kernel started with no
   time left would spend a second seat only to fail.
-- **A request already sent to a broker that goes** fails rather than run again, since it may
-  already have run. One the broker never read could be sent again safely, which is #102.
+- **A request the broker already had** fails rather than run again, since it may already
+  have run: one sent to a broker that goes, or one whose reply is too long for the socket,
+  which the broker answers at once with an error naming its length. One the broker never read
+  could be sent again safely, which is #102.
 
-A frame either end receives that is not JSON, or is over the size cap, is dropped and logged
-by its size, never its content. A request whose frame or reply was dropped is not answered
-until its ceiling, and never with none: that a frame the private path would carry fails on
-the shared one is #200.
+A frame either end receives that is not JSON, or is over the socket's cap, is dropped and
+logged by its size, never its content, and neither end sends one over it (#200). A request
+too long for the socket is never sent: it runs on a private kernel, as a session that does not
+share runs it, rather than be dropped unread while its caller waited out the ceiling. The cap
+is twice a kernel's longest line (`transport.ts`), so a reply the kernel's transport read fits
+once the broker has wrapped it. A reply longer than that line is dropped there, on either path,
+and its request answered at once with an error naming its length: the kernel is serial, so
+the request it answered is the one outstanding, and it is kept, since it answered.
 
 **What it does not fix.** A kernel is single-threaded, so requests beyond the budget
 queue. With a 2-seat licence that means one kernel serving every session; agent calls are

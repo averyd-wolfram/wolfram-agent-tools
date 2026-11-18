@@ -66,7 +66,8 @@ code, so whoever changes a constant changes its row.
 |---|---|---|---|
 | `BROKER_PROTOCOL` | `9` | `broker-protocol.ts` | Part of the socket path, so proxies and brokers that cannot understand each other never meet. |
 | `SUN_PATH_BYTES` | `process.platform === "linux" ? 108 : 104` | `broker-protocol.ts` | `sockaddr_un.sun_path`, its NUL included. An address this long or longer is refused, and the session uses a private kernel: Node truncates one, possibly into a directory above the one checked, or cannot listen at it. The socket's descriptive name is used where it fits, the terse `wm-<digest>.sock` where only that does. |
-| `MAX_UNTERMINATED_BYTES` | `4 * 1024 * 1024` | `transport.ts`, `broker-protocol.ts` | Output held from a kernel, or a frame from a socket peer, before it is dropped unread. Two separate boundaries, deliberately: one trusts a kernel, the other an unauthenticated socket. |
+| `KERNEL_LINE_CAP` | `4 * 1024 * 1024` | `transport.ts` | The longest line read from a kernel's stdout, in characters, ended or not. A reply longer is dropped, and the request it answered gets an error naming its length at once, on either path (#200). |
+| `FRAME_CAP` | `2 * KERNEL_LINE_CAP` | `broker-protocol.ts` | The longest frame either end of the broker's socket reads or sends. Twice the kernel's line, so a reply read from a kernel fits once the broker has wrapped it. A request longer runs on a private kernel instead, and a reply longer is answered with an error (#200). |
 | `RECENT_LINE_LIMIT` | `15` | `transport.ts` | Lines of non-protocol kernel output kept, to quote back in an error. |
 | `KILL_ESCALATION_MS` | `5_000` | `transport.ts` | Grace between `SIGTERM` and `SIGKILL` for a kernel that will not exit. |
 | `REAP_TIMEOUT_MS` | `8_000` | `transport.ts` | Longest wait for a kernel to exit before giving up on it. |

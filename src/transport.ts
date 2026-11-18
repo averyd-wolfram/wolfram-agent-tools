@@ -12,10 +12,15 @@ import type {
   Transport,
   TransportSendOptions,
 } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import { ErrorCode, type JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import { CappedLines } from "./lines.js";
 
-/** Cap on a single unterminated stdout run, e.g. an interactive prompt. */
-const MAX_UNTERMINATED_BYTES = 4 * 1024 * 1024;
+/**
+ * Longest stdout line read from a kernel, in characters: what an interactive
+ * prompt that never ends its line can make this process hold. The broker's
+ * socket carries twice this (`FRAME_CAP`), so a reply read here fits there.
+ */
+export const KERNEL_LINE_CAP = 4 * 1024 * 1024;
 
 /** How many recent non-protocol lines to keep for error messages. */
 const RECENT_LINE_LIMIT = 15;
@@ -56,7 +61,16 @@ export class FilteringStdioTransport implements Transport {
    * appeared.
    */
   #spawnGate: Promise<void> | null = null;
-  #buffer = "";
+  readonly #lines = new CappedLines(
+    KERNEL_LINE_CAP,
+    (line) => this.#emit(line),
+    (length, head) => this.#dropped(length, head),
+  );
+  /**
+   * Requests sent and not yet answered, by id. A kernel is serial, so a reply
+   * dropped for its length while one is outstanding was that one's.
+   */
+  readonly #unanswered = new Set<string | number>();
   #closing = false;
   #spawned = false;
   #fatalReported = false;
@@ -159,6 +173,7 @@ export class FilteringStdioTransport implements Transport {
   async send(message: JSONRPCMessage, _options?: TransportSendOptions): Promise<void> {
     const stdin = this.#child?.stdin;
     if (!stdin?.writable) throw new Error("the Wolfram kernel is not running");
+    if ("method" in message && "id" in message) this.#unanswered.add(message.id);
     await new Promise<void>((resolve, reject) => {
       stdin.write(`${JSON.stringify(message)}\n`, (err) => (err ? reject(err) : resolve()));
     });
@@ -271,23 +286,40 @@ export class FilteringStdioTransport implements Transport {
    * nothing at all.
    */
   #flush(): void {
-    const tail = this.#buffer;
-    this.#buffer = "";
+    const tail = this.#lines.take();
     if (tail.trim()) this.#emit(tail);
   }
 
   #ingest(chunk: string): void {
-    this.#buffer += chunk;
-    let index: number;
-    while ((index = this.#buffer.indexOf("\n")) !== -1) {
-      const line = this.#buffer.slice(0, index);
-      this.#buffer = this.#buffer.slice(index + 1);
-      this.#emit(line);
-    }
-    if (this.#buffer.length > MAX_UNTERMINATED_BYTES) {
-      this.#record(`dropped ${this.#buffer.length} bytes of unterminated kernel output`);
-      this.#buffer = "";
-    }
+    this.#lines.push(chunk);
+  }
+
+  /**
+   * A line over the cap, by its length alone. Where it was the reply to the one
+   * request outstanding, that request is answered now with an error naming its
+   * length: left unanswered, it waited out its ceiling, and with none waited
+   * for ever, though the kernel had answered and was free (#200). An error
+   * from the kernel's side of the protocol, so both paths report it alike and
+   * neither takes the kernel for a hung one.
+   */
+  #dropped(length: number, head: string): void {
+    this.#record(
+      `dropped a line of ${length} characters of kernel output, ` +
+        `over the ${KERNEL_LINE_CAP} a line may run to`,
+    );
+    const [id, ...others] = this.#unanswered;
+    if (id === undefined || others.length > 0 || !head.trimStart().startsWith("{")) return;
+    this.#unanswered.delete(id);
+    this.#deliver({
+      jsonrpc: "2.0",
+      id,
+      error: {
+        code: ErrorCode.InternalError,
+        message:
+          `the kernel's reply was ${length} characters, longer than the ` +
+          `${KERNEL_LINE_CAP} this server reads from a kernel, and was dropped`,
+      },
+    });
   }
 
   #emit(raw: string): void {
@@ -308,12 +340,17 @@ export class FilteringStdioTransport implements Transport {
     }
 
     const messages = Array.isArray(parsed) ? parsed : [parsed];
-    for (const message of messages) {
-      try {
-        this.onmessage?.(message as JSONRPCMessage);
-      } catch (err) {
-        this.onerror?.(err instanceof Error ? err : new Error(String(err)));
-      }
+    for (const message of messages) this.#deliver(message as JSONRPCMessage);
+  }
+
+  #deliver(message: JSONRPCMessage): void {
+    if (!("method" in message) && "id" in message && message.id !== undefined) {
+      this.#unanswered.delete(message.id);
+    }
+    try {
+      this.onmessage?.(message);
+    } catch (err) {
+      this.onerror?.(err instanceof Error ? err : new Error(String(err)));
     }
   }
 }
