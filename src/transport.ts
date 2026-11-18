@@ -372,8 +372,8 @@ export class FilteringStdioTransport implements Transport {
 /**
  * The id a dropped line answered, read from how it began and how it ended, or
  * undefined where it was not a JSON-RPC reply. Its top-level members other than
- * `result` or `error` are `jsonrpc` and `id`, and come before it or after it, in
- * either order; AgentTools writes `<|"jsonrpc" -> "2.0", "id" -> id, "result" |
+ * `result` or `error`, an object either way, are `jsonrpc` and `id`, and come
+ * before it or after it, in either order; AgentTools writes `<|"jsonrpc" -> "2.0", "id" -> id, "result" |
  * "error" -> ...|>`. A line that is not one is never taken for one: a
  * notification, a kernel's own request, or anything else it printed, which no
  * request awaits.
@@ -388,9 +388,9 @@ export function replyId({
   const value = String.raw`(?:-?\d+|"(?:[^"\\]|\\.)*")`;
   const member = String.raw`\s*"(?:jsonrpc|id)"\s*:\s*${value}\s*`;
   // Before: `{` members `,` then the result. After: the result, then `,` members `}` at the end.
-  const before = new RegExp(String.raw`^\s*\{((?:${member},){0,2})\s*"(?:result|error)"\s*:`).exec(
-    head,
-  );
+  const before = new RegExp(
+    String.raw`^\s*\{((?:${member},){0,2})\s*"(?:result|error)"\s*:\s*\{`,
+  ).exec(head);
   // Ended as an object does, too: a line cut short, or one that only began as
   // a reply, is not taken for the one its request awaits.
   if (!before || !/\}\s*$/.test(tail)) return undefined;

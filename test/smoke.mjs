@@ -3331,13 +3331,15 @@ heading("A request or reply too long for a kernel's stdout or the broker's socke
   await own.client.close();
 
   // Each page within a kernel's line, and too long joined.
+  const { LIST_CAP } = await import(join(root, "dist", "kernel.js"));
+  const pages = Math.ceil(LIST_CAP / (KERNEL_LINE_CAP * 0.9)) + 1;
   const toolsFile = join(home, "200-long-tools.json");
   writeFileSync(
     toolsFile,
     JSON.stringify(
-      ["LongOne", "LongTwo", "LongThree"].map((name) => ({
-        name,
-        description: "d".repeat(Math.floor(KERNEL_LINE_CAP / 2.5)),
+      Array.from({ length: pages }, (_, i) => ({
+        name: `Long${i}`,
+        description: "d".repeat(Math.floor(KERNEL_LINE_CAP * 0.9)),
         inputSchema: { type: "object", properties: {} },
       })),
     ),
@@ -3477,6 +3479,7 @@ heading("A request or reply too long for a kernel's stdout or the broker's socke
       ends('{"result":{"content"', 'yyy"}]},"jsonrpc":"2.0","id":11}') === 11 &&
       ends('{"jsonrpc":"2.0","result":{"x"', 'yyy","id":12}}') === undefined &&
       ends('{"jsonrpc":"2.0","id":7,"result":{"content"', "yyyy") === undefined &&
+      ends('{"jsonrpc":"2.0","id":7,"result":"yyyy') === undefined &&
       ends('{"id":7,"result":{"content"') === undefined &&
       ends('{"jsonrpc":"2.0","method":"notifications/message","params"') === undefined &&
       ends('{"jsonrpc":"2.0","id":3,"method":"roots/list"') === undefined &&
@@ -3484,7 +3487,7 @@ heading("A request or reply too long for a kernel's stdout or the broker's socke
     "",
   );
   // A list joined from pages is measured as it is written joined, so one that
-  // is exactly a kernel's line is kept, and one character more refused.
+  // is exactly the cap long is kept, and one character more refused.
   const { drainPages } = await import(join(root, "dist", "kernel.js"));
   const joined = (second) =>
     drainPages(async (cursor) =>
@@ -3493,11 +3496,11 @@ heading("A request or reply too long for a kernel's stdout or the broker's socke
       (all) => JSON.stringify(all).length,
       (err) => err.message,
     );
-  const exactly = await joined(KERNEL_LINE_CAP - 1007);
-  const over = await joined(KERNEL_LINE_CAP - 1006);
+  const exactly = await joined(LIST_CAP - 1007);
+  const over = await joined(LIST_CAP - 1006);
   check(
-    "a list joined from pages exactly a kernel's line long is kept, and one character longer refused",
-    exactly === KERNEL_LINE_CAP && /joined from its pages/.test(String(over)),
+    "a list joined from pages exactly as long as the cap is kept, and one character longer refused",
+    exactly === LIST_CAP && /joined from its pages/.test(String(over)),
     `${exactly}; ${String(over).slice(0, 100)}`,
   );
 

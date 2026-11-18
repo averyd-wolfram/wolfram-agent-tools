@@ -33,6 +33,7 @@ import {
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { deadlineDelay, MAX_TIMER_MS, timerDelay } from "./config.js";
+import { FRAME_CAP } from "./broker-protocol.js";
 import { FilteringStdioTransport, KERNEL_LINE_CAP } from "./transport.js";
 import { applyFlavour, type KernelFlavour } from "./flavour.js";
 import { FACTS_EXPRESSION, isFactsLine, parseFacts, type KernelFacts } from "./inspect.js";
@@ -332,6 +333,9 @@ type Judged =
       error: { issues: readonly { path: readonly PropertyKey[]; message: string }[] };
     };
 
+/** The longest list `drainPages` joins, written as a broker writes it. */
+export const LIST_CAP = FRAME_CAP - KERNEL_LINE_CAP;
+
 /**
  * Every page of something, gathered under whatever hold the caller already has.
  *
@@ -350,18 +354,19 @@ export async function drainPages<T>(
   for (let guard = 0; guard < 50; guard++) {
     stopIfLate(stop);
     const result = await page(cursor);
-    // No longer, joined, than one page may be, as it will be written again: a
-    // broker sends the whole list in one frame, which a longer one outgrew,
-    // and refused where a private kernel listed it (#200). Here, so both paths
-    // refuse it alike.
+    // No longer, joined and written again, than a broker's frame carries with
+    // room for its other fields: a broker sends the whole list in one frame,
+    // which a longer one outgrew, refused where a private kernel listed it
+    // (#200). Here, so both paths refuse it alike. Room for a kernel's line,
+    // since one page of one can be no longer, and a list on one page fits.
     for (const item of result.items) {
       length += JSON.stringify(item).length + (all.length > 0 ? 1 : 0);
       all.push(item);
     }
-    if (length > KERNEL_LINE_CAP) {
+    if (length > LIST_CAP) {
       throw new Error(
         `the list is over ${length} characters joined from its pages, ` +
-          `longer than the ${KERNEL_LINE_CAP} one list may run to`,
+          `longer than the ${LIST_CAP} one list may run to`,
       );
     }
     cursor = result.nextCursor;

@@ -372,8 +372,9 @@ both paths, so the socket never decides an answer:
 - **A reply** longer than that line is dropped by the kernel's transport, and the request it
   began by naming is answered at once with an error giving its length; the kernel, which
   answered, is kept.
-- **A list** joined from pages longer than that line is refused where the pages are joined
-  (`drainPages`), since a broker sends the whole list in one frame.
+- **A list** joined from pages is refused where the pages are joined (`drainPages`) once it
+  is longer than a broker's frame carries with room for a kernel's line, since a broker sends
+  the whole list in one frame. A list on one page always fits.
 
 The socket's cap is six of those lines, since a reply the broker parses and writes again can
 grow: a JSON number written `1e20` is twenty-one characters as JavaScript writes it. Past it,

@@ -13,6 +13,12 @@ export class CappedLines {
    * every other connection shares.
    */
   #pieces: string[] = [];
+  /**
+   * The newest pieces, joined into one of `#pieces` each time there are
+   * `BLOCK`: a line that came in many small chunks held a string apiece, and
+   * several times its own size for them.
+   */
+  #recent: string[] = [];
   #held = 0;
   /**
    * A line being dropped for its length: how long it has run, how it began and
@@ -54,9 +60,8 @@ export class CappedLines {
       this.#end("");
       return "";
     }
-    const tail = this.#pieces.join("");
-    this.#pieces = [];
-    this.#held = 0;
+    const tail = this.#line("");
+    this.#reset();
     return tail;
   }
 
@@ -68,7 +73,8 @@ export class CappedLines {
       dropping.tail = (dropping.tail + piece).slice(-ENDS);
       return;
     }
-    this.#pieces.push(piece);
+    this.#recent.push(piece);
+    if (this.#recent.length >= BLOCK) this.#pieces.push(this.#recent.splice(0).join(""));
     this.#held += piece.length;
     // After the lines ahead of it are taken: dropping the whole buffer took one
     // that arrived in the same chunk with it. The rest is dropped as it arrives,
@@ -93,14 +99,24 @@ export class CappedLines {
     // newline came in the chunk that crossed the cap, and dropped when it came
     // in the next, it was read or not by how the stream was split.
     if (length > this.cap) {
-      this.#pieces.push(piece);
+      this.#recent.push(piece);
       this.onDropped(length, this.#ends(), true);
       return;
     }
-    const line = this.#pieces.length > 0 ? this.#pieces.join("") + piece : piece;
-    this.#pieces = [];
-    this.#held = 0;
+    const line = this.#line(piece);
+    this.#reset();
     this.onLine(line);
+  }
+
+  /** The line held, with `last` after it. */
+  #line(last: string): string {
+    return this.#held === 0 ? last : [...this.#pieces, ...this.#recent, last].join("");
+  }
+
+  #reset(): void {
+    this.#pieces = [];
+    this.#recent = [];
+    this.#held = 0;
   }
 
   /**
@@ -108,20 +124,23 @@ export class CappedLines {
    * taken from the pieces, so neither keeps the whole of a long line alive.
    */
   #ends(): { head: string; tail: string } {
+    const pieces = [...this.#pieces, ...this.#recent];
     let head = "";
-    for (const piece of this.#pieces) {
+    for (const piece of pieces) {
       head += piece.slice(0, ENDS - head.length);
       if (head.length >= ENDS) break;
     }
     let tail = "";
-    for (let i = this.#pieces.length - 1; i >= 0 && tail.length < ENDS; i--) {
-      tail = (this.#pieces[i] ?? "").slice(-(ENDS - tail.length)) + tail;
+    for (let i = pieces.length - 1; i >= 0 && tail.length < ENDS; i--) {
+      tail = (pieces[i] ?? "").slice(-(ENDS - tail.length)) + tail;
     }
-    this.#pieces = [];
-    this.#held = 0;
+    this.#reset();
     return { head, tail };
   }
 }
 
 /** How much of each end of a dropped line its report sees: enough for a reply's id. */
 const ENDS = 128;
+
+/** How many pieces of a line are held apart before they are joined into one. */
+const BLOCK = 256;
