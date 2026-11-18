@@ -8208,7 +8208,7 @@ var init_version = __esm({
   "dist/version.js"() {
     "use strict";
     here = dirname(fileURLToPath(import.meta.url));
-    PKG = true ? JSON.parse('{"name":"wolfram-mcp-server","version":"0.2.2","description":"MCP server that drives a locally installed Wolfram kernel, with lazy start and idle shutdown."}') : JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8"));
+    PKG = true ? JSON.parse('{"name":"wolfram-mcp-server","version":"0.2.3","description":"MCP server that drives a locally installed Wolfram kernel, with lazy start and idle shutdown."}') : JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8"));
   }
 });
 
@@ -20169,7 +20169,7 @@ __export(locate_exports, {
 });
 import { accessSync, constants, existsSync as existsSync2, mkdirSync as mkdirSync4, readFileSync as readFileSync6, readdirSync as readdirSync4, realpathSync, renameSync as renameSync3, statSync as statSync5, writeFileSync as writeFileSync3 } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { dirname as dirname5, join as join7 } from "node:path";
+import { delimiter, dirname as dirname5, isAbsolute, join as join7 } from "node:path";
 import os4 from "node:os";
 function compareVersions(a, b) {
   const left = String(a ?? "0").split(".");
@@ -20328,14 +20328,12 @@ function scanLinux() {
   return found;
 }
 function platformScan() {
-  switch (process.platform) {
-    case "darwin":
-      return scanDarwin();
-    case "win32":
-      return scanWin32();
-    default:
-      return scanLinux();
-  }
+  if (scanned)
+    return scanned;
+  const found = process.platform === "darwin" ? scanDarwin() : process.platform === "win32" ? scanWin32() : scanLinux();
+  if (locating)
+    scanned = found;
+  return found;
 }
 function fromInstallDirEnv() {
   for (const [name, dir] of [
@@ -20352,15 +20350,24 @@ function fromInstallDirEnv() {
   }
   return null;
 }
+function fromPreference() {
+  const preferred = preferredKernel();
+  if (!preferred)
+    return null;
+  const bin = resolveKernelBinary(preferred.path);
+  return {
+    path: preferred.path,
+    source: preferred.source,
+    install: bin ? {
+      bin,
+      version: versionForBinary(bin),
+      source: `wolframscript preference (${preferred.source})`
+    } : null
+  };
+}
 function fromPathLookup(minVersion, log) {
-  const which = process.platform === "win32" ? "where" : "which";
   for (const name of ["wolfram", "WolframKernel"]) {
-    let found;
-    try {
-      found = execFileSync(which, [name], { encoding: "utf8", timeout: 5e3, windowsHide: true }).split(/\r?\n/)[0]?.trim();
-    } catch {
-      continue;
-    }
+    const found = firstOnPath(name);
     if (!found)
       continue;
     const bin = resolveKernelBinary(found);
@@ -20375,6 +20382,32 @@ function fromPathLookup(minVersion, log) {
     return { bin, version: version2, source: `PATH (${name})` };
   }
   return null;
+}
+function firstOnPath(name) {
+  return everyOnPath(name)[0];
+}
+function everyOnPath(name) {
+  if (process.platform === "win32") {
+    try {
+      const found2 = execFileSync("where", [name], {
+        encoding: "utf8",
+        timeout: 5e3,
+        windowsHide: true
+      });
+      return found2.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
+  const found = [];
+  for (const dir of (process.env["PATH"] ?? "").split(delimiter)) {
+    if (!isAbsolute(dir))
+      continue;
+    const candidate = dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
+    if (isExecutableFile(candidate))
+      found.push(candidate);
+  }
+  return found;
 }
 function fromWolframScript(minVersion, log) {
   const which = process.platform === "win32" ? "where" : "which";
@@ -20454,11 +20487,15 @@ function fromDiscoveryHint(minVersion, log) {
   } catch {
     return null;
   }
-  if (typeof hint.bin !== "string")
+  if (typeof hint !== "object" || hint === null || typeof hint.bin !== "string")
     return null;
   const identity = binaryIdentity2(hint.bin);
   if (!identity || identity.mtimeMs !== hint.mtimeMs || identity.size !== hint.size) {
     log(`the installation doctor recorded has changed or gone (${hint.bin}); run doctor again`);
+    return null;
+  }
+  if (!isExecutableFile(hint.bin)) {
+    log(`the installation doctor recorded is no longer executable (${hint.bin}); run doctor again`);
     return null;
   }
   const version2 = typeof hint.version === "string" ? hint.version : null;
@@ -20509,8 +20546,17 @@ function bundleOf(bin) {
   const cuts = ["/Contents/MacOS/", "/Contents/Resources/"].map((segment) => bin.indexOf(segment)).filter((at) => at >= 0);
   return cuts.length ? bin.slice(0, Math.min(...cuts)) : bin;
 }
-function locateKernel({ override, version: version2, minVersion = DEFAULT_MIN_VERSION, log = () => {
-}, allowWolframScript = true } = {}) {
+function locateKernel(options = {}) {
+  locating = true;
+  try {
+    return discover(options);
+  } finally {
+    locating = false;
+    scanned = null;
+  }
+}
+function discover({ override, version: version2, minVersion = DEFAULT_MIN_VERSION, log = () => {
+}, allowWolframScript = false }) {
   if (override) {
     const bin = resolveKernelBinary(override);
     if (!bin) {
@@ -20522,12 +20568,25 @@ function locateKernel({ override, version: version2, minVersion = DEFAULT_MIN_VE
     return { bin, version: versionForBinary(bin), source: "configured" };
   }
   if (version2) {
-    const matched = listKernels("0").filter((c) => versionMatches(c.version, version2));
+    const quiet = () => {
+    };
+    const named = (...found) => found.filter((c) => !!c);
+    const onPathNamed = ["wolfram", "WolframKernel"].flatMap((name) => everyOnPath(name).map((found) => {
+      const bin = resolveKernelBinary(found);
+      return bin ? { bin, version: versionForBinary(bin), source: `PATH (${name})` } : null;
+    }));
+    const hint = fromDiscoveryHint("0", quiet);
+    const candidates = [
+      ...named(fromInstallDirEnv()?.install, fromPreference()?.install),
+      ...listKernels("0"),
+      ...named(...onPathNamed, hint)
+    ].map((c) => hint && c.bin === hint.bin ? { ...c, version: hint.version } : c);
+    const matched = candidates.filter((c) => versionMatches(c.version, version2)).sort((a, b) => compareVersions(b.version, a.version));
     if (matched[0]) {
       log(`pinned to version ${version2}: ${matched[0].bin}`);
       return matched[0];
     }
-    const seen = listKernels("0").map((c) => c.version ?? "unknown").join(", ");
+    const seen = [...new Set(candidates.map((c) => c.version ?? "unknown"))].join(", ");
     log(`no installation matches WOLFRAM_MCP_VERSION=${version2}. Versions found: ${seen || "none"}`);
     return null;
   }
@@ -20544,23 +20603,20 @@ function locateKernel({ override, version: version2, minVersion = DEFAULT_MIN_VE
     log(`using the installation named by ${fromEnv.asked}`);
     return fromEnv.install;
   }
-  const preferred = preferredKernel();
-  if (preferred) {
-    const bin = resolveKernelBinary(preferred.path);
-    if (bin) {
-      const version3 = versionForBinary(bin);
-      if (compareVersions(version3, minVersion) >= 0) {
-        log(`using the kernel wolframscript prefers, via ${preferred.source}`);
-        return { bin, version: version3, source: `wolframscript preference (${preferred.source})` };
-      }
-      log(`wolframscript prefers ${version3 ?? "an unknown version"} via ${preferred.source}, below the ${minVersion} minimum; continuing to scan`);
-    } else {
-      log(`wolframscript prefers ${preferred.path}, which holds no kernel executable`);
+  const preferred = fromPreference();
+  if (preferred?.install) {
+    const { version: version3 } = preferred.install;
+    if (compareVersions(version3, minVersion) >= 0) {
+      log(`using the kernel wolframscript prefers, via ${preferred.source}`);
+      return preferred.install;
     }
+    log(`wolframscript prefers ${version3 ?? "an unknown version"} via ${preferred.source}, below the ${minVersion} minimum; continuing to scan`);
+  } else if (preferred) {
+    log(`wolframscript prefers ${preferred.path}, which holds no kernel executable`);
   }
-  const scanned = listKernels(minVersion);
-  if (scanned[0])
-    return scanned[0];
+  const scanned2 = listKernels(minVersion);
+  if (scanned2[0])
+    return scanned2[0];
   const onPath = fromPathLookup(minVersion, log);
   if (onPath)
     return onPath;
@@ -20571,7 +20627,7 @@ function locateKernel({ override, version: version2, minVersion = DEFAULT_MIN_VE
     return null;
   return fromWolframScript(minVersion, log);
 }
-var KERNEL_PROBES;
+var KERNEL_PROBES, scanned, locating;
 var init_locate = __esm({
   "dist/locate.js"() {
     "use strict";
@@ -20591,6 +20647,8 @@ var init_locate = __esm({
       ["wolfram"],
       ["WolframKernel"]
     ];
+    scanned = null;
+    locating = false;
   }
 });
 
@@ -20672,7 +20730,10 @@ async function runDoctor() {
     override: config2.kernelPath,
     version: config2.version,
     minVersion: config2.minVersion,
-    log: (message) => out(`  ! ${message}`)
+    log: (message) => out(`  ! ${message}`),
+    // The one caller that asks for step 7: an explicit user action, which
+    // records what it finds as the hint every later session reads instead.
+    allowWolframScript: true
   });
   out("Selected kernel");
   if (!install) {
@@ -22088,9 +22149,11 @@ var init_pool = __esm({
         this.#budget = next;
         this.#schedule();
       }
-      async #grow(flavour) {
+      async #grow(requested) {
         const index = this.#slots.length + 1;
         const { log } = this.#options;
+        const also = this.#options.stripAlso?.();
+        const flavour = also ? { ...requested, names: [.../* @__PURE__ */ new Set([...requested.names, ...also])] } : requested;
         const session = new KernelSession({
           bin: this.#options.bin,
           serverName: this.#options.serverName,
@@ -22113,7 +22176,8 @@ var init_pool = __esm({
             await this.#options.onKernelReady?.(client, flavour.digest, late, session.source);
           }
         });
-        const slot = { session, busy: true, flavour };
+        const inherited = new Set(Object.keys(process.env).filter((name) => !flavour.names.includes(name)));
+        const slot = { session, busy: true, flavour, inherited };
         this.#slots.push(slot);
         log(`pool grew to ${this.#slots.length} kernel(s) for environment ${flavour.digest}, budget ${this.#budget}`);
         return slot;
@@ -22162,16 +22226,30 @@ var init_pool = __esm({
       /**
        * Whether a slot's kernel can serve this flavour: one of it whose running
        * kernel's source has not changed on disk since it started
-       * (`KernelSession.sourceChanged`). One started before a paclet upgrade serves
-       * the old definition, so it is treated as another flavour's: never handed
-       * out, and retired as one is (#3).
+       * (`KernelSession.sourceChanged`), and that holds no value for a name this
+       * request strips (`#inherits`). Either kind is treated as another flavour's:
+       * never handed out, and retired as one is. One started before a paclet
+       * upgrade serves the old definition (#3); one started before a name was
+       * declared may hold this process's value for it (#180).
        * Decided as a slot is chosen, so a request queued before an upgrade and
        * served after it gets a kernel started after it. A slot whose kernel stopped
        * for idleness reads the source again as it restarts, so it is still this
        * flavour's.
        */
       #mine(slot, flavour) {
-        return slot.flavour.digest === flavour.digest && !this.#replaced(slot);
+        return slot.flavour.digest === flavour.digest && !this.#inherits(slot, flavour) && !this.#replaced(slot);
+      }
+      /**
+       * Whether a slot's kernel may hold a value for a name this request's own
+       * session strips: one it inherited, unstripped, from this process as it
+       * started. A kernel started before a name was first declared kept the
+       * broker's value for it, and a session declaring it unset, of the same
+       * digest, was handed it (#180). Only that session's own names, so a session
+       * that never declared it keeps the kernels it had; and only a name this
+       * process held, so a declaration of one it never had retires nothing.
+       */
+      #inherits(slot, flavour) {
+        return flavour.names.some((name) => slot.inherited.has(name));
       }
       /**
        * `KernelSession.sourceChanged`, read once per turn of the event loop and
@@ -22253,8 +22331,9 @@ var init_pool = __esm({
             return this.#grow(flavour);
           case "swap": {
             const stale = plan.victim.flavour.digest === flavour.digest;
-            this.#options.log(stale ? `budget reached; retiring an idle kernel for environment ${flavour.digest} whose server's paclets or definition changed, to make room` : `budget reached and no kernel for environment ${flavour.digest}; retiring an idle kernel for ${plan.victim.flavour.digest} to make room`);
-            this.#retire(plan.victim, stale ? "its server's paclets or definition changed" : "a session with a different environment needed the seat", false);
+            const why = this.#inherits(plan.victim, flavour) ? "it holds a variable declared since it started" : "its server's paclets or definition changed";
+            this.#options.log(stale ? `budget reached; retiring an idle kernel for environment ${flavour.digest} because ${why}, to make room` : `budget reached and no kernel for environment ${flavour.digest}; retiring an idle kernel for ${plan.victim.flavour.digest} to make room`);
+            this.#retire(plan.victim, stale ? why : "a session with a different environment needed the seat", false);
             const replacement = this.#grow(flavour);
             this.#schedule();
             return replacement;
@@ -22710,6 +22789,9 @@ async function startBroker(options) {
       reserveSeats: options.reserveSeats,
       licence,
       extraEnv,
+      // Every name any session has declared, stripped from each kernel the pool
+      // starts, read as it starts one.
+      stripAlso: () => declaredNames,
       learnFromKernels: options.allowInspect,
       licenceConfigured: options.licenceOverride !== void 0,
       onFacts: (facts, chosen) => {
@@ -22778,10 +22860,7 @@ async function startBroker(options) {
         error: "this session has not declared the environment its kernels need"
       };
     }
-    const flavour = {
-      ...declared,
-      names: [.../* @__PURE__ */ new Set([...declared.names, ...declaredNames])]
-    };
+    const flavour = declared;
     const cancel = EVALUATIONS.has(request.op) ? new AbortController() : null;
     if (cancel)
       inFlight.set(request.id, cancel);
@@ -24444,7 +24523,8 @@ async function main(argv) {
         log
       });
       if (!install) {
-        log("no usable Wolfram installation; nothing to broker");
+        const { doctorCommand: doctorCommand2 } = await Promise.resolve().then(() => (init_doctor(), doctor_exports));
+        log(`no usable Wolfram installation; nothing to broker. Pass --kernel <path>, or, for a kernel only wolframscript knows about, which this does not ask, record it once with ${doctorCommand2()}`);
         return 1;
       }
       const { brokerAddress: addressFor } = await Promise.resolve().then(() => (init_broker_protocol(), broker_protocol_exports));
