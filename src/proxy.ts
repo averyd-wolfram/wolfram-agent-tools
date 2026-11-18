@@ -35,6 +35,7 @@ import { drainPages } from "./kernel.js";
 import { exampleKernelPath, listKernels, locateKernel, type KernelInstall } from "./locate.js";
 import { bareMcpText, errorText, type Logger } from "./log.js";
 import { sessionSource } from "./server-source.js";
+import { REQUEST_CAP } from "./broker-protocol.js";
 import { PKG } from "./version.js";
 
 /**
@@ -184,6 +185,31 @@ function relayable(err: McpError): Error {
     code: err.code,
     ...(err.data === undefined ? {} : { data: err.data }),
   });
+}
+
+/**
+ * A request whose parameters are no longer than `REQUEST_CAP` (#200), so the
+ * frame carrying them always fits the broker's socket. Refused here, ahead of
+ * either backend, so both paths answer it alike and no kernel is asked. Longer,
+ * a private kernel read it from stdin while the broker dropped it unread and its
+ * caller waited out the ceiling.
+ */
+function refuseOverlong(method: string, params: unknown): void {
+  let length: number;
+  try {
+    length = JSON.stringify(params ?? {}).length;
+  } catch {
+    // A value JSON cannot hold fails where it is sent, as it did, and as a
+    // failed call: an embedder's BigInt is no protocol error.
+    return;
+  }
+  if (length <= REQUEST_CAP) return;
+  throw relayable(
+    new McpError(
+      ErrorCode.InvalidParams,
+      `the ${method} request's parameters are ${length} characters, longer than the ${REQUEST_CAP} this server sends`,
+    ),
+  );
 }
 
 /**
@@ -740,6 +766,7 @@ export function createWolframServer(
         ],
       };
     }
+    refuseOverlong("tools/call", { name, arguments: args ?? {} });
     try {
       // extra.signal fires when the client cancels. Passing it on is what turns
       // "the caller stopped waiting" into "the kernel stopped working".
@@ -817,26 +844,33 @@ export function createWolframServer(
     // A prompt runs its own function in the kernel, so it waits as long as a
     // tool call would, and a cancel stops it as one does. Given no ceiling, it
     // was cut at the SDK's minute (#39).
-    fromKernel(GetPromptRequestSchema, async (request, extra) =>
-      backend.getPrompt(request.params, {
+    fromKernel(GetPromptRequestSchema, async (request, extra) => {
+      // Counted from here, as a call's is: sizing it is part of its time.
+      const expiresAt = expiryOf(config.callTimeoutMs);
+      refuseOverlong("prompts/get", request.params);
+      return backend.getPrompt(request.params, {
         timeoutMs: config.callTimeoutMs,
-        expiresAt: expiryOf(config.callTimeoutMs),
+        expiresAt,
         signal: extra.signal,
-      }),
-    );
+      });
+    });
   }
 
   if (capabilities.resources) {
-    fromKernel(ListResourcesRequestSchema, async (request) =>
-      backend.listResources(request.params),
-    );
-    fromKernel(ReadResourceRequestSchema, async (request, extra) =>
-      backend.readResource(request.params, {
+    fromKernel(ListResourcesRequestSchema, async (request) => {
+      refuseOverlong("resources/list", request.params);
+      return backend.listResources(request.params);
+    });
+    fromKernel(ReadResourceRequestSchema, async (request, extra) => {
+      // Counted from here, as a call's is: sizing it is part of its time.
+      const expiresAt = expiryOf(config.callTimeoutMs);
+      refuseOverlong("resources/read", request.params);
+      return backend.readResource(request.params, {
         timeoutMs: config.callTimeoutMs,
-        expiresAt: expiryOf(config.callTimeoutMs),
+        expiresAt,
         signal: extra.signal,
-      }),
-    );
+      });
+    });
   }
 
   return {

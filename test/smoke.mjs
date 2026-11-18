@@ -3091,7 +3091,9 @@ heading("A frame either end cannot read is dropped and logged with its size (#18
 if (socketsHere()) {
   // The session's end, against a stub broker that answers a call with a line
   // that is not JSON, then a frame over the cap.
-  const unterminated = "x".repeat(4 * 1024 * 1024 + 1);
+  const { FRAME_CAP } = await import(join(root, "dist", "broker-protocol.js"));
+  const overCap = `${"x".repeat(FRAME_CAP + 1)}\n`;
+  let callsSeen = 0;
   const stub = createServer((socket) => {
     socket.setEncoding("utf8");
     socket.on("error", () => socket.destroy());
@@ -3106,7 +3108,8 @@ if (socketsHere()) {
         } else if (frame.op === "ping") {
           send(`${JSON.stringify({ id: frame.id, ok: true, result: {} })}\n`);
         } else if (frame.op === "callTool") {
-          send(`not a frame\n${unterminated}`);
+          callsSeen++;
+          send(`not a frame\n${overCap}`);
         }
       }
     });
@@ -3135,8 +3138,38 @@ if (socketsHere()) {
   );
   check(
     "and a frame over the size cap",
-    sessionLog.some((m) => /^broker connection: dropped a frame of over \d+ characters, the cap, with no newline yet$/.test(m)),
+    sessionLog.includes(`broker connection: dropped a frame of ${FRAME_CAP + 1} characters, over the ${FRAME_CAP} cap`),
     dropped().join(" | ").slice(0, 160) || "nothing logged",
+  );
+  // BrokerBackend is public, and its callers catch what a call rejects with.
+  let threw = null;
+  let rejected = null;
+  try {
+    await backend
+      ?.callTool({ name: "WolframLanguageEvaluator", arguments: { n: 1n } }, { timeoutMs: 1_000 })
+      .catch((err) => (rejected = err.message));
+  } catch (err) {
+    threw = err.message;
+  }
+  check(
+    "a call whose arguments JSON cannot hold rejects, as any failure of a call does, rather than throwing",
+    rejected !== null && threw === null,
+    `rejected: ${rejected}; threw: ${threw}`,
+  );
+  // The proxy refuses such a call first; this is the socket's own guard, for a
+  // caller that drives a BrokerBackend itself.
+  const callsBefore = callsSeen;
+  const tooLong = await backend
+    ?.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "x".repeat(FRAME_CAP) } }, { timeoutMs: 5_000 })
+    .then(
+      () => "answered",
+      (err) => err.message,
+    );
+  await new Promise((r) => setTimeout(r, 200));
+  check(
+    "a call too long for the socket is refused before it is sent, naming its length",
+    /over the \d+ the broker's socket carries/.test(tooLong ?? "") && callsSeen === callsBefore,
+    `${callsSeen - callsBefore} sent; ${String(tooLong).slice(0, 120)}`,
   );
   // Stopped first, which fails the call now rather than at its ceiling.
   await backend?.stop();
@@ -3171,8 +3204,7 @@ if (socketsHere()) {
 }
 {
   // The reader alone, given its chunks exactly as a socket might split them.
-  const { FrameReader } = await import(join(root, "dist", "broker-protocol.js"));
-  const cap = 4 * 1024 * 1024;
+  const { FrameReader, FRAME_CAP: cap } = await import(join(root, "dist", "broker-protocol.js"));
   const read = (...chunks) => {
     const frames = [];
     const dropped = [];
@@ -3191,7 +3223,9 @@ if (socketsHere()) {
   const over = read("x".repeat(cap + 1), "x".repeat(1000), `rest of it\n${JSON.stringify({ id: 8, ok: true })}\n`);
   check(
     "the rest of a frame over the cap is dropped with it, not reported as another, and a reply after it is read",
-    over.dropped.length === 1 && /over \d+ characters/.test(over.dropped[0]) && over.frames.some((f) => f?.id === 8),
+    over.dropped.length === 2 &&
+      over.dropped[1] === `dropped a frame of ${cap + 1 + 1000 + 10} characters, over the ${cap} cap` &&
+      over.frames.some((f) => f?.id === 8),
     `frames: ${JSON.stringify(over.frames)}; dropped: ${over.dropped.join(" | ")}`,
   );
   // A valid frame over the cap, its newline in the chunk that crosses the cap
@@ -3202,9 +3236,21 @@ if (socketsHere()) {
     read(oversized, "\n"),
   ];
   check(
-    "a valid frame over the cap is dropped and logged, whichever chunk its newline arrives in",
-    splits.every((r) => r.frames.length === 0 && r.dropped.length === 1 && /cap/.test(r.dropped[0])),
+    "a valid frame over the cap is dropped and logged with its length, whichever chunk its newline arrives in",
+    splits.every(
+      (r) =>
+        r.frames.length === 0 &&
+        r.dropped.at(-1) === `dropped a frame of ${oversized.length} characters, over the ${cap} cap`,
+    ),
     splits.map((r) => `read ${r.frames.length}, dropped: ${r.dropped.join(" | ") || "nothing"}`).join("; "),
+  );
+  // A peer that never ends its frame: logged as it passes the cap, since its
+  // end, which says how long it was, may never come.
+  const unended = read("x".repeat(cap + 1));
+  check(
+    "a frame over the cap is logged as it passes it, though it never ends",
+    unended.dropped.length === 1 && /^dropping a frame over the \d+ cap, \d+ characters in with no newline yet$/.test(unended.dropped[0]),
+    unended.dropped.join(" | ") || "nothing logged",
   );
   // BrokerBackend is public and takes its logger from its caller.
   const kept = [];
@@ -3231,6 +3277,312 @@ if (socketsHere()) {
     kept.map((f) => f?.id).join() === "9,10" && thrown.length === 0,
     `read: ${kept.map((f) => f?.id).join() || "none"}; thrown: ${thrown.join(" | ") || "nothing"}`,
   );
+}
+
+// ---------------------------------------------------------------------------
+// A frame the broker's socket could not carry was dropped unread, and its
+// request waited out its ceiling, or with none for ever, where a private
+// kernel answered it: sharing changed an answer (#200).
+heading("A request or reply too long for a kernel's stdout or the broker's socket is answered at once, alike on both paths (#200)");
+{
+  const { KERNEL_LINE_CAP } = await import(join(root, "dist", "transport.js"));
+  const { FRAME_CAP, REQUEST_CAP, LIST_CAP } = await import(join(root, "dist", "broker-protocol.js"));
+  // A call whose code is "long" is answered past a kernel's line; one whose
+  // code is "growing" within it, in numbers that, written again at 22
+  // characters each, run past twice a kernel's line, and stay within the
+  // 10 MB the SDK's own client reads.
+  const methods = join(home, "200-methods.log");
+  const env = {
+    WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "20",
+    WOLFRAM_MCP_CACHE: "0",
+    FAKE_LONG_REPLY: String(KERNEL_LINE_CAP),
+    FAKE_GROWING_REPLY: String(Math.floor((2 * KERNEL_LINE_CAP) / 20)),
+    FAKE_METHOD_LOG: methods,
+  };
+  const callsReached = () => methodLog(methods).filter((m) => m === "tools/call").length;
+  // Timed, and bounded on this side too, so a run of the code before this
+  // fails in seconds rather than hanging where a call has no ceiling.
+  const timed = async (client, code) => {
+    const began = Date.now();
+    const text = await client
+      .callTool({ name: "WolframLanguageEvaluator", arguments: { code } }, undefined, { timeout: 30_000 })
+      .then(
+        (r) => `${r.isError ? "isError: " : ""}${r.content?.[0]?.text ?? ""}`,
+        (err) => `failed: ${err.message}`,
+      );
+    return { text, ms: Date.now() - began, short: text.slice(0, 160) };
+  };
+  // Past a kernel's line and within the 10 MB a stdio client or server reads.
+  const pastLine = "x".repeat(KERNEL_LINE_CAP + 1);
+  const named = (answer) => /longer than the \d+ this server reads from a kernel/.test(answer.text);
+
+  wipeCache();
+  rmSync(methods, { force: true });
+  const startsBefore = startCount();
+  const own = await connect({ ...env, WOLFRAM_MCP_SHARE: "0" });
+  const ownReply = await timed(own.client, "long");
+  check(
+    "a private session's reply too long for the kernel's stdout is answered at once, naming its length",
+    named(ownReply) && ownReply.ms < 10_000,
+    `${ownReply.ms} ms: ${ownReply.short}`,
+  );
+  const ownNext = await timed(own.client, "1+1");
+  check(
+    "and the kernel, which answered, is kept: the next call is answered by it",
+    answeredByFake({ content: [{ text: ownNext.text }] }) && startCount() === startsBefore + 1,
+    `${startCount() - startsBefore} start(s); ${ownNext.short}`,
+  );
+  const ownReached = callsReached();
+  const ownPastLine = await timed(own.client, pastLine);
+  check(
+    "a request past a kernel's line, within what a frame carries, reaches the kernel",
+    callsReached() === ownReached + 1 && ownPastLine.ms < 10_000,
+    `${callsReached() - ownReached} reached; ${ownPastLine.short}`,
+  );
+  const ownGrowing = await timed(own.client, "growing");
+  check(
+    "a reply of numbers that grow written again is answered on a private session",
+    ownGrowing.text === "grown",
+    ownGrowing.short,
+  );
+  await own.client.close();
+
+  // Each page within a kernel's line, and too long joined.
+  const pages = Math.ceil(LIST_CAP / (KERNEL_LINE_CAP * 0.9)) + 1;
+  const toolsFile = join(home, "200-long-tools.json");
+  writeFileSync(
+    toolsFile,
+    JSON.stringify(
+      Array.from({ length: pages }, (_, i) => ({
+        name: `Long${i}`,
+        description: "d".repeat(Math.floor(KERNEL_LINE_CAP * 0.9)),
+        inputSchema: { type: "object", properties: {} },
+      })),
+    ),
+  );
+  const listed = async (extra) => {
+    const session = await connect({ ...env, FAKE_MODE: "paged-tools", FAKE_TOOLS_FILE: toolsFile, ...extra });
+    const began = Date.now();
+    const text = await session.client.listTools(undefined, { timeout: 30_000 }).then(
+      (r) => `listed ${r.tools.length}`,
+      (err) => `failed: ${err.message}`,
+    );
+    await session.client.close();
+    return { text, ms: Date.now() - began };
+  };
+  const ownList = await listed({ WOLFRAM_MCP_SHARE: "0" });
+  check(
+    "a list too long joined from its pages is refused at once, naming its length",
+    /^failed: .*over \d+ characters joined from its pages/.test(ownList.text) && ownList.ms < 10_000,
+    `${ownList.ms} ms: ${ownList.text.slice(0, 160)}`,
+  );
+
+  if (socketsHere("the shared half")) {
+    const shared = await connect({
+      ...env,
+      WOLFRAM_MCP_SHARE: "1",
+      WOLFRAM_MCP_RUNTIME_DIR: privateDir(join(home, "run-200-shared")),
+    });
+    const sharedReply = await timed(shared.client, "long");
+    check(
+      "a shared session's reply too long for the kernel's stdout is answered at once, as a private one is",
+      sharedReply.text === ownReply.text && sharedReply.ms < 10_000,
+      `${sharedReply.ms} ms: ${sharedReply.short}`,
+    );
+    const sharedReached = callsReached();
+    const sharedPastLine = await timed(shared.client, pastLine);
+    check(
+      "and a request past a kernel's line reaches the broker's kernel, answered as a private session's is",
+      sharedPastLine.text === ownPastLine.text && callsReached() === sharedReached + 1 && sharedPastLine.ms < 10_000,
+      `${sharedPastLine.ms} ms, ${callsReached() - sharedReached} reached: ${sharedPastLine.short}`,
+    );
+    const sharedGrowing = await timed(shared.client, "growing");
+    check(
+      "and a reply that grows as the broker writes it again is answered, as a private session answers it",
+      sharedGrowing.text === ownGrowing.text,
+      `shared: ${sharedGrowing.short}; private: ${ownGrowing.short}`,
+    );
+    await shared.client.close();
+
+    const sharedList = await listed({
+      WOLFRAM_MCP_SHARE: "1",
+      WOLFRAM_MCP_RUNTIME_DIR: privateDir(join(home, "run-200-paged")),
+    });
+    check(
+      "and a shared session refuses that list as a private one does, at once",
+      sharedList.text === ownList.text && sharedList.ms < 10_000,
+      `${sharedList.ms} ms: ${sharedList.text.slice(0, 160)}`,
+    );
+  }
+
+  // A request past REQUEST_CAP is past the 10 MB a stdio server reads, so an
+  // embedder's is driven in process, against a backend that records what it is
+  // asked. Refused ahead of either backend, it is answered alike on both paths.
+  {
+    const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+    const { sessionSource } = await import(join(root, "dist", "server-source.js"));
+    wipeCache();
+    const empty = join(home, "200-paclets");
+    mkdirSync(empty, { recursive: true });
+    const config = {
+      ...lib.loadConfig(() => {}),
+      kernelPath: fakeKernel,
+      serverName: "WolframLanguage",
+      inspect: false,
+      cacheEnabled: true,
+      flavour: lib.kernelFlavour({ ...process.env, MCP_SERVER_NAME: "WolframLanguage", WOLFRAM_USERBASE: empty, WOLFRAM_BASE: empty }),
+    };
+    const asked = [];
+    let ready;
+    const lists = (source) => ({
+      capabilities: async () => (asked.push("capabilities"), { tools: {}, prompts: {}, resources: {} }),
+      listTools: async () => (asked.push("tools/list"), { tools: [{ name: "Demo", inputSchema: { type: "object" } }], source }),
+      listPrompts: async () => (asked.push("prompts/list"), { prompts: [{ name: "DemoPrompt" }], source }),
+    });
+    const stub = () => ({
+      ...lists(undefined),
+      onKernelReady: (handler) => {
+        ready = handler;
+      },
+      getPrompt: async () => (asked.push("prompts/get"), { messages: [] }),
+      listResources: async () => (asked.push("resources/list"), { resources: [] }),
+      readResource: async () => (asked.push("resources/read"), { contents: [] }),
+      callTool: async () => (asked.push("tools/call"), { content: [{ type: "text", text: "called" }] }),
+      stop: async () => {},
+    });
+    // Seeded as a kernel's start leaves the cache, so prompts and resources are offered.
+    const seeding = lib.createWolframServer(config, () => {}, stub);
+    await ready(lists(sessionSource(config.serverName, config.flavour, seeding.install.bin, config.inspect).digest));
+    const { server } = lib.createWolframServer(config, () => {}, stub);
+    const client = new Client({ name: "smoke", version: "1.0.0" }, { capabilities: {} });
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverSide);
+    await client.connect(clientSide);
+    const overlong = "x".repeat(REQUEST_CAP + 1);
+    const outcome = (request) => request.then(() => "answered", (err) => `failed: ${err.message}`);
+    asked.length = 0;
+    const refusals = {
+      "tools/call": await outcome(client.callTool({ name: "Demo", arguments: { code: overlong } })),
+      "prompts/get": await outcome(client.getPrompt({ name: "DemoPrompt", arguments: { text: overlong } })),
+      "resources/read": await outcome(client.readResource({ uri: `ui://${overlong}` })),
+      "resources/list": await outcome(client.listResources({ cursor: overlong })),
+    };
+    check(
+      "a request whose parameters pass the cap is refused, naming their length, before any backend is asked",
+      Object.values(refusals).every((r) => /longer than the \d+ this server sends/.test(r)) && asked.length === 0,
+      `asked: ${asked.join(", ") || "nothing"}; ${Object.entries(refusals).map(([m, r]) => `${m}: ${r.slice(0, 50)}`).join(" | ")}`,
+    );
+    const meta = await outcome(client.callTool({ name: "Demo", arguments: { code: "1+1" }, _meta: { note: overlong } }));
+    check(
+      "but a call is measured as it is sent: a client's own long _meta, which is not, refuses nothing",
+      meta === "answered" && asked.includes("tools/call"),
+      `${meta}; asked: ${asked.join(", ")}`,
+    );
+    await client.close();
+    wipeCache();
+  }
+
+  // The transport alone, against a child that prints what a kernel might.
+  // Only a dropped line that begins as the reply to a request outstanding
+  // answers it; anything else leaves it to its own reply.
+  const { FilteringStdioTransport, replyId } = await import(join(root, "dist", "transport.js"));
+  const against = async (lines) => {
+    const child = [
+      "process.stdin.once('data', (d) => {",
+      "  const { id } = JSON.parse(String(d).split('\\n')[0]);",
+      ...lines.map((line) => `  process.stdout.write(${line} + '\\n');`),
+      "});",
+      "setTimeout(() => {}, 10000);",
+    ].join("\n");
+    const transport = new FilteringStdioTransport({ command: process.execPath, args: ["-e", child] });
+    const received = [];
+    const errors = [];
+    transport.onmessage = (message) => received.push(message);
+    transport.onerror = (err) => errors.push(err.message);
+    await transport.start();
+    await transport.send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: {} });
+    const answers = (m) =>
+      m?.jsonrpc === "2.0" && m.id === 1 && (m.error !== undefined || (typeof m.result === "object" && m.result !== null));
+    await until(() => received.some(answers), 10_000);
+    await transport.close();
+    return { answer: received.find(answers), errors };
+  };
+  const stray = await against([
+    "'[1,2]'",
+    `JSON.stringify({ jsonrpc: '2.0', method: 'notifications/message', params: { data: 'y'.repeat(${KERNEL_LINE_CAP}) } })`,
+    "JSON.stringify({ jsonrpc: '2.0', id, result: { said: 'its own' } })",
+  ]);
+  check(
+    "a line too long for the kernel's stdout that is not a reply fails no request, and stray JSON on stdout ends nothing",
+    stray.answer?.result?.said === "its own" && stray.errors.length === 0,
+    `answer: ${JSON.stringify(stray.answer ?? null).slice(0, 120)}; errors: ${stray.errors.join(" | ") || "none"}`,
+  );
+  const lookalike = await against([
+    "JSON.stringify({ id, result: { stray: true } })",
+    "JSON.stringify({ jsonrpc: '2.0', id, result: null })",
+    `JSON.stringify({ jsonrpc: '2.0', id, result: { said: 'y'.repeat(${KERNEL_LINE_CAP}) } })`,
+  ]);
+  check(
+    "a stray line holding the request's id, which the SDK takes for no reply, is none, so the long reply after it still answers it",
+    /longer than the \d+ this server reads from a kernel/.test(lookalike.answer?.error?.message ?? ""),
+    JSON.stringify(lookalike.answer ?? null).slice(0, 160),
+  );
+  const idLast = await against([
+    `JSON.stringify({ jsonrpc: '2.0', result: { said: 'y'.repeat(${KERNEL_LINE_CAP}) }, id })`,
+  ]);
+  check(
+    "a long reply that names its id after its result answers its request too",
+    /longer than the \d+ this server reads from a kernel/.test(idLast.answer?.error?.message ?? ""),
+    JSON.stringify(idLast.answer ?? null).slice(0, 160),
+  );
+  const ends = (head, tail = '"}]}}') => replyId({ head, tail });
+  check(
+    "a dropped reply is matched to its request by its id, before or after its result, and nothing else is taken for one",
+    ends('{"jsonrpc":"2.0","id":7,"result":{"content"') === 7 &&
+      ends('{"id":7,"jsonrpc":"2.0","result":{"content"') === 7 &&
+      ends('{ "jsonrpc": "2.0", "id": 9, "error": {') === 9 &&
+      ends('{"jsonrpc":"2.0","id":"a\\"b","error":{') === 'a"b' &&
+      ends('{"result":{"content"', 'yyy"}]},"jsonrpc":"2.0","id":11}') === 11 &&
+      ends('{"jsonrpc":"2.0","result":{"x"', 'yyy","id":12}}') === undefined &&
+      ends('{"jsonrpc":"2.0","id":7,"result":{"content"', "yyyy") === undefined &&
+      ends('{"jsonrpc":"2.0","id":7,"result":"yyyy') === undefined &&
+      ends('{"id":7,"result":{"content"') === undefined &&
+      ends('{"jsonrpc":"2.0","method":"notifications/message","params"') === undefined &&
+      ends('{"jsonrpc":"2.0","id":3,"method":"roots/list"') === undefined &&
+      ends("yyyy") === undefined,
+    "",
+  );
+  // A list joined from pages is measured as it is written joined, so one that
+  // is exactly the cap long is kept, and one character more refused.
+  const { drainPages } = await import(join(root, "dist", "kernel.js"));
+  const joined = (second) =>
+    drainPages(async (cursor) =>
+      cursor ? { items: ["b".repeat(second)] } : { items: ["a".repeat(1000)], nextCursor: "2" },
+    ).then(
+      (all) => JSON.stringify(all).length,
+      (err) => err.message,
+    );
+  const exactly = await joined(LIST_CAP - 1007);
+  const over = await joined(LIST_CAP - 1006);
+  check(
+    "a list joined from pages exactly as long as the cap is kept, and one character longer refused",
+    exactly === LIST_CAP && /joined from its pages/.test(String(over)),
+    `${exactly}; ${String(over).slice(0, 100)}`,
+  );
+
+  // The broker's last guards, which no kernel's answer reaches any more.
+  const { fitted, eventFrame } = await import(join(root, "dist", "broker-server.js"));
+  const sent = JSON.parse(fitted({ id: 4, ok: true, result: "r".repeat(FRAME_CAP) }));
+  check(
+    "a response the socket cannot carry is answered in its place with an error naming its length, and an event is not sent",
+    sent.id === 4 &&
+      sent.ok === false &&
+      /over the \d+ its socket carries/.test(sent.error) &&
+      eventFrame({ event: "kernelReady", capabilities: {}, tools: [{ name: "r".repeat(FRAME_CAP) }], prompts: null }) === undefined &&
+      typeof eventFrame({ event: "shuttingDown" }) === "string",
+    JSON.stringify(sent).slice(0, 160),
+  );
+  wipeCache();
 }
 
 // ---------------------------------------------------------------------------

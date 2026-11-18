@@ -34,6 +34,8 @@ import type {
 import {
   encodeFrame,
   FrameReader,
+  FrameTooLarge,
+  overCap,
   isEvent,
   type BrokerFrame,
   type BrokerOp,
@@ -701,13 +703,23 @@ export class BrokerBackend implements KernelBackend {
     // read as unset and replaced with its own default, five minutes for a call
     // where a private kernel waits the 24 days `deadlineDelay` holds it to.
     const sent = timeoutMs === undefined ? undefined : deadlineDelay(timeoutMs);
-    const frame = {
-      id,
-      op,
-      ...(params === undefined ? {} : { params }),
-      ...(sent === undefined ? {} : { timeoutMs: sent }),
-      ...(expiresAt === undefined ? {} : { expiresAt }),
-    };
+    let frame: string;
+    try {
+      frame = encodeFrame({
+        id,
+        op,
+        ...(params === undefined ? {} : { params }),
+        ...(sent === undefined ? {} : { timeoutMs: sent }),
+        ...(expiresAt === undefined ? {} : { expiresAt }),
+      });
+    } catch (err) {
+      // A value JSON cannot hold, a BigInt say, rejects as any failure here does.
+      return Promise.reject(err instanceof Error ? err : new Error(String(err)));
+    }
+    // Refused before it is sent: sent, the broker dropped it unread and this
+    // waited out its ceiling (#200). The proxy refuses such a request before
+    // it reaches a backend; this guards the socket for a caller that does not.
+    if (overCap(frame)) return Promise.reject(new FrameTooLarge(op, frame.length - 1));
     // A null expiry is no ceiling, whatever `timeoutMs` says, as the broker's
     // kernel session reads it: timed here, it failed what a private kernel
     // waited for.
@@ -780,7 +792,7 @@ export class BrokerBackend implements KernelBackend {
       }
       if (onprogress) this.#progress.set(id, onprogress);
       this.#pending.set(id, settle);
-      this.#socket.write(encodeFrame(frame), (err) => {
+      this.#socket.write(frame, (err) => {
         if (err) {
           this.#pending.delete(id);
           settle.reject(err);

@@ -33,6 +33,7 @@ import {
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { deadlineDelay, MAX_TIMER_MS, timerDelay } from "./config.js";
+import { LIST_CAP } from "./broker-protocol.js";
 import { FilteringStdioTransport } from "./transport.js";
 import { applyFlavour, type KernelFlavour } from "./flavour.js";
 import { FACTS_EXPRESSION, isFactsLine, parseFacts, type KernelFacts } from "./inspect.js";
@@ -343,11 +344,26 @@ export async function drainPages<T>(
   stop?: AbortSignal,
 ): Promise<T[]> {
   const all: T[] = [];
+  // As `JSON.stringify(all)` would write it: its brackets, each item, a comma
+  // between each two.
+  let length = 2;
   let cursor: string | undefined;
   for (let guard = 0; guard < 50; guard++) {
     stopIfLate(stop);
     const result = await page(cursor);
-    all.push(...result.items);
+    // No longer, joined and written again, than `LIST_CAP`: a broker sends the
+    // whole list in one frame, which a longer one outgrew, refused where a
+    // private kernel listed it (#200). Here, so both paths refuse it alike.
+    for (const item of result.items) {
+      length += JSON.stringify(item).length + (all.length > 0 ? 1 : 0);
+      all.push(item);
+    }
+    if (length > LIST_CAP) {
+      throw new Error(
+        `the list is over ${length} characters joined from its pages, ` +
+          `longer than the ${LIST_CAP} one list may run to`,
+      );
+    }
     cursor = result.nextCursor;
     if (!cursor) break;
   }

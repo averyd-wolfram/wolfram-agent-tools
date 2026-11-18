@@ -12,10 +12,21 @@ import type {
   Transport,
   TransportSendOptions,
 } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import {
+  ErrorCode,
+  isJSONRPCErrorResponse,
+  isJSONRPCResultResponse,
+  type JSONRPCMessage,
+} from "@modelcontextprotocol/sdk/types.js";
+import { CappedLines } from "./lines.js";
 
-/** Cap on a single unterminated stdout run, e.g. an interactive prompt. */
-const MAX_UNTERMINATED_BYTES = 4 * 1024 * 1024;
+/**
+ * Longest stdout line read from a kernel, in characters: what an interactive
+ * prompt that never ends its line can make this process hold. The broker's
+ * socket carries more (`FRAME_CAP`), so a reply read here fits there once the
+ * broker has written it again.
+ */
+export const KERNEL_LINE_CAP = 4 * 1024 * 1024;
 
 /** How many recent non-protocol lines to keep for error messages. */
 const RECENT_LINE_LIMIT = 15;
@@ -56,7 +67,16 @@ export class FilteringStdioTransport implements Transport {
    * appeared.
    */
   #spawnGate: Promise<void> | null = null;
-  #buffer = "";
+  readonly #lines = new CappedLines(
+    KERNEL_LINE_CAP,
+    (line) => this.#emit(line),
+    (length, ends, ended) => this.#dropped(length, ends, ended),
+  );
+  /**
+   * Requests sent and not yet answered, by id: what a reply dropped for its
+   * length may name, by the id it began or ended with (`replyId`).
+   */
+  readonly #unanswered = new Set<string | number>();
   #closing = false;
   #spawned = false;
   #fatalReported = false;
@@ -145,7 +165,7 @@ export class FilteringStdioTransport implements Transport {
     child.stdin?.on("error", (err) => this.#record(`stdin: ${err.message}`));
 
     child.stdout?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk: string) => this.#ingest(chunk));
+    child.stdout?.on("data", (chunk: string) => this.#lines.push(chunk));
 
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string) => {
@@ -159,8 +179,17 @@ export class FilteringStdioTransport implements Transport {
   async send(message: JSONRPCMessage, _options?: TransportSendOptions): Promise<void> {
     const stdin = this.#child?.stdin;
     if (!stdin?.writable) throw new Error("the Wolfram kernel is not running");
+    // Written first: a request that cannot be, a BigInt in it say, is never
+    // answered, and awaited would stay in `#unanswered` for the kernel's life.
+    const line = `${JSON.stringify(message)}\n`;
+    const id = "method" in message && "id" in message ? message.id : undefined;
+    if (id !== undefined) this.#unanswered.add(id);
     await new Promise<void>((resolve, reject) => {
-      stdin.write(`${JSON.stringify(message)}\n`, (err) => (err ? reject(err) : resolve()));
+      stdin.write(line, (err) => {
+        if (!err) return resolve();
+        if (id !== undefined) this.#unanswered.delete(id);
+        reject(err);
+      });
     });
   }
 
@@ -271,23 +300,40 @@ export class FilteringStdioTransport implements Transport {
    * nothing at all.
    */
   #flush(): void {
-    const tail = this.#buffer;
-    this.#buffer = "";
+    const tail = this.#lines.take();
     if (tail.trim()) this.#emit(tail);
   }
 
-  #ingest(chunk: string): void {
-    this.#buffer += chunk;
-    let index: number;
-    while ((index = this.#buffer.indexOf("\n")) !== -1) {
-      const line = this.#buffer.slice(0, index);
-      this.#buffer = this.#buffer.slice(index + 1);
-      this.#emit(line);
+  /**
+   * A line over the cap, by its length alone. Where it was the reply to a
+   * request outstanding, that request is answered with an error naming its
+   * length: left unanswered, it waited out its ceiling, and with none waited for
+   * ever, though the kernel had answered and was free (#200). An error from the
+   * kernel's side of the protocol, so both paths report it alike and neither
+   * takes the kernel for a hung one.
+   */
+  #dropped(length: number, ends: { head: string; tail: string }, ended: boolean): void {
+    if (!ended) {
+      this.#record(`dropping kernel output over the ${KERNEL_LINE_CAP} a line may run to`);
+      return;
     }
-    if (this.#buffer.length > MAX_UNTERMINATED_BYTES) {
-      this.#record(`dropped ${this.#buffer.length} bytes of unterminated kernel output`);
-      this.#buffer = "";
-    }
+    this.#record(
+      `dropped a line of ${length} characters of kernel output, ` +
+        `over the ${KERNEL_LINE_CAP} a line may run to`,
+    );
+    const id = replyId(ends);
+    if (id === undefined || !this.#unanswered.has(id)) return;
+    this.#unanswered.delete(id);
+    this.#deliver({
+      jsonrpc: "2.0",
+      id,
+      error: {
+        code: ErrorCode.InternalError,
+        message:
+          `the kernel's reply was ${length} characters, longer than the ` +
+          `${KERNEL_LINE_CAP} this server reads from a kernel, and was dropped`,
+      },
+    });
   }
 
   #emit(raw: string): void {
@@ -308,12 +354,68 @@ export class FilteringStdioTransport implements Transport {
     }
 
     const messages = Array.isArray(parsed) ? parsed : [parsed];
-    for (const message of messages) {
-      try {
-        this.onmessage?.(message as JSONRPCMessage);
-      } catch (err) {
-        this.onerror?.(err instanceof Error ? err : new Error(String(err)));
-      }
+    for (const message of messages) this.#deliver(message as JSONRPCMessage);
+  }
+
+  #deliver(message: JSONRPCMessage): void {
+    // Anything at all a kernel printed as JSON reaches here, a bare number in an
+    // array among it, and `in` throws on that.
+    // Only what the SDK takes for a reply answers a request, by its own test: a
+    // stray line holding the id, taken for one here, left the real reply,
+    // dropped for its length, matching nothing. Tested only where the id is
+    // one awaited, which nearly no notification's is.
+    if (
+      typeof message === "object" &&
+      message !== null &&
+      "id" in message &&
+      message.id !== undefined &&
+      this.#unanswered.has(message.id) &&
+      (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message))
+    ) {
+      this.#unanswered.delete(message.id);
     }
+    try {
+      this.onmessage?.(message);
+    } catch (err) {
+      this.onerror?.(err instanceof Error ? err : new Error(String(err)));
+    }
+  }
+}
+
+/**
+ * The id a dropped line answered, read from how it began and how it ended, or
+ * undefined where it was not a JSON-RPC reply. Its top-level members other than
+ * `result` or `error`, an object either way, are `jsonrpc` and `id`, and come
+ * before it or after it, in either order; AgentTools writes `<|"jsonrpc" -> "2.0", "id" -> id, "result" |
+ * "error" -> ...|>`. A line that is not one is never taken for one: a
+ * notification, a kernel's own request, or anything else it printed, which no
+ * request awaits.
+ */
+export function replyId({
+  head,
+  tail,
+}: {
+  head: string;
+  tail: string;
+}): string | number | undefined {
+  const value = String.raw`(?:-?\d+|"(?:[^"\\]|\\.)*")`;
+  const member = String.raw`\s*"(?:jsonrpc|id)"\s*:\s*${value}\s*`;
+  // Before: `{` members `,` then the result. After: the result, then `,` members `}` at the end.
+  const before = new RegExp(
+    String.raw`^\s*\{((?:${member},){0,2})\s*"(?:result|error)"\s*:\s*\{`,
+  ).exec(head);
+  // Ended as an object does, too: a line cut short, or one that only began as
+  // a reply, is not taken for the one its request awaits.
+  if (!before || !/\}\s*$/.test(tail)) return undefined;
+  const after = new RegExp(String.raw`,((?:${member},?){1,2})\}\s*$`).exec(tail);
+  const members = `${before[1] ?? ""},${after?.[1] ?? ""}`;
+  if (!new RegExp(String.raw`"jsonrpc"\s*:\s*"2\.0"`).test(members)) return undefined;
+  const found = new RegExp(String.raw`"id"\s*:\s*(${value})`).exec(members);
+  if (!found?.[1]) return undefined;
+  try {
+    const id: unknown = JSON.parse(found[1]);
+    return typeof id === "number" || typeof id === "string" ? id : undefined;
+  } catch {
+    return undefined;
   }
 }
