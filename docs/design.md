@@ -363,14 +363,21 @@ requirement for the server to work. Two failures do not fall back, deliberately:
   could be sent again safely, which is #102.
 
 A frame either end receives that is not JSON, or is over the socket's cap, is dropped and
-logged by its size, never its content, and neither end sends one over it (#200). The cap is
-twice a kernel's longest line (`transport.ts`), and the proxy refuses a request longer than
-that line on both paths alike, before any backend sees it, so a request always fits the socket.
-A private kernel would have read a longer one from stdin while the broker dropped it unread,
-and a kernel started for it alone would spend a seat outside the pool's budget. A reply the
-kernel's transport read fits too, once the broker has wrapped it. A reply longer than that line
-is dropped there, on either path, and the request it began by naming is answered at once with
-an error giving its length; the kernel, which answered, is kept.
+logged by its size, never its content, and neither end sends one over it (#200). Everything a
+session and a broker exchange is held to a kernel's longest line (`transport.ts`), alike on
+both paths, so the socket never decides an answer:
+- **A request** longer than that line is refused by the proxy before any backend sees it. A
+  private kernel would have read it from stdin while the broker dropped it unread, and a
+  kernel started for it alone would spend a seat outside the pool's budget.
+- **A reply** longer than that line is dropped by the kernel's transport, and the request it
+  began by naming is answered at once with an error giving its length; the kernel, which
+  answered, is kept.
+- **A list** joined from pages longer than that line is refused where the pages are joined
+  (`drainPages`), since a broker sends the whole list in one frame.
+
+The socket's cap is six of those lines, since a reply the broker parses and writes again can
+grow: a JSON number written `1e20` is twenty-one characters as JavaScript writes it. Past it,
+a response is answered in its place with an error naming its length, and an event is not sent.
 
 **What it does not fix.** A kernel is single-threaded, so requests beyond the budget
 queue. With a 2-seat licence that means one kernel serving every session; agent calls are

@@ -759,7 +759,7 @@ export function createWolframServer(
         ],
       };
     }
-    refuseOverlong("tools/call", request.params);
+    refuseOverlong("tools/call", { name, arguments: args ?? {} });
     try {
       // extra.signal fires when the client cancels. Passing it on is what turns
       // "the caller stopped waiting" into "the kernel stopped working".
@@ -848,9 +848,10 @@ export function createWolframServer(
   }
 
   if (capabilities.resources) {
-    fromKernel(ListResourcesRequestSchema, async (request) =>
-      backend.listResources(request.params),
-    );
+    fromKernel(ListResourcesRequestSchema, async (request) => {
+      refuseOverlong("resources/list", request.params);
+      return backend.listResources(request.params);
+    });
     fromKernel(ReadResourceRequestSchema, async (request, extra) => {
       refuseOverlong("resources/read", request.params);
       return backend.readResource(request.params, {

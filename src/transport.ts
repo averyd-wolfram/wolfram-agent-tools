@@ -354,6 +354,7 @@ export class FilteringStdioTransport implements Transport {
       typeof message === "object" &&
       message !== null &&
       !("method" in message) &&
+      ("result" in message || "error" in message) &&
       "id" in message &&
       message.id !== undefined
     ) {
@@ -369,18 +370,23 @@ export class FilteringStdioTransport implements Transport {
 
 /**
  * The id a dropped line answered, read from how it began, or undefined where it
- * did not begin as a reply. AgentTools writes each one as `<|"jsonrpc" -> "2.0",
- * "id" -> id, "result" | "error" -> ...|>`, compact, so the id comes first, and
- * a line that begins any other way is not taken for one: a notification, a
- * kernel's own request, or something else it printed, which no request awaits.
+ * did not begin as a reply. A reply's members ahead of its `result` or `error`
+ * are `jsonrpc` and `id`, in either order; AgentTools writes `<|"jsonrpc" ->
+ * "2.0", "id" -> id, "result" | "error" -> ...|>`, so the id comes first. A line
+ * that begins any other way is not taken for one: a notification, a kernel's
+ * own request, or something else it printed, which no request awaits.
  */
 export function replyId(head: string): string | number | undefined {
-  const match = /^\s*\{"jsonrpc":"2\.0","id":(-?\d+|"(?:[^"\\]|\\.)*"),"(?:result|error)":/.exec(
+  const value = String.raw`(?:-?\d+|"(?:[^"\\]|\\.)*")`;
+  const member = String.raw`\s*"(jsonrpc|id)"\s*:\s*(${value})\s*,`;
+  const begins = new RegExp(String.raw`^\s*\{((?:${member}){1,2})\s*"(?:result|error)"\s*:`).exec(
     head,
   );
-  if (!match?.[1]) return undefined;
+  if (!begins?.[1]) return undefined;
+  const found = new RegExp(String.raw`"id"\s*:\s*(${value})`).exec(begins[1]);
+  if (!found?.[1]) return undefined;
   try {
-    const id: unknown = JSON.parse(match[1]);
+    const id: unknown = JSON.parse(found[1]);
     return typeof id === "number" || typeof id === "string" ? id : undefined;
   } catch {
     return undefined;

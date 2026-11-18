@@ -223,9 +223,11 @@ function resolveLicence(options: BrokerOptions): LicenceInfo {
  * A response as the socket can carry it. One over `FRAME_CAP` is answered in
  * its place, with an error naming its length: sent, the session dropped it
  * and its caller waited out the ceiling, or with none waited for ever, for an
- * answer the broker already had (#200).
+ * answer the broker already had (#200). The last guard, not the limit: a reply
+ * a kernel's line held fits written again, and `drainPages` holds a list to a
+ * line, so no kernel's answer reaches it.
  */
-function fitted(response: BrokerResponse): string {
+export function fitted(response: BrokerResponse): string {
   const frame = encodeFrame(response);
   if (frame.length <= FRAME_CAP) return frame;
   return encodeFrame({
@@ -236,6 +238,17 @@ function fitted(response: BrokerResponse): string {
       `over the ${FRAME_CAP} its socket carries`,
     ...(response.source === undefined ? {} : { source: response.source }),
   });
+}
+
+/**
+ * An event as the socket can carry it, or undefined for one over `FRAME_CAP`,
+ * which is not sent rather than dropped unread at the other end: an event only
+ * spares a session asking, and it asks for what it needs. The last guard, as
+ * `fitted` is.
+ */
+export function eventFrame(event: BrokerEvent): string | undefined {
+  const frame = encodeFrame(event);
+  return frame.length > FRAME_CAP ? undefined : frame;
 }
 
 export async function startBroker(options: BrokerOptions): Promise<RunningBroker | null> {
@@ -378,7 +391,11 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
    * right key.
    */
   function broadcast(event: BrokerEvent, flavour?: string): void {
-    const frame = encodeFrame(event);
+    const frame = eventFrame(event);
+    if (frame === undefined) {
+      log(`not sending a ${event.event} event over the ${FRAME_CAP} cap`);
+      return;
+    }
     for (const [socket, state] of connections) {
       if (flavour !== undefined && state.flavour?.digest !== flavour) continue;
       if (socket.writable) socket.write(frame);
@@ -628,15 +645,11 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
         if (socket.writable) socket.write(encodeFrame({ id: request.id, ok: true }));
         return;
       }
-      const emit = (frame: BrokerEvent) => {
-        const text = encodeFrame(frame);
-        // Not sent, rather than dropped unread at the other end: an event only
-        // spares the session asking, and it asks for what it needs.
-        if (text.length > FRAME_CAP) {
-          log(`not sending a ${frame.event} event of ${text.length} characters, over the cap`);
-          return;
-        }
-        if (socket.writable) socket.write(text);
+      const emit = (event: BrokerEvent) => {
+        const frame = eventFrame(event);
+        if (frame === undefined)
+          log(`not sending a ${event.event} event over the ${FRAME_CAP} cap`);
+        else if (socket.writable) socket.write(frame);
       };
       outstanding++;
       void handle(request, state, inFlight, emit)

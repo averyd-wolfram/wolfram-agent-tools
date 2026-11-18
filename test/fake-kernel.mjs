@@ -63,6 +63,9 @@
  *                     check can see what a shared kernel was started with (#180)
  * FAKE_LONG_REPLY     a length: a call whose code is "long" answers with that many
  *                     characters more, a reply longer than its request (#200)
+ * FAKE_GROWING_REPLY  a count: a call whose code is "growing" answers with that
+ *                     many numbers written 1e20, which JavaScript writes again
+ *                     five times longer, as a broker does (#200)
  * FAKE_EXTRA_TOOLS    JSON array: tools to list as given, after the others, for a
  *                     list holding a tool this server cannot relay
  * FAKE_TOOLS_FILE     a JSON array of tools to list after the others, read once,
@@ -556,6 +559,16 @@ function run() {
           id: msg.id,
           error: { code: -32602, message: `Unknown tool: ${msg.params?.name}` },
         });
+        return;
+      }
+      if (process.env.FAKE_GROWING_REPLY && msg.params.arguments?.code === "growing") {
+        // Written by hand: JSON.stringify would write each number at its full
+        // length, which is the growth this exists to show.
+        const numbers = new Array(Number(process.env.FAKE_GROWING_REPLY)).fill("1e20").join(",");
+        process.stdout.write(
+          `{"jsonrpc":"2.0","id":${JSON.stringify(msg.id)},"result":{"content":` +
+            `[{"type":"text","text":"grown"}],"_meta":{"n":[${numbers}]}}}\n`,
+        );
         return;
       }
       // Evaluating Exit[] ends a real kernel mid-call, answering nothing: the

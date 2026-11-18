@@ -33,7 +33,7 @@ import {
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { deadlineDelay, MAX_TIMER_MS, timerDelay } from "./config.js";
-import { FilteringStdioTransport } from "./transport.js";
+import { FilteringStdioTransport, KERNEL_LINE_CAP } from "./transport.js";
 import { applyFlavour, type KernelFlavour } from "./flavour.js";
 import { FACTS_EXPRESSION, isFactsLine, parseFacts, type KernelFacts } from "./inspect.js";
 import { budgetText, elapsedText } from "./duration.js";
@@ -343,11 +343,23 @@ export async function drainPages<T>(
   stop?: AbortSignal,
 ): Promise<T[]> {
   const all: T[] = [];
+  let length = 0;
   let cursor: string | undefined;
   for (let guard = 0; guard < 50; guard++) {
     stopIfLate(stop);
     const result = await page(cursor);
     all.push(...result.items);
+    // No longer, joined, than one page may be, as it will be written again: a
+    // broker sends the whole list in one frame, which a longer one outgrew,
+    // and refused where a private kernel listed it (#200). Here, so both paths
+    // refuse it alike.
+    length += JSON.stringify(result.items).length;
+    if (length > KERNEL_LINE_CAP) {
+      throw new Error(
+        `the list is over ${length} characters joined from its pages, ` +
+          `longer than the ${KERNEL_LINE_CAP} one list may run to`,
+      );
+    }
     cursor = result.nextCursor;
     if (!cursor) break;
   }

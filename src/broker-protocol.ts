@@ -467,15 +467,17 @@ export const SOCKET_MODE = 0o600;
 /**
  * Longest frame either end of the socket reads, in characters.
  *
- * Twice a kernel's longest line (`KERNEL_LINE_CAP`), so a reply the kernel's
- * transport let through still fits once the broker has wrapped it in a frame
- * of its own: at the kernel's cap, it was dropped here and its request waited
- * out its ceiling, which a private kernel answered (#200). The cap bounds what
+ * A reply the kernel's transport let through has to fit once the broker has
+ * parsed it and written it again in a frame of its own: at the kernel's cap, it
+ * was dropped here and its request waited out its ceiling, which a private
+ * kernel answered (#200). Written again, it can grow: a JSON number of four
+ * characters, `1e20`, is twenty-one as JavaScript writes it, so the cap is six
+ * kernel lines, past that growth and the frame's own fields. The cap bounds what
  * a peer that never sends a newline can make a process hold; the socket is
  * local and unauthenticated, which is exactly the reason not to trust it with
  * unbounded memory.
  */
-export const FRAME_CAP = 2 * KERNEL_LINE_CAP;
+export const FRAME_CAP = 6 * KERNEL_LINE_CAP;
 
 /**
  * A request too long for the socket, refused before it is sent, so nothing ran.
