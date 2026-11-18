@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.3](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.2.2...v0.2.3) (2026-11-18)
+
+
+### Bug Fixes
+
+* match a pinned version against every installation discovery can name, and search PATH in-process rather than with which ([#196](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/196)) ([51f623a](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/51f623ac5a3a0408ca94439b095b5e62d3862a27))
+* never hand a session that declares a variable unset a shared kernel that inherited it from the broker ([#194](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/194)) ([3255aaa](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/3255aaabbd9bee050ca46860dab14dafe7c7f085))
+* say a cold session advertises tools only, not capabilities from MCP_SERVERS, where AGENTS.md, design.md and the code said otherwise ([#195](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/195)) ([458664f](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/458664f496b11f044402f9acdc74af5d15ff5a8a))
+* stop discovery at step 6 unless the caller asks for wolframscript, so a broker run by hand spends no seat ([#190](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/190)) ([284b141](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/284b1419947e5a8ff5719cec674830a3db6045d9))
+
 ## [0.2.2](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.2.1...v0.2.2) (2026-11-17)
 
 
