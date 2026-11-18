@@ -360,9 +360,10 @@ Use the official specification when working on `proxy.ts` or `transport.ts`.
   `createWolframServer` must not block and must not spawn.
 - **Sharing is an optimisation, never a dependency.** Every broker failure must fall back to a
   private kernel, with the reason logged, but for two, each deliberate: a start deadline spent
-  while attaching, since a private kernel started with no time left would spend a second seat
-  only to fail, and a request already sent to a broker that goes, which fails rather than run
-  again since it may have run (resending one the broker never read is #102).
+  attaching to the broker or waiting for it to prepare, since a private kernel started with no
+  time left would spend a second seat only to fail, and a request already sent to a broker that
+  goes, which fails rather than run again since it may have run (resending one the broker never
+  read is #102).
 - **Sharing may never change an answer.** A kernel reads its environment at startup, so two
   sessions share only where their *flavour* matches (`flavour.ts`); the broker starts a kernel
   per flavour and its pool retires an idle one of another flavour rather than exceed the seat

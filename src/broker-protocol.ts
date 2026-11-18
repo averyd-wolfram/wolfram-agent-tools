@@ -510,7 +510,7 @@ export class FrameReader {
         frame = JSON.parse(line);
       } catch {
         // Not the parser's message, which can quote the frame.
-        this.onDropped(`dropped a frame of ${line.length} characters that is not JSON`);
+        this.#report(`dropped a frame of ${line.length} characters that is not JSON`);
         continue;
       }
       try {
@@ -524,12 +524,25 @@ export class FrameReader {
     // arrived in the same chunk with it. The rest of the frame is dropped as it
     // arrives, since its tail parsed at that newline would read as another.
     if (this.#buffer.length > MAX_UNTERMINATED_BYTES) {
-      this.onDropped(
+      this.#buffer = "";
+      this.#skipping = true;
+      this.#report(
         `dropped a frame of over ${MAX_UNTERMINATED_BYTES} characters, ` +
           `the cap, with no newline yet`,
       );
-      this.#buffer = "";
-      this.#skipping = true;
+    }
+  }
+
+  /**
+   * After the state is settled, and never thrown past: `BrokerBackend` is public
+   * and takes its logger from the caller, and one that throws here left the cap
+   * unenforced or the frames behind this one unread.
+   */
+  #report(why: string): void {
+    try {
+      this.onDropped(why);
+    } catch {
+      // The drop stands; only its line is lost.
     }
   }
 }

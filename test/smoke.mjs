@@ -3048,8 +3048,9 @@ if (socketsHere()) {
     sessionLog.some((m) => /^broker connection: dropped a frame of over \d+ characters, the cap, with no newline yet$/.test(m)),
     dropped().join(" | ").slice(0, 160) || "nothing logged",
   );
-  await call;
+  // Stopped first, which fails the call now rather than at its ceiling.
   await backend?.stop();
+  await call;
   stub.close();
 
   // The broker's end, sent a line that is not JSON by a proxy.
@@ -3102,6 +3103,31 @@ if (socketsHere()) {
     "the rest of a frame over the cap is dropped with it, not reported as another, and a reply after it is read",
     over.dropped.length === 1 && /over \d+ characters/.test(over.dropped[0]) && over.frames.some((f) => f?.id === 8),
     `frames: ${JSON.stringify(over.frames)}; dropped: ${over.dropped.join(" | ")}`,
+  );
+  // BrokerBackend is public and takes its logger from its caller.
+  const kept = [];
+  const thrown = [];
+  const stubborn = new FrameReader(
+    (frame) => kept.push(frame),
+    () => {
+      throw new Error("a logger that throws");
+    },
+  );
+  for (const chunk of [
+    `not a frame\n${JSON.stringify({ id: 9, ok: true })}\n`,
+    "x".repeat(cap + 1),
+    `rest of it\n${JSON.stringify({ id: 10, ok: true })}\n`,
+  ]) {
+    try {
+      stubborn.push(chunk);
+    } catch (err) {
+      thrown.push(err.message);
+    }
+  }
+  check(
+    "a logger that throws loses only its own line: the frames after each drop are still read",
+    kept.map((f) => f?.id).join() === "9,10" && thrown.length === 0,
+    `read: ${kept.map((f) => f?.id).join() || "none"}; thrown: ${thrown.join(" | ") || "nothing"}`,
   );
 }
 
