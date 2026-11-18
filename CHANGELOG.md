@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.4](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.2.3...v0.2.4) (2026-11-18)
+
+
+### Bug Fixes
+
+* log a broker frame either end drops, and name the broker failures that do not fall back ([#201](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/201)) ([e546ca9](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/e546ca9f34132b33d36f2e971b7bd4022bbee4d4))
+* re-read the lists only after a kernel answered, so a list served from the cache starts no kernel ([#197](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/197)) ([fb8c611](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/fb8c6116682e8363fcb999d8b30b465cb924516d))
+
 ## [0.2.3](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.2.2...v0.2.3) (2026-11-18)
 
 
