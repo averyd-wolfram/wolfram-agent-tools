@@ -839,10 +839,12 @@ export function createWolframServer(
     // tool call would, and a cancel stops it as one does. Given no ceiling, it
     // was cut at the SDK's minute (#39).
     fromKernel(GetPromptRequestSchema, async (request, extra) => {
+      // Counted from here, as a call's is: sizing it is part of its time.
+      const expiresAt = expiryOf(config.callTimeoutMs);
       refuseOverlong("prompts/get", request.params);
       return backend.getPrompt(request.params, {
         timeoutMs: config.callTimeoutMs,
-        expiresAt: expiryOf(config.callTimeoutMs),
+        expiresAt,
         signal: extra.signal,
       });
     });
@@ -854,10 +856,12 @@ export function createWolframServer(
       return backend.listResources(request.params);
     });
     fromKernel(ReadResourceRequestSchema, async (request, extra) => {
+      // Counted from here, as a call's is: sizing it is part of its time.
+      const expiresAt = expiryOf(config.callTimeoutMs);
       refuseOverlong("resources/read", request.params);
       return backend.readResource(request.params, {
         timeoutMs: config.callTimeoutMs,
-        expiresAt: expiryOf(config.callTimeoutMs),
+        expiresAt,
         signal: extra.signal,
       });
     });
