@@ -419,6 +419,17 @@ const socketsHere = (part = "") => {
   return false;
 };
 
+// The system's `which`, by absolute path, for a fixture PATH that must hold it
+// and no other system binary: looked up in /usr/bin and /bin, where the
+// fixtures used to search, not through whatever PATH started the suite, which
+// may name it relatively or not at all.
+const systemWhich = () => {
+  const found = spawnSync("sh", ["-c", "command -v which"], { encoding: "utf8", env: { PATH: "/usr/bin:/bin" } });
+  const path = found.stdout.trim();
+  if (!path.startsWith("/")) throw new Error(`no which in /usr/bin or /bin: ${found.stderr || path}`);
+  return path;
+};
+
 // ---------------------------------------------------------------------------
 heading("Unit — kernel discovery");
 {
@@ -484,18 +495,26 @@ heading("Unit — kernel discovery");
     mkdirSync(join(installDir, "Executables"), { recursive: true });
     mkdirSync(stubDir, { recursive: true });
 
+    // Each run leaves a line in `ran`, so a check can tell a stub never asked.
+    const ran = join(stubDir, "ran");
     const stub = (reportedDir) =>
       writeFileSync(
         join(stubDir, "wolframscript"),
-        `#!/bin/sh\nprintf '${reportedDir}|10000.0.0 for Test'\n`,
+        `#!/bin/sh\necho ran >> '${ran}'\nprintf '${reportedDir}|10000.0.0 for Test'\n`,
         { mode: 0o755 },
       );
 
+    // The stub, and a directory holding only `which`, and nothing else: a real
+    // wolframscript can live in /usr/bin and /bin (it does on Linux, through
+    // alternatives), so a stub that cannot run — a scratch directory mounted
+    // noexec — must find nothing rather than fall through to a real one.
+    const whichDir = join(home, "stub-which");
+    mkdirSync(whichDir, { recursive: true });
+    symlinkSync(systemWhich(), join(whichDir, "which"));
+    const stubPath = `${stubDir}:${whichDir}`;
     const isolated = (fn) => {
       const saved = { ...process.env };
-      // The stub first, then just enough for `which` itself to exist. The real
-      // wolframscript lives in /usr/local/bin, which is deliberately not here.
-      process.env.PATH = `${stubDir}:/usr/bin:/bin`;
+      process.env.PATH = stubPath;
       process.env.HOME = join(home, "stub-home");
       process.env.XDG_CONFIG_HOME = join(home, "stub-home", ".config");
       for (const key of [
@@ -517,7 +536,7 @@ heading("Unit — kernel discovery");
     // A wolframscript reporting a directory with no kernel in it must yield
     // nothing, and must never fall back to naming the script itself.
     stub(join(home, "stub-empty"));
-    const nothing = isolated(() => lib.locateKernel({ minVersion: "9999" }));
+    const nothing = isolated(() => lib.locateKernel({ minVersion: "9999", allowWolframScript: true }));
     check(
       "a wolframscript with no kernel behind it yields nothing",
       nothing === null,
@@ -528,7 +547,7 @@ heading("Unit — kernel discovery");
     const kernel = join(installDir, "Executables", "wolfram");
     writeFileSync(kernel, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     stub(installDir);
-    const picked = isolated(() => lib.locateKernel({ minVersion: "9999" }));
+    const picked = isolated(() => lib.locateKernel({ minVersion: "9999", allowWolframScript: true }));
     check(
       "wolframscript is never selected as a kernel",
       picked !== null && !/wolframscript/i.test(picked.bin),
@@ -539,6 +558,47 @@ heading("Unit — kernel discovery");
       picked?.bin === realpathSync(kernel),
       `${picked?.bin} (source: ${picked?.source})`,
     );
+
+    // Step 7 starts a kernel, so it runs only for a caller that asks, and
+    // `doctor` is the one that does. It defaulted to on, so a caller that had
+    // not chosen reached it: `broker` run by hand without --kernel spent a seat
+    // before it had bound its socket (#179). The stub reports an empty
+    // directory, so a run that does reach it still finds nothing to start.
+    stub(join(home, "stub-empty"));
+    rmSync(ran, { force: true });
+    const unasked = isolated(() => lib.locateKernel({ minVersion: "9999" }));
+    check(
+      "discovery stops at step 6 unless the caller asks for wolframscript",
+      unasked === null && !existsSync(ran),
+      existsSync(ran) ? "wolframscript ran" : (unasked?.bin ?? "null"),
+    );
+    const cli = (args) => {
+      rmSync(ran, { force: true });
+      const { stderr } = spawnSync(process.execPath, [join(root, "dist", "index.js"), ...args], {
+        env: {
+          PATH: stubPath,
+          HOME: join(home, "stub-home"),
+          XDG_CONFIG_HOME: join(home, "stub-home", ".config"),
+          WOLFRAM_MCP_MIN_VERSION: "9999",
+        },
+        encoding: "utf8",
+        timeout: 30_000,
+      });
+      return { asked: existsSync(ran), stderr };
+    };
+    // Its own words, so a broker that died before discovery cannot pass for one
+    // that looked and stopped; and they say how to go on.
+    const broker = cli(["broker", "--address", join(home, "stub-broker.sock")]);
+    check(
+      "a broker run by hand without --kernel never asks wolframscript",
+      !broker.asked && /nothing to broker/.test(broker.stderr),
+      broker.asked ? "wolframscript ran" : broker.stderr.trim().split("\n").pop(),
+    );
+    check(
+      "and says how to reach a kernel only wolframscript knows about",
+      /--kernel/.test(broker.stderr) && /doctor/.test(broker.stderr),
+    );
+    check("doctor still does, the one caller that may", cli(["doctor"]).asked);
   }
 
   check("version comparison is numeric", lib.compareVersions("14.10.0", "14.9.0") > 0);
@@ -7962,8 +8022,15 @@ heading("Discovery spends no seat; doctor is the only route to wolframscript");
   );
   const invocations = () =>
     existsSync(asked) ? readFileSync(asked, "utf8").split("\n").filter(Boolean).length : 0;
+  // The stub and a directory holding only `which`: doctor asks wolframscript
+  // here, and a real one can live in /usr/bin and /bin, so a stub that cannot
+  // run must find nothing rather than fall through to it (as in the unit
+  // section's wolframscript fallback).
+  const whichDir = join(home, "ws-which");
+  mkdirSync(whichDir, { recursive: true });
+  symlinkSync(systemWhich(), join(whichDir, "which"));
   const env = {
-    PATH: `${stubDir}:/usr/bin:/bin`,
+    PATH: `${stubDir}:${whichDir}`,
     WOLFRAM_MCP_KERNEL: "",
     WOLFRAM_MCP_MIN_VERSION: "9999",
   };

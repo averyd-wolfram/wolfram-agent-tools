@@ -237,7 +237,13 @@ async function main(argv: string[]): Promise<number | null> {
             log,
           });
       if (!install) {
-        log("no usable Wolfram installation; nothing to broker");
+        // Discovery stops at step 6 here, as everywhere but doctor (#179), so
+        // say how to reach a kernel only wolframscript knows about.
+        const { doctorCommand } = await import("./doctor.js");
+        log(
+          "no usable Wolfram installation; nothing to broker. Pass --kernel <path>, or, for a " +
+            `kernel only wolframscript knows about, which this does not ask, record it once with ${doctorCommand()}`,
+        );
         return 1;
       }
       const { brokerAddress: addressFor } = await import("./broker-protocol.js");

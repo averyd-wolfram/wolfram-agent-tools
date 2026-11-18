@@ -223,6 +223,9 @@ export async function runDoctor(): Promise<number> {
     version: config.version,
     minVersion: config.minVersion,
     log: (message) => out(`  ! ${message}`),
+    // The one caller that asks for step 7: an explicit user action, which
+    // records what it finds as the hint every later session reads instead.
+    allowWolframScript: true,
   });
 
   out("Selected kernel");

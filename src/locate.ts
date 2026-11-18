@@ -11,7 +11,7 @@
  *   6. `wolfram` or `WolframKernel` on PATH
  *      then the discovery hint `doctor` left, if step 7 is what found the kernel
  *   7. ask `wolframscript` where it lives — the one step that starts a kernel,
- *      so a caller that must not spend a seat turns it off (`allowWolframScript`)
+ *      so it runs only for a caller that asks (`allowWolframScript`): `doctor`
  *
  * Version detection never starts a kernel: macOS reads
  * CFBundleShortVersionString from Info.plist, Windows and Linux read the
@@ -459,9 +459,11 @@ export interface LocateOptions {
   /**
    * Whether the last step, `wolframscript -code`, may run. It starts a kernel —
    * a licence seat, and with no local kernel a Wolfram Cloud round trip — so
-   * anything on a session's startup path passes false, and only an explicit
-   * user action (`doctor`) runs it. Defaults to true, so a caller that has not
-   * chosen keeps the behaviour it had.
+   * only an explicit user action (`doctor`) asks for it. Defaults to false: it
+   * defaulted to true, so a caller that had not chosen kept the old behaviour,
+   * and `broker` run by hand without `--kernel` was such a caller, spending a
+   * seat before it had bound its socket (#179). Callers on a session's path
+   * still pass false, so the choice reads where it is made.
    */
   allowWolframScript?: boolean;
 }
@@ -615,7 +617,7 @@ export function locateKernel({
   version,
   minVersion = DEFAULT_MIN_VERSION,
   log = () => {},
-  allowWolframScript = true,
+  allowWolframScript = false,
 }: LocateOptions = {}): KernelInstall | null {
   // Naming something is a decision, not a hint. Every branch below that was
   // asked for a specific installation either supplies it or stops: falling
