@@ -703,15 +703,22 @@ export class BrokerBackend implements KernelBackend {
     // read as unset and replaced with its own default, five minutes for a call
     // where a private kernel waits the 24 days `deadlineDelay` holds it to.
     const sent = timeoutMs === undefined ? undefined : deadlineDelay(timeoutMs);
-    const frame = encodeFrame({
-      id,
-      op,
-      ...(params === undefined ? {} : { params }),
-      ...(sent === undefined ? {} : { timeoutMs: sent }),
-      ...(expiresAt === undefined ? {} : { expiresAt }),
-    });
+    let frame: string;
+    try {
+      frame = encodeFrame({
+        id,
+        op,
+        ...(params === undefined ? {} : { params }),
+        ...(sent === undefined ? {} : { timeoutMs: sent }),
+        ...(expiresAt === undefined ? {} : { expiresAt }),
+      });
+    } catch (err) {
+      // A value JSON cannot hold, a BigInt say, rejects as any failure here does.
+      return Promise.reject(err instanceof Error ? err : new Error(String(err)));
+    }
     // Refused before it is sent: sent, the broker dropped it unread and this
-    // waited out its ceiling, where a private kernel answers it (#200).
+    // waited out its ceiling (#200). The proxy refuses such a request before
+    // it reaches a backend; this guards the socket for a caller that does not.
     if (frame.length > FRAME_CAP) return Promise.reject(new FrameTooLarge(op, frame.length));
     // A null expiry is no ceiling, whatever `timeoutMs` says, as the broker's
     // kernel session reads it: timed here, it failed what a private kernel

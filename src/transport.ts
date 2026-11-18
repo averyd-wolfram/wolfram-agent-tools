@@ -12,7 +12,12 @@ import type {
   Transport,
   TransportSendOptions,
 } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { ErrorCode, type JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import {
+  ErrorCode,
+  isJSONRPCErrorResponse,
+  isJSONRPCResultResponse,
+  type JSONRPCMessage,
+} from "@modelcontextprotocol/sdk/types.js";
 import { CappedLines } from "./lines.js";
 
 /**
@@ -350,19 +355,11 @@ export class FilteringStdioTransport implements Transport {
   #deliver(message: JSONRPCMessage): void {
     // Anything at all a kernel printed as JSON reaches here, a bare number in an
     // array among it, and `in` throws on that.
-    // Only a JSON-RPC reply answers a request: the SDK takes nothing else for
-    // one, and a stray line holding its id left the real reply, dropped for its
-    // length, matching nothing.
-    if (
-      typeof message === "object" &&
-      message !== null &&
-      message.jsonrpc === "2.0" &&
-      !("method" in message) &&
-      ("result" in message || "error" in message) &&
-      "id" in message &&
-      message.id !== undefined
-    ) {
-      this.#unanswered.delete(message.id);
+    // Only what the SDK takes for a reply answers a request, by its own test: a
+    // stray line holding the id, taken for one here, left the real reply,
+    // dropped for its length, matching nothing.
+    if (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message)) {
+      if (message.id !== undefined) this.#unanswered.delete(message.id);
     }
     try {
       this.onmessage?.(message);
@@ -394,7 +391,9 @@ export function replyId({
   const before = new RegExp(String.raw`^\s*\{((?:${member},){0,2})\s*"(?:result|error)"\s*:`).exec(
     head,
   );
-  if (!before) return undefined;
+  // Ended as an object does, too: a line cut short, or one that only began as
+  // a reply, is not taken for the one its request awaits.
+  if (!before || !/\}\s*$/.test(tail)) return undefined;
   const after = new RegExp(String.raw`,((?:${member},?){1,2})\}\s*$`).exec(tail);
   const members = `${before[1] ?? ""},${after?.[1] ?? ""}`;
   if (!new RegExp(String.raw`"jsonrpc"\s*:\s*"2\.0"`).test(members)) return undefined;

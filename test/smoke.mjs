@@ -3139,6 +3139,21 @@ if (socketsHere()) {
     sessionLog.includes(`broker connection: dropped a frame of ${FRAME_CAP + 1} characters, over the ${FRAME_CAP} cap`),
     dropped().join(" | ").slice(0, 160) || "nothing logged",
   );
+  // BrokerBackend is public, and its callers catch what a call rejects with.
+  let threw = null;
+  let rejected = null;
+  try {
+    await backend
+      ?.callTool({ name: "WolframLanguageEvaluator", arguments: { n: 1n } }, { timeoutMs: 1_000 })
+      .catch((err) => (rejected = err.message));
+  } catch (err) {
+    threw = err.message;
+  }
+  check(
+    "a call whose arguments JSON cannot hold rejects, as any failure of a call does, rather than throwing",
+    rejected !== null && threw === null,
+    `rejected: ${rejected}; threw: ${threw}`,
+  );
   // Stopped first, which fails the call now rather than at its ceiling.
   await backend?.stop();
   await call;
@@ -3418,7 +3433,8 @@ heading("A request or reply too long for a kernel's stdout or the broker's socke
     transport.onerror = (err) => errors.push(err.message);
     await transport.start();
     await transport.send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: {} });
-    const answers = (m) => m?.jsonrpc === "2.0" && m.id === 1 && ("result" in m || "error" in m);
+    const answers = (m) =>
+      m?.jsonrpc === "2.0" && m.id === 1 && (m.error !== undefined || (typeof m.result === "object" && m.result !== null));
     await until(() => received.some(answers), 10_000);
     await transport.close();
     return { answer: received.find(answers), errors };
@@ -3435,10 +3451,11 @@ heading("A request or reply too long for a kernel's stdout or the broker's socke
   );
   const lookalike = await against([
     "JSON.stringify({ id, result: { stray: true } })",
+    "JSON.stringify({ jsonrpc: '2.0', id, result: null })",
     `JSON.stringify({ jsonrpc: '2.0', id, result: { said: 'y'.repeat(${KERNEL_LINE_CAP}) } })`,
   ]);
   check(
-    "a stray line holding the request's id, not a JSON-RPC reply, is none, so the long reply after it still answers it",
+    "a stray line holding the request's id, which the SDK takes for no reply, is none, so the long reply after it still answers it",
     /longer than the \d+ this server reads from a kernel/.test(lookalike.answer?.error?.message ?? ""),
     JSON.stringify(lookalike.answer ?? null).slice(0, 160),
   );
@@ -3450,7 +3467,7 @@ heading("A request or reply too long for a kernel's stdout or the broker's socke
     /longer than the \d+ this server reads from a kernel/.test(idLast.answer?.error?.message ?? ""),
     JSON.stringify(idLast.answer ?? null).slice(0, 160),
   );
-  const ends = (head, tail = "") => replyId({ head, tail });
+  const ends = (head, tail = '"}]}}') => replyId({ head, tail });
   check(
     "a dropped reply is matched to its request by its id, before or after its result, and nothing else is taken for one",
     ends('{"jsonrpc":"2.0","id":7,"result":{"content"') === 7 &&
@@ -3459,6 +3476,7 @@ heading("A request or reply too long for a kernel's stdout or the broker's socke
       ends('{"jsonrpc":"2.0","id":"a\\"b","error":{') === 'a"b' &&
       ends('{"result":{"content"', 'yyy"}]},"jsonrpc":"2.0","id":11}') === 11 &&
       ends('{"jsonrpc":"2.0","result":{"x"', 'yyy","id":12}}') === undefined &&
+      ends('{"jsonrpc":"2.0","id":7,"result":{"content"', "yyyy") === undefined &&
       ends('{"id":7,"result":{"content"') === undefined &&
       ends('{"jsonrpc":"2.0","method":"notifications/message","params"') === undefined &&
       ends('{"jsonrpc":"2.0","id":3,"method":"roots/list"') === undefined &&
