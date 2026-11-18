@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.2.2...v0.2.3) (2026-11-18)
+
+
+### Bug Fixes
+
+* stop discovery at step 6 unless the caller asks for wolframscript, so a broker run by hand spends no seat ([#190](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/190)) ([284b141](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/284b1419947e5a8ff5719cec674830a3db6045d9))
+
 ## [0.2.2](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.2.1...v0.2.2) (2026-11-17)
 
 
