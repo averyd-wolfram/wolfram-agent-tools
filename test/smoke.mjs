@@ -484,10 +484,12 @@ heading("Unit — kernel discovery");
     mkdirSync(join(installDir, "Executables"), { recursive: true });
     mkdirSync(stubDir, { recursive: true });
 
+    // Each run leaves a line in `ran`, so a check can tell a stub never asked.
+    const ran = join(stubDir, "ran");
     const stub = (reportedDir) =>
       writeFileSync(
         join(stubDir, "wolframscript"),
-        `#!/bin/sh\nprintf '${reportedDir}|10000.0.0 for Test'\n`,
+        `#!/bin/sh\necho ran >> '${ran}'\nprintf '${reportedDir}|10000.0.0 for Test'\n`,
         { mode: 0o755 },
       );
 
@@ -517,7 +519,7 @@ heading("Unit — kernel discovery");
     // A wolframscript reporting a directory with no kernel in it must yield
     // nothing, and must never fall back to naming the script itself.
     stub(join(home, "stub-empty"));
-    const nothing = isolated(() => lib.locateKernel({ minVersion: "9999" }));
+    const nothing = isolated(() => lib.locateKernel({ minVersion: "9999", allowWolframScript: true }));
     check(
       "a wolframscript with no kernel behind it yields nothing",
       nothing === null,
@@ -528,7 +530,7 @@ heading("Unit — kernel discovery");
     const kernel = join(installDir, "Executables", "wolfram");
     writeFileSync(kernel, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     stub(installDir);
-    const picked = isolated(() => lib.locateKernel({ minVersion: "9999" }));
+    const picked = isolated(() => lib.locateKernel({ minVersion: "9999", allowWolframScript: true }));
     check(
       "wolframscript is never selected as a kernel",
       picked !== null && !/wolframscript/i.test(picked.bin),
@@ -539,6 +541,39 @@ heading("Unit — kernel discovery");
       picked?.bin === realpathSync(kernel),
       `${picked?.bin} (source: ${picked?.source})`,
     );
+
+    // Step 7 starts a kernel, so it runs only for a caller that asks, and
+    // `doctor` is the one that does. It defaulted to on, so a caller that had
+    // not chosen reached it: `broker` run by hand without --kernel spent a seat
+    // before it had bound its socket (#179). The stub reports an empty
+    // directory, so a run that does reach it still finds nothing to start.
+    stub(join(home, "stub-empty"));
+    rmSync(ran, { force: true });
+    const unasked = isolated(() => lib.locateKernel({ minVersion: "9999" }));
+    check(
+      "discovery stops at step 6 unless the caller asks for wolframscript",
+      unasked === null && !existsSync(ran),
+      existsSync(ran) ? "wolframscript ran" : (unasked?.bin ?? "null"),
+    );
+    const cli = (args) => {
+      rmSync(ran, { force: true });
+      spawnSync(process.execPath, [join(root, "dist", "index.js"), ...args], {
+        env: {
+          PATH: `${stubDir}:/usr/bin:/bin`,
+          HOME: join(home, "stub-home"),
+          XDG_CONFIG_HOME: join(home, "stub-home", ".config"),
+          WOLFRAM_MCP_MIN_VERSION: "9999",
+        },
+        encoding: "utf8",
+        timeout: 30_000,
+      });
+      return existsSync(ran);
+    };
+    check(
+      "a broker run by hand without --kernel never asks wolframscript",
+      !cli(["broker", "--address", join(home, "stub-broker.sock")]),
+    );
+    check("doctor still does, the one caller that may", cli(["doctor"]));
   }
 
   check("version comparison is numeric", lib.compareVersions("14.10.0", "14.9.0") > 0);

@@ -394,7 +394,9 @@ argument through to `createBackend`, or preparation runs on a deadline of its ow
 
 `locateKernel`, `listKernels`, `resolveKernelBinary`, `KernelSession` and
 `FilteringStdioTransport` are exported too, if you want the discovery or the filtering
-stdio transport on their own.
+stdio transport on their own. `locateKernel` stops at discovery's step 6 unless you pass
+`allowWolframScript: true`: step 7 runs `wolframscript`, which starts a kernel and spends a
+licence seat.
 
 ## What this lets a model do
 
