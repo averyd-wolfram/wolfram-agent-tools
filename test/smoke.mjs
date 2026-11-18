@@ -419,6 +419,17 @@ const socketsHere = (part = "") => {
   return false;
 };
 
+// The system's `which`, by absolute path, for a fixture PATH that must hold it
+// and no other system binary: looked up in /usr/bin and /bin, where the
+// fixtures used to search, not through whatever PATH started the suite, which
+// may name it relatively or not at all.
+const systemWhich = () => {
+  const found = spawnSync("sh", ["-c", "command -v which"], { encoding: "utf8", env: { PATH: "/usr/bin:/bin" } });
+  const path = found.stdout.trim();
+  if (!path.startsWith("/")) throw new Error(`no which in /usr/bin or /bin: ${found.stderr || path}`);
+  return path;
+};
+
 // ---------------------------------------------------------------------------
 heading("Unit — kernel discovery");
 {
@@ -499,7 +510,7 @@ heading("Unit — kernel discovery");
     // noexec — must find nothing rather than fall through to a real one.
     const whichDir = join(home, "stub-which");
     mkdirSync(whichDir, { recursive: true });
-    symlinkSync(spawnSync("sh", ["-c", "command -v which"], { encoding: "utf8" }).stdout.trim(), join(whichDir, "which"));
+    symlinkSync(systemWhich(), join(whichDir, "which"));
     const stubPath = `${stubDir}:${whichDir}`;
     const isolated = (fn) => {
       const saved = { ...process.env };
@@ -8017,7 +8028,7 @@ heading("Discovery spends no seat; doctor is the only route to wolframscript");
   // section's wolframscript fallback).
   const whichDir = join(home, "ws-which");
   mkdirSync(whichDir, { recursive: true });
-  symlinkSync(spawnSync("sh", ["-c", "command -v which"], { encoding: "utf8" }).stdout.trim(), join(whichDir, "which"));
+  symlinkSync(systemWhich(), join(whichDir, "which"));
   const env = {
     PATH: `${stubDir}:${whichDir}`,
     WOLFRAM_MCP_KERNEL: "",
