@@ -8247,6 +8247,50 @@ heading("A kernel on PATH is discoverable on its own");
     nullHint?.bin === realpathSync(join(dir, "wolfram")),
     nullHint instanceof Error ? nullHint.message : (nullHint?.bin ?? "null"),
   );
+  // Every entry on PATH, for a pin: a `wolfram` earlier on PATH hid a later one.
+  const later = join(home, "path-kernel-10000.4.0");
+  mkdirSync(later, { recursive: true });
+  writeFileSync(join(later, "wolfram"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const behind = discovering({ PATH: `${dir}:${later}:/usr/bin:/bin` }, () =>
+    lib.locateKernel({ version: "10000.4", log: () => {} }),
+  );
+  check(
+    "a pin matches a kernel later on PATH than another of the same name",
+    behind?.bin === realpathSync(join(later, "wolfram")),
+    behind?.bin ?? "null — only the first on PATH was seen",
+  );
+  // The version doctor recorded came from the kernel, so for its binary it
+  // outranks the path's guess: a pin for the path's version may not launch a
+  // kernel that reported another.
+  const hintAt = (bin, version) => {
+    const { mtimeMs, size } = statSync(bin);
+    const hint = join(lib.cacheDir(), "installations", "discovery-hint.json");
+    mkdirSync(dirname(hint), { recursive: true });
+    writeFileSync(hint, JSON.stringify({ bin, version, mtimeMs: Math.round(mtimeMs), size }));
+  };
+  const guessed = discovering({ PATH: `${dir}:/usr/bin:/bin` }, () => {
+    hintAt(realpathSync(join(dir, "wolfram")), "9999.9.9");
+    return lib.locateKernel({ version: "10000.0", log: () => {} });
+  });
+  check(
+    "a pin for a path's version does not match a kernel doctor recorded as another",
+    guessed === null,
+    guessed ? `${guessed.bin} version=${guessed.version}` : "null",
+  );
+  // A kernel that lost its execute bit keeps its size and mtime, so its hint
+  // still matched, and it was chosen and then failed to start.
+  const lapsed = join(home, "lapsed-10000.5.0", "wolfram");
+  mkdirSync(dirname(lapsed), { recursive: true });
+  writeFileSync(lapsed, "#!/bin/sh\nexit 0\n", { mode: 0o644 });
+  const notExecutable = discovering({ PATH: "/usr/bin:/bin" }, () => {
+    hintAt(lapsed, "10000.5.0");
+    return lib.locateKernel({ version: "10000.5", log: () => {} });
+  });
+  check(
+    "a recorded kernel that is no longer executable is not chosen",
+    notExecutable === null,
+    notExecutable?.bin ?? "null",
+  );
 }
 
 // ---------------------------------------------------------------------------
