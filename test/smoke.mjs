@@ -1279,6 +1279,58 @@ heading("A session's own directories stay that session's");
 }
 
 // ---------------------------------------------------------------------------
+// A broker widens each request's names to every one any session has declared,
+// so every kernel it starts after a name is first declared runs without it. A
+// kernel started before keeps the names it started with, and inherited the
+// broker's value for that one; a session declaring it unset has the same digest
+// as one that never declared it, and matched on the digest alone it was handed
+// that kernel (#180).
+heading("A kernel started before a name was declared is not handed to a session that strips it");
+{
+  wipeCache();
+  // Kernels a pool starts in this process inherit its environment, which holds
+  // no marker of its own: counted here, then put back.
+  const savedMarker = process.env.FAKE_MARKER;
+  process.env.FAKE_MARKER = marker;
+  const pool = new lib.KernelPool({
+    bin: fakeKernel,
+    serverName: "WolframLanguage",
+    idleMs: 60_000,
+    startTimeoutMs: 10_000,
+    clientInfo: { name: "smoke", version: "1.0.0" },
+    log: () => {},
+    reserveSeats: 0,
+    licence: { maxProcesses: "unknown", type: null },
+    learnFromKernels: false,
+  });
+  const eval1 = (client) =>
+    client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } });
+  const plain = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" });
+  const declaring = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage", WOLFRAM_MCP_KERNEL_ENV: "MY_MODE" });
+  // What the broker passes the pool once a session has declared MY_MODE: the
+  // request's own digest, and every name anybody declared.
+  const widened = (flavour) => ({ ...flavour, names: [...new Set([...flavour.names, ...declaring.names])] });
+  await pool.run(plain, eval1);
+  const before = startCount();
+  await pool.run(widened(declaring), eval1);
+  check(
+    "a session that declares a name gets a kernel started without it",
+    declaring.digest === plain.digest && startCount() === before + 1,
+    `same digest: ${declaring.digest === plain.digest}; ${startCount() - before} start(s)`,
+  );
+  const since = startCount();
+  await pool.run(widened(plain), eval1);
+  check(
+    "and that kernel serves a session that never declared it, whose names the broker widens alike",
+    startCount() === since,
+    `${startCount() - since} start(s)`,
+  );
+  await pool.stop();
+  if (savedMarker === undefined) delete process.env.FAKE_MARKER;
+  else process.env.FAKE_MARKER = savedMarker;
+}
+
+// ---------------------------------------------------------------------------
 // The broker's address and its kernels read WOLFRAMINIT with blank and an
 // unsubstituted `${...}` as unset; its licence read any non-blank value as an
 // entitlement, ignored the installation's cached licence, and started at one
