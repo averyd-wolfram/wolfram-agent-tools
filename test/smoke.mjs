@@ -3104,6 +3104,18 @@ if (socketsHere()) {
     over.dropped.length === 1 && /over \d+ characters/.test(over.dropped[0]) && over.frames.some((f) => f?.id === 8),
     `frames: ${JSON.stringify(over.frames)}; dropped: ${over.dropped.join(" | ")}`,
   );
+  // A valid frame over the cap, its newline in the chunk that crosses the cap
+  // or in the next one: whether it is read must not depend on the split.
+  const oversized = JSON.stringify({ id: 11, ok: true, result: "y".repeat(cap) });
+  const splits = [
+    read(oversized.slice(0, cap - 10), `${oversized.slice(cap - 10)}\n`),
+    read(oversized, "\n"),
+  ];
+  check(
+    "a valid frame over the cap is dropped and logged, whichever chunk its newline arrives in",
+    splits.every((r) => r.frames.length === 0 && r.dropped.length === 1 && /cap/.test(r.dropped[0])),
+    splits.map((r) => `read ${r.frames.length}, dropped: ${r.dropped.join(" | ") || "nothing"}`).join("; "),
+  );
   // BrokerBackend is public and takes its logger from its caller.
   const kept = [];
   const thrown = [];

@@ -504,6 +504,15 @@ export class FrameReader {
     while ((index = this.#buffer.indexOf("\n")) !== -1) {
       const line = this.#buffer.slice(0, index).trim();
       this.#buffer = this.#buffer.slice(index + 1);
+      // Ended or not, a frame over the cap is dropped: let through when its
+      // newline came in the chunk that crossed the cap, and dropped when it
+      // came in the next, it was read or not by how the socket split it.
+      if (index > MAX_UNTERMINATED_BYTES) {
+        this.#report(
+          `dropped a frame of ${index} characters, over the ${MAX_UNTERMINATED_BYTES} cap`,
+        );
+        continue;
+      }
       if (!line) continue;
       let frame: unknown;
       try {
@@ -519,10 +528,10 @@ export class FrameReader {
         // A frame its handler cannot take is not recoverable in-band either.
       }
     }
-    // Only what no newline has ended yet counts against the cap, after the
-    // frames ahead of it are taken: dropping the whole buffer took a reply that
-    // arrived in the same chunk with it. The rest of the frame is dropped as it
-    // arrives, since its tail parsed at that newline would read as another.
+    // After the frames ahead of it are taken: dropping the whole buffer took a
+    // reply that arrived in the same chunk with it. The rest of the frame is
+    // dropped as it arrives, since its tail parsed at that newline would read
+    // as another.
     if (this.#buffer.length > MAX_UNTERMINATED_BYTES) {
       this.#buffer = "";
       this.#skipping = true;
