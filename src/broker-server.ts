@@ -545,7 +545,7 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
     // routinely use the same number for different work.
     const inFlight = new Map<number, AbortController>();
     const state = connections.get(socket) ?? { flavour: null };
-    const reader = new FrameReader((frame) => {
+    const onFrame = (frame: unknown): void => {
       const request = frame as BrokerRequest;
       if (typeof request?.id !== "number") return;
       if (request.op === "cancel") {
@@ -619,7 +619,8 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
         .finally(() => {
           outstanding--;
         });
-    });
+    };
+    const reader = new FrameReader(onFrame, (why) => log(`proxy connection: ${why}`));
     socket.on("data", (chunk: string) => reader.push(chunk));
     socket.on("error", () => socket.destroy());
     socket.on("close", () => {

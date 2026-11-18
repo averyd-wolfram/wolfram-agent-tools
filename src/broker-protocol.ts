@@ -475,27 +475,83 @@ const MAX_UNTERMINATED_BYTES = 4 * 1024 * 1024;
 
 export class FrameReader {
   #buffer = "";
+  /** Inside a frame dropped for its size: the rest of it goes, up to its newline. */
+  #skipping = false;
 
-  constructor(private readonly onFrame: (frame: unknown) => void) {}
+  /**
+   * @param onDropped told of each frame dropped, and why, by its size alone:
+   * a frame holds a request or its result, which is no log's to keep. Dropped
+   * silently, a reply over the cap left its request to wait out its whole
+   * ceiling with nothing in either log to say why (#186).
+   */
+  constructor(
+    private readonly onFrame: (frame: unknown) => void,
+    private readonly onDropped: (why: string) => void = () => {},
+  ) {}
 
   push(chunk: string): void {
     this.#buffer += chunk;
-    if (this.#buffer.length > MAX_UNTERMINATED_BYTES) {
-      // Dropped whole: a partial frame is not JSON, and keeping the tail would
-      // only feed a corrupt line to the parser on the next newline.
-      this.#buffer = "";
-      return;
+    if (this.#skipping) {
+      const end = this.#buffer.indexOf("\n");
+      if (end === -1) {
+        this.#buffer = "";
+        return;
+      }
+      this.#buffer = this.#buffer.slice(end + 1);
+      this.#skipping = false;
     }
     let index: number;
     while ((index = this.#buffer.indexOf("\n")) !== -1) {
       const line = this.#buffer.slice(0, index).trim();
       this.#buffer = this.#buffer.slice(index + 1);
-      if (!line) continue;
-      try {
-        this.onFrame(JSON.parse(line));
-      } catch {
-        // A corrupt frame is not recoverable in-band; drop it and continue.
+      // Ended or not, a frame over the cap is dropped: let through when its
+      // newline came in the chunk that crossed the cap, and dropped when it
+      // came in the next, it was read or not by how the socket split it.
+      if (index > MAX_UNTERMINATED_BYTES) {
+        this.#report(
+          `dropped a frame of ${index} characters, over the ${MAX_UNTERMINATED_BYTES} cap`,
+        );
+        continue;
       }
+      if (!line) continue;
+      let frame: unknown;
+      try {
+        frame = JSON.parse(line);
+      } catch {
+        // Not the parser's message, which can quote the frame.
+        this.#report(`dropped a frame of ${line.length} characters that is not JSON`);
+        continue;
+      }
+      try {
+        this.onFrame(frame);
+      } catch {
+        // A frame its handler cannot take is not recoverable in-band either.
+      }
+    }
+    // After the frames ahead of it are taken: dropping the whole buffer took a
+    // reply that arrived in the same chunk with it. The rest of the frame is
+    // dropped as it arrives, since its tail parsed at that newline would read
+    // as another.
+    if (this.#buffer.length > MAX_UNTERMINATED_BYTES) {
+      this.#buffer = "";
+      this.#skipping = true;
+      this.#report(
+        `dropped a frame of over ${MAX_UNTERMINATED_BYTES} characters, ` +
+          `the cap, with no newline yet`,
+      );
+    }
+  }
+
+  /**
+   * After the state is settled, and never thrown past: `BrokerBackend` is public
+   * and takes its logger from the caller, and one that throws here left the cap
+   * unenforced or the frames behind this one unread.
+   */
+  #report(why: string): void {
+    try {
+      this.onDropped(why);
+    } catch {
+      // The drop stands; only its line is lost.
     }
   }
 }

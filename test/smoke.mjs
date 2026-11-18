@@ -3085,6 +3085,155 @@ heading("A session that stops closes a connection still draining, at once");
 }
 
 // ---------------------------------------------------------------------------
+// Dropped silently, a reply over the size cap left its request to wait out its
+// whole ceiling, with nothing in either log to say why (#186).
+heading("A frame either end cannot read is dropped and logged with its size (#186)");
+if (socketsHere()) {
+  // The session's end, against a stub broker that answers a call with a line
+  // that is not JSON, then a frame over the cap.
+  const unterminated = "x".repeat(4 * 1024 * 1024 + 1);
+  const stub = createServer((socket) => {
+    socket.setEncoding("utf8");
+    socket.on("error", () => socket.destroy());
+    const send = (text) => socket.writable && socket.write(text);
+    let buffered = "";
+    socket.on("data", (chunk) => {
+      buffered += chunk;
+      for (let at; (at = buffered.indexOf("\n")) !== -1; buffered = buffered.slice(at + 1)) {
+        const frame = JSON.parse(buffered.slice(0, at));
+        if (frame.op === "hello") {
+          send(`${JSON.stringify({ id: frame.id, ok: true, result: { flavours: true, flavour: frame.params?.digest } })}\n`);
+        } else if (frame.op === "ping") {
+          send(`${JSON.stringify({ id: frame.id, ok: true, result: {} })}\n`);
+        } else if (frame.op === "callTool") {
+          send(`not a frame\n${unterminated}`);
+        }
+      }
+    });
+  });
+  const stubAddress = join(privateDir(join(home, "run-dropped-frames-stub")), "broker.sock");
+  await listening(stub, stubAddress);
+  const sessionLog = [];
+  const backend = await lib.BrokerBackend.attachIfRunning({
+    address: stubAddress,
+    flavour: lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" }),
+    spawnCommand: join(home, "definitely-not-a-binary"),
+    spawnArgs: [],
+    spawnEnv: {},
+    log: (message) => sessionLog.push(message),
+  });
+  const call = backend
+    ?.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, { timeoutMs: 1_000 })
+    .catch(() => {});
+  const dropped = () => sessionLog.filter((m) => /dropped a frame/.test(m));
+  await until(() => dropped().length >= 2, 5_000);
+  check(
+    "the session logs a frame from the broker that is not JSON, by its size and not its content",
+    sessionLog.includes("broker connection: dropped a frame of 11 characters that is not JSON") &&
+      !sessionLog.some((m) => /not a frame/.test(m)),
+    dropped().join(" | ").slice(0, 160) || "nothing logged",
+  );
+  check(
+    "and a frame over the size cap",
+    sessionLog.some((m) => /^broker connection: dropped a frame of over \d+ characters, the cap, with no newline yet$/.test(m)),
+    dropped().join(" | ").slice(0, 160) || "nothing logged",
+  );
+  // Stopped first, which fails the call now rather than at its ceiling.
+  await backend?.stop();
+  await call;
+  stub.close();
+
+  // The broker's end, sent a line that is not JSON by a proxy.
+  const brokerLog = [];
+  const brokerAddress = join(privateDir(join(home, "run-dropped-frames-broker")), "broker.sock");
+  const broker = await lib.startBroker({
+    address: brokerAddress,
+    bin: fakeKernel,
+    serverName: "WolframLanguage",
+    idleMs: 60_000,
+    startTimeoutMs: 10_000,
+    reserveSeats: 0,
+    allowInspect: false,
+    clientInfo: { name: "smoke", version: "1.0.0" },
+    log: (message) => brokerLog.push(message),
+  });
+  const probe = connectSocket(brokerAddress);
+  probe.on("error", () => {});
+  probe.write("not a frame\n");
+  await until(() => brokerLog.some((m) => /dropped a frame/.test(m)), 5_000);
+  check(
+    "the broker logs a frame from a session that is not JSON, with its size",
+    brokerLog.includes("proxy connection: dropped a frame of 11 characters that is not JSON"),
+    brokerLog.find((m) => /dropped a frame/.test(m)) ?? "nothing logged",
+  );
+  probe.destroy();
+  await broker.stop();
+}
+{
+  // The reader alone, given its chunks exactly as a socket might split them.
+  const { FrameReader } = await import(join(root, "dist", "broker-protocol.js"));
+  const cap = 4 * 1024 * 1024;
+  const read = (...chunks) => {
+    const frames = [];
+    const dropped = [];
+    const reader = new FrameReader((frame) => frames.push(frame), (why) => dropped.push(why));
+    for (const chunk of chunks) reader.push(chunk);
+    return { frames, dropped };
+  };
+  // The chunk that crosses the cap also ends the frame and carries a reply.
+  const crossing = read("x".repeat(cap - 4), `xxxxxxxx\n${JSON.stringify({ id: 7, ok: true })}\n`);
+  check(
+    "a reply in the chunk that crosses the size cap is still read",
+    crossing.frames.some((f) => f?.id === 7),
+    `frames: ${JSON.stringify(crossing.frames)}; dropped: ${crossing.dropped.join(" | ")}`,
+  );
+  // A frame over the cap, its rest in later chunks, then a reply.
+  const over = read("x".repeat(cap + 1), "x".repeat(1000), `rest of it\n${JSON.stringify({ id: 8, ok: true })}\n`);
+  check(
+    "the rest of a frame over the cap is dropped with it, not reported as another, and a reply after it is read",
+    over.dropped.length === 1 && /over \d+ characters/.test(over.dropped[0]) && over.frames.some((f) => f?.id === 8),
+    `frames: ${JSON.stringify(over.frames)}; dropped: ${over.dropped.join(" | ")}`,
+  );
+  // A valid frame over the cap, its newline in the chunk that crosses the cap
+  // or in the next one: whether it is read must not depend on the split.
+  const oversized = JSON.stringify({ id: 11, ok: true, result: "y".repeat(cap) });
+  const splits = [
+    read(oversized.slice(0, cap - 10), `${oversized.slice(cap - 10)}\n`),
+    read(oversized, "\n"),
+  ];
+  check(
+    "a valid frame over the cap is dropped and logged, whichever chunk its newline arrives in",
+    splits.every((r) => r.frames.length === 0 && r.dropped.length === 1 && /cap/.test(r.dropped[0])),
+    splits.map((r) => `read ${r.frames.length}, dropped: ${r.dropped.join(" | ") || "nothing"}`).join("; "),
+  );
+  // BrokerBackend is public and takes its logger from its caller.
+  const kept = [];
+  const thrown = [];
+  const stubborn = new FrameReader(
+    (frame) => kept.push(frame),
+    () => {
+      throw new Error("a logger that throws");
+    },
+  );
+  for (const chunk of [
+    `not a frame\n${JSON.stringify({ id: 9, ok: true })}\n`,
+    "x".repeat(cap + 1),
+    `rest of it\n${JSON.stringify({ id: 10, ok: true })}\n`,
+  ]) {
+    try {
+      stubborn.push(chunk);
+    } catch (err) {
+      thrown.push(err.message);
+    }
+  }
+  check(
+    "a logger that throws loses only its own line: the frames after each drop are still read",
+    kept.map((f) => f?.id).join() === "9,10" && thrown.length === 0,
+    `read: ${kept.map((f) => f?.id).join() || "none"}; thrown: ${thrown.join(" | ") || "nothing"}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // The connection itself, against a stub broker that says shuttingDown as soon
 // as it is given a call. Retired, it keeps the socket until that call is
 // answered and closes it then; it takes no part in the session's capability
