@@ -1871,6 +1871,25 @@ heading("Re-reading the lists starts no kernel and grows no pool (#198)");
       check("once they are re-read, an answer re-reads nothing", afterReread === "tools/call", afterReread);
     }
 
+    // A cold list a kernel answered is kept, where nothing else filled the
+    // session's lists: with its kernel's start-time read failed, every later
+    // list went back to the backend, a kernel start where it had idled out.
+    {
+      const asked = [];
+      const client = await session(recording(asked, { relist: async () => null }));
+      await client.listTools();
+      await settle();
+      asked.length = 0;
+      const again = upstreamTools((await client.listTools()).tools).map((t) => t.name).join();
+      await settle();
+      await client.close();
+      check(
+        "a cold list a kernel answered is kept, so the next one asks the backend nothing",
+        again === "Older" && asked.length === 0,
+        `${again}; asked: ${asked.join(", ") || "nothing"}`,
+      );
+    }
+
     // A re-read answered after a kernel's start has moved the lists on must not
     // undo it with the lists of the older kernel it asked about.
     {
@@ -2016,6 +2035,48 @@ heading("Re-reading the lists starts no kernel and grows no pool (#198)");
       `${named(idled)}; ${count()} started, ${pool.running} running`,
     );
     await pool.stop();
+  }
+
+  // Two kernels of one source can list differently: one has since said its
+  // list changed. Asked for that source's lists, the pool answers the newest.
+  {
+    const { path, count } = counted("pool-two");
+    const sent = join(home, "198-pool-two-methods.log");
+    rmSync(sent, { force: true });
+    const pool = new lib.KernelPool({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 10_000,
+      clientInfo,
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 2, type: null },
+      licenceConfigured: true,
+      // A prompt never answers, and announces nothing; a call answers, and
+      // then its kernel gains a tool and says so.
+      extraEnv: { FAKE_MARKER: path, FAKE_METHOD_LOG: sent, FAKE_PROMPT_DELAY_MS: "-1", FAKE_ANNOUNCE_TOOL: "1" },
+    });
+    const lists = (source) =>
+      typeof pool.lists === "function" ? pool.lists(flavour, source) : "no lists";
+    const source = await pool.run(flavour, async (_client, _request, served) => served);
+    const held = pool
+      .run(flavour, (client, request) => client.getPrompt({ name: "Search", arguments: {} }, request), {
+        deadlineMs: 0,
+      })
+      .catch(() => {});
+    await until(() => methodLog(sent).includes("prompts/get"), 5_000);
+    await pool.run(flavour, (client, request) =>
+      client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, request),
+    );
+    const newest = await until(() => /ToolThatAppearedLater/.test(named(lists(source))), 5_000);
+    check(
+      "of two kernels of one source, the pool answers the lists of the one that changed since",
+      newest && count() === 2,
+      `${named(lists(source))}; ${count()} started`,
+    );
+    await pool.stop();
+    await held;
   }
 
   // A slot whose kernel idled out and restarted from another source, after a

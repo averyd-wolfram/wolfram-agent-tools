@@ -752,6 +752,14 @@ export function createWolframServer(
     // holds is exactly what the kernel reported and a refresh compares like
     // with like.
     const live = await backend.listTools();
+    // Kept where no refresh has filled the list: with the start-time read of
+    // this session's kernel failed, nothing else would, and every later list
+    // came back here, to a kernel (#198). In memory only, since the cache's
+    // entry holds prompts this read did not ask for; a refresh replaces it.
+    if (!toolCache && live.tools?.length) {
+      toolCache = live.tools;
+      toolCachedAt = Date.now();
+    }
     return { tools: [...(live.tools ?? []), STATUS_TOOL] };
   });
 

@@ -161,6 +161,8 @@ interface Slot {
    * re-read holds no kernel and starts none (#198).
    */
   lists?: KernelLists;
+  /** When `lists` were read, in the order the pool read any slot's. */
+  listsRead?: number;
 }
 
 interface Waiter {
@@ -221,6 +223,8 @@ interface Window {
 export class KernelPool {
   readonly #options: KernelPoolOptions;
   readonly #slots: Slot[] = [];
+  /** Lists read so far, any slot's: what orders them (`Slot.listsRead`). */
+  #listsRead = 0;
   readonly #waiters: Waiter[] = [];
   #budget: number;
   #licence: LicenceInfo;
@@ -312,11 +316,16 @@ export class KernelPool {
    * the lists' own source, not the slot's: a slot restarted from another
    * source, whose read then failed, still holds the lists of the one before.
    * Compared first, so `#mine` reads the disk only for a slot that could answer.
+   * The newest of them, since two kernels of one source can list differently,
+   * one having said since it started that its list changed.
    */
   lists(flavour: KernelFlavour, source: string): KernelLists | null {
-    return (
-      this.#slots.find((s) => s.lists?.source === source && this.#mine(s, flavour))?.lists ?? null
-    );
+    let newest: Slot | undefined;
+    for (const s of this.#slots) {
+      if (s.lists?.source !== source || (s.listsRead ?? 0) <= (newest?.listsRead ?? -1)) continue;
+      if (this.#mine(s, flavour)) newest = s;
+    }
+    return newest?.lists ?? null;
   }
   get licence(): LicenceInfo {
     return this.#licence;
@@ -412,7 +421,10 @@ export class KernelPool {
           );
         }
         const slot = this.#slots.find((s) => s.session === session);
-        if (slot) slot.lists = lists;
+        if (slot) {
+          slot.lists = lists;
+          slot.listsRead = ++this.#listsRead;
+        }
         await this.#options.onKernelLists?.(lists, flavour.digest);
       },
     });
