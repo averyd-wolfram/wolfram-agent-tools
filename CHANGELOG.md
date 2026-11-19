@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.5](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.2.4...v0.2.5) (2026-11-19)
+
+
+### Bug Fixes
+
+* re-read a session's lists from what the broker read as each kernel started, so a re-read starts no kernel and grows no pool ([#205](https://github.com/averyd-wolfram/wolfram-agent-tools/issues/205)) ([ec39d5e](https://github.com/averyd-wolfram/wolfram-agent-tools/commit/ec39d5e4d5e49f07ad6ddba3089be012e07929f0))
+
 ## [0.2.4](https://github.com/averyd-wolfram/wolfram-agent-tools/compare/v0.2.3...v0.2.4) (2026-11-19)
 
 
