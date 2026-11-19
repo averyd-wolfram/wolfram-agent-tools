@@ -45,7 +45,7 @@ import {
 import { deadlineDelay, DEFAULT_START_TIMEOUT_MS, timerDelay } from "./config.js";
 import type { KernelFlavour } from "./flavour.js";
 import { budgetText } from "./duration.js";
-import { DEFAULT_DEADLINE_MS, opsFrom, type KernelLists } from "./kernel.js";
+import { DEFAULT_DEADLINE_MS, opsFrom, RELIST_DEADLINE_MS, type KernelLists } from "./kernel.js";
 import { bareMcpText, errorText, type Logger } from "./log.js";
 import type { Deadline } from "./prepare.js";
 
@@ -818,7 +818,8 @@ export class BrokerBackend implements KernelBackend {
     return this.#request<PromptPage>("listPrompts", cursor ? { cursor } : undefined);
   }
   relist(): Promise<KernelLists | null> {
-    return this.#request<KernelLists | null>("relist");
+    // Its ceiling sent, so the broker holds the kernel to the same one.
+    return this.#request<KernelLists | null>("relist", undefined, RELIST_DEADLINE_MS);
   }
   getPrompt(
     params: GetPromptRequest["params"],

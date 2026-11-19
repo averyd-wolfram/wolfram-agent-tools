@@ -146,6 +146,13 @@ const SDK_REQUEST_TIMEOUT_MS = MAX_TIMER_MS;
 export const DEFAULT_DEADLINE_MS = 60_000;
 
 /**
+ * How long a re-read of a kernel's lists (`readLists`) is waited for: the
+ * minute each list had when they were read as requests of their own, so the
+ * tools a slow pair of lists read are not lost to one minute shared (#198).
+ */
+export const RELIST_DEADLINE_MS = 2 * DEFAULT_DEADLINE_MS;
+
+/**
  * The SDK options for a request to a kernel, and the only place they are built:
  * `run` hands them to the work it runs. Each request site built its own, so
  * only the two tool-call sites gave the timeout that cannot fire first, and
@@ -1080,8 +1087,8 @@ export class KernelSession {
   }
 
   /**
-   * `run`, but only on the kernel already up and holding no abandoned call, or
-   * `null` with nothing sent: never a start, a restart after an idle shutdown,
+   * `run`, but only on the kernel already up, free and holding no abandoned
+   * call, or `null` with nothing sent: never a start, a restart after an idle shutdown,
    * or the stop that takes a kernel back from abandoned work. For re-reading a
    * session's lists, which no kernel may be started or stopped for (#198).
    * Decided as its turn comes, since the kernel may have idled out, or been
@@ -1091,6 +1098,9 @@ export class KernelSession {
     fn: (client: Client, request: RequestOptions, source: string | undefined) => Promise<T>,
     options: RunOptions = {},
   ): Promise<T | null> {
+    // Busy, or with work queued, is not free: queued behind it, the re-read
+    // held up the calls after it, and one with no ceiling for good.
+    if (this.#inRun > 0) return null;
     try {
       return await this.#run(fn, options, true);
     } catch (err) {
@@ -1165,7 +1175,15 @@ export class KernelSession {
       dropIfCancelled();
       let client: Client;
       try {
-        client = await this.ensure();
+        // The kernel it was checked against, never `ensure`: one stopped while
+        // `#reclaim` yielded, by an idle shutdown or a pool stopping, would be
+        // started again, outside anything that tracks it.
+        if (upOnly) {
+          if (!this.#client) throw NOT_UP;
+          client = this.#client;
+        } else {
+          client = await this.ensure();
+        }
       } catch (err) {
         if (isKernelStartFailed(err)) {
           this.#failedStart = { err, upTo: this.#queued };

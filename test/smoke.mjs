@@ -1695,6 +1695,8 @@ heading("A list served from the cache asks the backend nothing, so it starts no 
     listResources: async () => (asked.push("resources/list"), { resources: [] }),
     readResource: async () => (asked.push("resources/read"), { contents: [] }),
     callTool: async () => (asked.push("tools/call"), { content: [] }),
+    // As a real backend has it, so a list that followed would be seen asking.
+    relist: async () => (asked.push("relist"), null),
     stop: async () => {},
   });
 
@@ -1860,9 +1862,20 @@ heading("Re-reading the lists starts no kernel and grows no pool (#198)");
       up === "WolframLanguageEvaluator" && count() === 1,
       `${up}; ${count()} started`,
     );
-    const abandoned = await local
-      .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, { timeoutMs: 300 })
+    // Its first call never answers, so it is busy until its ceiling, and then
+    // holds the call abandoned.
+    const call = local
+      .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, { timeoutMs: 1_000 })
       .then(() => "answered", (err) => String(err));
+    const askedAt = Date.now();
+    const whileBusy = named(await relist());
+    const waited = Date.now() - askedAt;
+    check(
+      "on one busy with a call, it answers nothing at once, rather than queue behind the call",
+      whileBusy === "null" && waited < 500 && count() === 1,
+      `${whileBusy} after ${waited}ms; ${count()} started`,
+    );
+    const abandoned = await call;
     const taken = named(await relist());
     check(
       "on one holding an abandoned call, it answers nothing and leaves the call running",
@@ -1878,6 +1891,43 @@ heading("Re-reading the lists starts no kernel and grows no pool (#198)");
       `${idled}; ${count()} started`,
     );
     await local.stop();
+  }
+
+  // A kernel stopped while a re-read waited for its turn, by an idle shutdown
+  // or a pool stopping, is not started again by it: checked, and then started
+  // by the turn's `ensure` after a yield, outside anything that tracked it.
+  // Stopped after each number of ticks in turn, so one lands in that yield.
+  {
+    const { path, count } = counted("stopped");
+    const session = new lib.KernelSession({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 10_000,
+      clientInfo,
+      log: () => {},
+      extraEnv: { FAKE_MARKER: path },
+    });
+    const list = (client, request) => client.listTools(undefined, request);
+    let started = 0;
+    for (let ticks = 0; ticks < 8; ticks++) {
+      await session.run(list);
+      started++;
+      const reread =
+        typeof session.runIfUp === "function" ? session.runIfUp(list) : Promise.resolve(null);
+      let after = Promise.resolve();
+      for (let tick = 0; tick < ticks; tick++) after = after.then(() => {});
+      await after.then(() => session.stop());
+      await reread.catch(() => {});
+    }
+    // Long enough for a start it set off to have written its marker.
+    await new Promise((r) => setTimeout(r, 500));
+    check(
+      "a kernel stopped while a re-read waited for its turn is not started again by it",
+      typeof session.runIfUp === "function" && count() === started,
+      `${count()} started for ${started}`,
+    );
+    await session.close();
   }
 
   // A pool: a re-read takes only a kernel of the flavour that is running and

@@ -53,6 +53,7 @@ import {
   KernelSession,
   listAllTools,
   readLists,
+  RELIST_DEADLINE_MS,
   RequestExpired,
   requestOptions,
   SessionClosed,
@@ -290,10 +291,10 @@ export class LocalBackend implements KernelBackend {
   }
 
   async relist(): Promise<KernelLists | null> {
-    return this.#session.runIfUp(async (c, request, source) => ({
-      ...(await readLists(c, request)),
-      source,
-    }));
+    return this.#session.runIfUp(
+      async (c, request, source) => ({ ...(await readLists(c, request)), source }),
+      { deadlineMs: RELIST_DEADLINE_MS },
+    );
   }
 
   attempt(): readonly SourceRead[] {

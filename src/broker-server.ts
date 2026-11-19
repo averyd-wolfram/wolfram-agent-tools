@@ -32,7 +32,14 @@ import {
   SOCKET_MODE,
 } from "./broker-protocol.js";
 import { settingValue, type KernelFlavour } from "./flavour.js";
-import { drainPages, listAllTools, readLists, requestOptions, type RunOptions } from "./kernel.js";
+import {
+  drainPages,
+  listAllTools,
+  readLists,
+  RELIST_DEADLINE_MS,
+  requestOptions,
+  type RunOptions,
+} from "./kernel.js";
 import { errorText, type Logger } from "./log.js";
 
 /** How long to linger with no connections before exiting. */
@@ -459,10 +466,14 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
         }
         // Only from a kernel already up and free, and null otherwise (#198).
         case "relist": {
-          const lists = await pool.runIfIdle(flavour, (c, options, served) => {
-            source = served;
-            return readLists(c, options);
-          });
+          const lists = await pool.runIfIdle(
+            flavour,
+            (c, options, served) => {
+              source = served;
+              return readLists(c, options);
+            },
+            { deadlineMs: request.timeoutMs ?? RELIST_DEADLINE_MS },
+          );
           return reply(lists && { ...lists, ...(source === undefined ? {} : { source }) });
         }
         case "listPrompts":
