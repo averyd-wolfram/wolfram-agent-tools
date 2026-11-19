@@ -45,7 +45,7 @@ import {
 import { deadlineDelay, DEFAULT_START_TIMEOUT_MS, timerDelay } from "./config.js";
 import type { KernelFlavour } from "./flavour.js";
 import { budgetText } from "./duration.js";
-import { DEFAULT_DEADLINE_MS } from "./kernel.js";
+import { DEFAULT_DEADLINE_MS, opsFrom, type KernelLists } from "./kernel.js";
 import { bareMcpText, errorText, type Logger } from "./log.js";
 import type { Deadline } from "./prepare.js";
 
@@ -78,6 +78,8 @@ const FROM_KERNEL: Record<BrokerOp, boolean> = {
   listResources: true,
   readResource: true,
   callTool: true,
+  // A kernel answers it, but only one already up: it starts none to wait for.
+  relist: false,
   cancel: false,
   status: false,
   hello: false,
@@ -617,20 +619,7 @@ export class BrokerBackend implements KernelBackend {
         // Answer from what the broker sent. Calling back through #request here
         // would re-enter the pool while the slot that raised the event is still
         // held, which grew the pool to the whole licence budget on one call.
-        const { capabilities, tools, prompts, promptsError, source } = frame;
-        void this.#onKernelReady?.({
-          source,
-          capabilities: async () => capabilities,
-          listTools: async (cursor) => (cursor ? this.listTools(cursor) : { tools }),
-          listPrompts: async (cursor) => {
-            if (cursor) return this.listPrompts(cursor);
-            // Refused, in the kernel's words, so the refresh keeps the list it
-            // has, as the private path's does when its own read fails. Answered
-            // as no prompts, it cached that empty list over a good one (#122).
-            if (promptsError !== undefined) throw new Error(promptsError);
-            return { prompts: prompts ?? [] };
-          },
-        });
+        void this.#onKernelReady?.(opsFrom(frame));
       }
       return;
     }
@@ -827,6 +816,9 @@ export class BrokerBackend implements KernelBackend {
   }
   listPrompts(cursor?: string): Promise<PromptPage> {
     return this.#request<PromptPage>("listPrompts", cursor ? { cursor } : undefined);
+  }
+  relist(): Promise<KernelLists | null> {
+    return this.#request<KernelLists | null>("relist");
   }
   getPrompt(
     params: GetPromptRequest["params"],

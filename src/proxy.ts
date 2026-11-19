@@ -31,7 +31,7 @@ import { doctorCommand } from "./doctor.js";
 import { budgetText, elapsedText, idleText, waitText } from "./duration.js";
 import { NOT_RESOLVED_ADVICE, type BackoffState } from "./prepare.js";
 import { readFacts } from "./inspect.js";
-import { drainPages } from "./kernel.js";
+import { drainPages, opsFrom } from "./kernel.js";
 import { exampleKernelPath, listKernels, locateKernel, type KernelInstall } from "./locate.js";
 import { bareMcpText, errorText, type Logger } from "./log.js";
 import { sessionSource } from "./server-source.js";
@@ -618,16 +618,12 @@ export function createWolframServer(
     let listedFrom = caps.prompts ? promptsFrom : source;
     if (caps.prompts) {
       try {
+        // Of the kernel that listed the tools: every refresh reads one kernel's
+        // lists, its own client's or already read in one hold on it (`opsFrom`).
+        // Asked apart, as three requests on a broker, they could come from two
+        // kernels an upgrade had come between, and one definition's prompts be
+        // cached under the other's (#6).
         const listed = await drainPrompts(ops);
-        // Asked apart from the tools, so on a broker possibly of a kernel an
-        // upgrade had replaced in between, or of one whose source is unknown:
-        // kept together, one definition's prompts would be cached under the
-        // other's (#6). Asked again on the next answer from a kernel instead.
-        if (listed.source !== source) {
-          log("the lists came from kernels started from different sources; re-reading later");
-          seen = undefined;
-          return;
-        }
         prompts = listed.prompts;
         listedFrom = listed.source;
         promptsSeen = true;
@@ -679,29 +675,45 @@ export function createWolframServer(
 
   backend.onKernelReady((ops) => reload(ops));
 
+  // A re-read in flight, which answers arriving meanwhile leave to finish.
+  let relisting = false;
+
   /**
    * Re-read the lists when the kernel that just answered was started from
    * another source than they came from: a broker hands a session whichever
    * kernel is current, and after a paclet upgrade that kernel serves the new
    * definition. A session that attached only for its first call reuses a
    * kernel another session started, and hears no `kernelReady`, so its client
-   * was held to the old tools for good (#3). Once per source, so a read that
-   * fails is not retried by every call; the next kernel start corrects it.
+   * was held to the old tools for good (#3).
+   *
+   * Only from a kernel already up and free (`relist`). Read as three ordinary
+   * requests, the re-read started a kernel after a request no kernel answered,
+   * once the last had idled out, and grew a broker's pool beside a kernel
+   * another session had busy, to list tools (#198). With none free, nothing is
+   * marked, so the next answer asks again. Once per source otherwise, so a read
+   * that fails is not retried by every call; the next kernel start corrects it.
    */
   function follow(): void {
     const served = backend.servedFrom?.();
-    if (served === undefined || served === seen) return;
-    seen = served;
-    log("a kernel started from another server source answered; re-reading the lists");
-    // Each list says which kernel it came from, so nothing is read here from
-    // whichever answer happened to arrive last.
-    void reload({
-      capabilities: () => backend.capabilities(),
-      listTools: (cursor) => backend.listTools(cursor),
-      listPrompts: (cursor) => backend.listPrompts(cursor),
-    }).catch((err: unknown) => {
-      log(`re-reading the lists failed, keeping them: ${errorText(err)}`);
-    });
+    if (served === undefined || served === seen || relisting || !backend.relist) return;
+    relisting = true;
+    void backend
+      .relist()
+      .then(
+        async (lists) => {
+          if (lists === null) return;
+          seen = served;
+          log("a kernel started from another server source answered; re-reading the lists");
+          await reload(opsFrom(lists));
+        },
+        (err: unknown) => {
+          seen = served;
+          log(`re-reading the lists failed, keeping them: ${errorText(err)}`);
+        },
+      )
+      .finally(() => {
+        relisting = false;
+      });
   }
 
   fromKernel(ListToolsRequestSchema, async (_request, extra) => {

@@ -67,6 +67,13 @@ export type BrokerOp =
   | "cancel"
   | "status"
   /**
+   * What are the lists, on a kernel of this session's flavour that is already
+   * up and free? Answered with what `kernelReady` carries, or null where no
+   * kernel is: never a start, a growth or a wait (#198). A new op, not a new
+   * frame shape, so `BROKER_PROTOCOL` is unchanged.
+   */
+  | "relist"
+  /**
    * What environment were this broker's kernels started with?
    *
    * Answered with the flavour digest from `flavour.ts`, so a proxy can tell

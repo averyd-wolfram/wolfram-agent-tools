@@ -277,7 +277,10 @@ a request queued before a paclet upgrade and served after it still gets a kernel
 after it. Every answer a broker sends carries its kernel's source, and so does `kernelReady`:
 a session whose lists came from another source re-reads them and relays `list_changed` —
 the one that attached only for its first call, to a kernel another session started, hears no
-`kernelReady` — and a list is cached under the source of the kernel that produced it.
+`kernelReady` — and a list is cached under the source of the kernel that produced it. The
+re-read is one `relist`, both lists read in one hold on a kernel already up and free, and
+nothing where none is: read as ordinary requests, it started a kernel, or grew a broker's
+pool, to list tools (#198).
 Found by the first downstream plugin (#3): a broker about 25 minutes old served a paclet's six
 tools to a session started after the paclet gained two, and the client refused the new ones.
 
@@ -353,7 +356,7 @@ immediately, because its canned reply does not parse.
 
 **Sharing is never a dependency.** Any failure to reach or start a broker falls back to a
 private kernel, with the reason logged. It is an optimisation of a scarce resource, not a
-requirement for the server to work. Two failures do not fall back, deliberately:
+requirement for the server to work. Three failures do not fall back, deliberately:
 - **A start deadline spent attaching to the broker or waiting for it to prepare** is backed
   off like any stage that ran out of time, naming the stage. A private kernel started with no
   time left would spend a second seat only to fail.
@@ -361,6 +364,10 @@ requirement for the server to work. Two failures do not fall back, deliberately:
   have run: one sent to a broker that goes, or one whose reply is too long for the socket,
   which the broker answers at once with an error naming its length. One the broker never read
   could be sent again safely, which is #102.
+- **A session's re-read of its lists** (`relist`), after an answer from a kernel of another
+  source (#3), is answered only by a kernel already up and free, on either path, and is
+  otherwise left to the next answer. Falling back would start a private kernel, or prepare a
+  broker, to list tools, which is what the re-read exists not to do (#198).
 
 A frame either end receives that is not JSON, or is over the socket's cap, is dropped and
 logged by its size, never its content, and neither end sends one over it (#200). What decides

@@ -10,7 +10,7 @@
  */
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
-import { McpError, type Prompt, type ServerCapabilities } from "@modelcontextprotocol/sdk/types.js";
+import { McpError, type ServerCapabilities } from "@modelcontextprotocol/sdk/types.js";
 import { createServer, type Server, type Socket } from "node:net";
 import { randomBytes } from "node:crypto";
 import { linkSync, statSync, unlinkSync } from "node:fs";
@@ -32,7 +32,7 @@ import {
   SOCKET_MODE,
 } from "./broker-protocol.js";
 import { settingValue, type KernelFlavour } from "./flavour.js";
-import { drainPages, listAllTools, requestOptions, type RunOptions } from "./kernel.js";
+import { drainPages, listAllTools, readLists, requestOptions, type RunOptions } from "./kernel.js";
 import { errorText, type Logger } from "./log.js";
 
 /** How long to linger with no connections before exiting. */
@@ -338,41 +338,16 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
     const audience = [...connections.values()].filter((s) => s.flavour?.digest === flavour);
     if (audience.length === 0) return; // nobody to tell; the cache will do
     try {
-      const capabilities = client.getServerCapabilities() ?? {};
-      // Whole lists, so a broadcast carries every page, not page one.
       // This server's request options, as `pool.run` gives every other request:
       // with the SDK's own, a slow list was cancelled at 60 s (#70). And nothing
-      // new once the start has stopped waiting for this (`late`).
-      const tools = await listAllTools(client, requestOptions(), late);
-      // Read apart from the tools, so a failure costs the prompts alone. Read
-      // together, any failure of prompts/list lost the whole broadcast, and a
-      // cold machine's cache stayed cold until the next kernel start (#122).
-      // The failure goes with the tools, so a proxy keeps the prompts it has.
-      let prompts: Prompt[] | null = null;
-      let promptsError: string | undefined;
-      if (capabilities.prompts) {
-        try {
-          prompts = await drainPages<Prompt>(async (cursor) => {
-            const page = await client.listPrompts(
-              cursor ? { cursor } : undefined,
-              requestOptions(),
-            );
-            return { items: page.prompts ?? [], nextCursor: page.nextCursor };
-          }, late);
-        } catch (err) {
-          promptsError = errorText(err);
-          log(`could not read the new kernel's prompts; sessions keep theirs: ${promptsError}`);
-        }
+      // new once the start has stopped waiting for this (`late`). A failure of
+      // the prompts goes with the tools, so a proxy keeps the prompts it has.
+      const lists = await readLists(client, requestOptions(), late);
+      if (lists.promptsError !== undefined) {
+        log(`could not read the new kernel's prompts; sessions keep theirs: ${lists.promptsError}`);
       }
       broadcast(
-        {
-          event: "kernelReady",
-          capabilities,
-          tools,
-          prompts,
-          ...(promptsError === undefined ? {} : { promptsError }),
-          ...(source === undefined ? {} : { source }),
-        },
+        { event: "kernelReady", ...lists, ...(source === undefined ? {} : { source }) },
         flavour,
       );
     } catch (err) {
@@ -481,6 +456,14 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
             return listAllTools(c, options);
           });
           return reply({ tools, source, capabilities });
+        }
+        // Only from a kernel already up and free, and null otherwise (#198).
+        case "relist": {
+          const lists = await pool.runIfIdle(flavour, (c, options, served) => {
+            source = served;
+            return readLists(c, options);
+          });
+          return reply(lists && { ...lists, ...(source === undefined ? {} : { source }) });
         }
         case "listPrompts":
           return reply({

@@ -1737,6 +1737,291 @@ heading("A list served from the cache asks the backend nothing, so it starts no 
 }
 
 // ---------------------------------------------------------------------------
+heading("Re-reading the lists starts no kernel and grows no pool (#198)");
+{
+  // `follow` re-reads the lists when a kernel of another source answered (#3).
+  // It read them as three ordinary requests, any of which could start a kernel
+  // or grow a broker's pool just to list tools: after a request no kernel
+  // answered, once the backend's last kernel had idled out; and on a broker
+  // whose kernel another session had busy. Now it asks once, for `relist`,
+  // which a kernel already up and free answers, and nothing else does.
+  const clientInfo = { name: "smoke", version: "1.0.0" };
+  const flavour = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" });
+  const named = (lists) =>
+    lists === null ? "null" : typeof lists === "string" ? lists : upstreamTools(lists?.tools ?? []).map((t) => t.name).join();
+  // Each part counts its own starts.
+  const counted = (tag) => {
+    const path = join(home, `198-${tag}-starts.log`);
+    rmSync(path, { force: true });
+    return { path, count: () => starts(path) };
+  };
+
+  // The proxy, against a backend that records what it is asked: any request
+  // but `relist` and the call itself stands for a kernel a real one could start.
+  {
+    const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+    wipeCache();
+    const config = {
+      ...lib.loadConfig(() => {}),
+      kernelPath: fakeKernel,
+      serverName: "WolframLanguage",
+      inspect: false,
+      cacheEnabled: false,
+      flavour,
+    };
+    const asked = [];
+    // What each `relist` answers in turn; null once these run out, as when no
+    // kernel is up and free.
+    const relisted = [];
+    const lists = {
+      capabilities: { tools: {} },
+      tools: [{ name: "Demo", inputSchema: { type: "object" } }],
+      prompts: null,
+      source: "elsewhere",
+    };
+    let failing = false;
+    const stub = {
+      kind: "local",
+      servedFrom: () => "elsewhere",
+      onKernelReady: () => {},
+      capabilities: async () => (asked.push("capabilities"), lists.capabilities),
+      listTools: async () => (asked.push("tools/list"), { tools: lists.tools, source: "elsewhere" }),
+      listPrompts: async () => (asked.push("prompts/list"), { prompts: [], source: "elsewhere" }),
+      getPrompt: async () => (asked.push("prompts/get"), { messages: [] }),
+      listResources: async () => (asked.push("resources/list"), { resources: [] }),
+      readResource: async () => (asked.push("resources/read"), { contents: [] }),
+      callTool: async () => {
+        asked.push("tools/call");
+        if (failing) throw new Error("no kernel answered");
+        return { content: [] };
+      },
+      relist: async () => (asked.push("relist"), relisted.shift() ?? null),
+      stop: async () => {},
+    };
+    const { server } = lib.createWolframServer(config, () => {}, () => stub);
+    const client = new Client({ name: "smoke", version: "1.0.0" }, { capabilities: {} });
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverSide);
+    await client.connect(clientSide);
+    // What one call, and whatever its answer set off, asked of the backend.
+    const askedBy = async () => {
+      asked.length = 0;
+      await client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } });
+      await new Promise((r) => setTimeout(r, 150));
+      return asked.join(", ");
+    };
+    failing = true;
+    const afterFailure = await askedBy();
+    failing = false;
+    const afterNothingFree = await askedBy();
+    relisted.push(lists);
+    await askedBy();
+    const afterReread = await askedBy();
+    await client.close();
+    check(
+      "a call no kernel answered re-reads the lists only from a kernel already up and free",
+      afterFailure === "tools/call, relist",
+      afterFailure,
+    );
+    check(
+      "and with none free, the next answer asks again",
+      afterNothingFree === "tools/call, relist",
+      afterNothingFree,
+    );
+    check("once they are re-read, an answer re-reads nothing", afterReread === "tools/call", afterReread);
+  }
+
+  // A private kernel: a re-read never starts it, restarts it after an idle
+  // shutdown, or stops one holding an abandoned call to take it back.
+  {
+    const { path, count } = counted("private");
+    const logged = [];
+    const local = new lib.LocalBackend({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 1_500,
+      startTimeoutMs: 10_000,
+      clientInfo,
+      log: (line) => logged.push(line),
+      // Each kernel's first call never answers.
+      extraEnv: { FAKE_MARKER: path, FAKE_CALL_DELAY_MS: "-1", FAKE_DELAY_FIRST_ONLY: "1" },
+    });
+    const relist = () => (typeof local.relist === "function" ? local.relist() : Promise.resolve("no relist"));
+    const never = named(await relist());
+    check(
+      "on a private kernel never started, a re-read answers nothing and starts none",
+      never === "null" && count() === 0,
+      `${never}; ${count()} started`,
+    );
+    await local.listTools();
+    const up = named(await relist());
+    check(
+      "on one up and free, it answers that kernel's lists",
+      up === "WolframLanguageEvaluator" && count() === 1,
+      `${up}; ${count()} started`,
+    );
+    const abandoned = await local
+      .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, { timeoutMs: 300 })
+      .then(() => "answered", (err) => String(err));
+    const taken = named(await relist());
+    check(
+      "on one holding an abandoned call, it answers nothing and leaves the call running",
+      taken === "null" && count() === 1 && !logged.some((l) => /abandoned call has not finished; stopping it/.test(l)),
+      `${taken}; ${count()} started; the call: ${abandoned.slice(0, 80)}`,
+    );
+    await local.listTools();
+    await until(() => logged.some((l) => /shutting the kernel down/.test(l)), 5_000);
+    const idled = named(await relist());
+    check(
+      "on one stopped for idleness, it answers nothing and starts none",
+      idled === "null" && count() === 2,
+      `${idled}; ${count()} started`,
+    );
+    await local.stop();
+  }
+
+  // A pool: a re-read takes only a kernel of the flavour that is running and
+  // free. Never a slot whose kernel idled out, which the take tier restarts;
+  // never a growth, a swap or a wait.
+  {
+    const { path, count } = counted("pool");
+    const pool = new lib.KernelPool({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 1_500,
+      startTimeoutMs: 10_000,
+      clientInfo,
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 2, type: null },
+      licenceConfigured: true,
+      // Every call never answers.
+      extraEnv: { FAKE_MARKER: path, FAKE_CALL_DELAY_MS: "-1" },
+    });
+    const list = (client, request) => client.listTools(undefined, request);
+    const relist = () =>
+      typeof pool.runIfIdle === "function" ? pool.runIfIdle(flavour, list) : Promise.resolve("no runIfIdle");
+    const empty = named(await relist());
+    check("in an empty pool, a re-read answers nothing and starts none", empty === "null" && count() === 0, `${empty}; ${count()} started`);
+    await pool.run(flavour, list);
+    const free = named(await relist());
+    check("with a kernel free, it is answered there", free === "WolframLanguageEvaluator" && count() === 1, `${free}; ${count()} started`);
+    const held = pool
+      .run(flavour, (client, request) => client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, undefined, request), { deadlineMs: 0 })
+      .catch(() => {});
+    await until(() => pool.busy === 1, 5_000);
+    const busy = named(await relist());
+    check(
+      "with the only kernel busy and a seat to spare, it answers nothing and grows none",
+      busy === "null" && count() === 1 && pool.running === 1,
+      `${busy}; ${count()} started, ${pool.running} running, budget ${pool.budget}`,
+    );
+    await pool.run(flavour, list);
+    check("where an ordinary request grows one", count() === 2, `${count()} started`);
+    await until(() => pool.running === 1, 5_000);
+    const stopped = named(await relist());
+    check(
+      "and once that one has idled out, it answers nothing and restarts none",
+      stopped === "null" && count() === 2,
+      `${stopped}; ${count()} started, ${pool.running} running`,
+    );
+    await pool.stop();
+    await held;
+  }
+
+  // A session that has chosen no backend, or whose backend has gone, re-reads
+  // nothing rather than preparing one to do it: a private kernel or a broker.
+  {
+    let prepared = 0;
+    let gone = false;
+    const made = () => ({
+      kind: "local",
+      capabilities: async () => ({}),
+      listTools: async () => ({ tools: [] }),
+      listPrompts: async () => ({ prompts: [] }),
+      relist: async () => ({ capabilities: {}, tools: [], prompts: null }),
+      onKernelReady: () => {},
+      usable: () => !gone,
+      stop: async () => {},
+    });
+    const deferred = new lib.DeferredBackend(async () => (prepared++, made()), () => {}, { startTimeoutMs: 1_000 });
+    const relist = () => (typeof deferred.relist === "function" ? deferred.relist() : Promise.resolve("no relist"));
+    const unchosen = named(await relist());
+    check("a session with no backend chosen re-reads nothing, and prepares none", unchosen === "null" && prepared === 0, `${unchosen}; ${prepared} prepared`);
+    await deferred.listTools();
+    gone = true;
+    const lost = named(await relist());
+    check("nor does one whose backend has gone", lost === "null" && prepared === 1, `${lost}; ${prepared} prepared`);
+    await deferred.stop();
+  }
+
+  // The broker's `relist`: answered by a kernel of the session's flavour that
+  // is up and free, and null rather than a growth while the only one is busy.
+  if (socketsHere("the broker's relist")) {
+    const { path, count } = counted("broker");
+    const saved = { FAKE_MARKER: process.env.FAKE_MARKER, FAKE_CALL_DELAY_MS: process.env.FAKE_CALL_DELAY_MS };
+    process.env.FAKE_MARKER = path;
+    process.env.FAKE_CALL_DELAY_MS = "-1";
+    const address = join(privateDir(join(home, "run-198")), "broker.sock");
+    let broker = null;
+    let client = null;
+    let held = Promise.resolve();
+    try {
+      broker = await lib.startBroker({
+        address,
+        bin: fakeKernel,
+        serverName: "WolframLanguage",
+        idleMs: 60_000,
+        startTimeoutMs: 10_000,
+        reserveSeats: 0,
+        licenceOverride: 2,
+        allowInspect: false,
+        clientInfo,
+        log: () => {},
+      });
+      client = await lib.BrokerBackend.attachIfRunning({
+        address,
+        flavour,
+        spawnCommand: join(home, "definitely-not-a-binary"),
+        spawnArgs: [],
+        spawnEnv: {},
+        log: () => {},
+      });
+      const relist = () => (typeof client?.relist === "function" ? client.relist() : Promise.resolve("no relist"));
+      const cold = named(await relist());
+      check("a broker with no kernel answers a re-read with nothing, and starts none", cold === "null" && count() === 0, `${cold}; ${count()} started`);
+      held = client
+        .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, { timeoutMs: 0 })
+        .catch(() => {});
+      // Started, as its marker says, and held by the call.
+      await until(async () => count() === 1 && (await client.status(5_000)).busy === 1, 5_000);
+      const busy = named(await relist());
+      const status = await client.status(5_000);
+      check(
+        "one whose only kernel is busy answers nothing, with a seat to spare, and grows none",
+        busy === "null" && count() === 1 && status.kernels === 1,
+        `${busy}; ${count()} started, ${status.kernels} running, budget ${status.budget}`,
+      );
+      await client.listTools();
+      const free = await relist();
+      check(
+        "and one with a kernel free answers its lists, and where it was started from",
+        named(free) === "WolframLanguageEvaluator" && typeof free?.source === "string" && count() === 2,
+        `${named(free)}; source ${free?.source}; ${count()} started`,
+      );
+    } finally {
+      for (const [name, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      await client?.stop();
+      await broker?.stop?.();
+      await held;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 heading("Regression — a stale cache must be corrected on kernel start");
 {
   wipeCache();

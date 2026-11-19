@@ -30,8 +30,10 @@ import {
   type ListToolsResult,
   type Prompt,
   type Resource,
+  type ServerCapabilities,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
+import type { DirectOps } from "./backend.js";
 import { deadlineDelay, MAX_TIMER_MS, timerDelay } from "./config.js";
 import { LIST_CAP } from "./broker-protocol.js";
 import { FilteringStdioTransport } from "./transport.js";
@@ -387,6 +389,66 @@ export function listAllTools(
 }
 
 /**
+ * A kernel's lists, read in one hold on it: what a broker's `kernelReady`
+ * carries, and what a session re-reading its lists is answered (`relist`).
+ */
+export interface KernelLists {
+  capabilities: ServerCapabilities;
+  tools: Tool[];
+  /** Null when the kernel does not advertise prompts, or they could not be read. */
+  prompts: Prompt[] | null;
+  /** Why they could not be, in the kernel's words (#122). */
+  promptsError?: string | undefined;
+  /** What the kernel was started from (`KernelSession.source`), where known. */
+  source?: string | undefined;
+}
+
+/**
+ * Read a kernel's lists under the hold the caller has. The prompts apart from
+ * the tools, so a failure costs the prompts alone: read together, any failure
+ * of prompts/list lost the tools as well, and a cold machine's cache stayed
+ * cold until the next kernel start (#122).
+ */
+export async function readLists(
+  client: Client,
+  request: RequestOptions,
+  stop?: AbortSignal,
+): Promise<KernelLists> {
+  const capabilities = client.getServerCapabilities() ?? {};
+  const tools = await listAllTools(client, request, stop);
+  if (!capabilities.prompts) return { capabilities, tools, prompts: null };
+  try {
+    const prompts = await drainPages<Prompt>(async (cursor) => {
+      const page = await client.listPrompts(cursor ? { cursor } : undefined, request);
+      return { items: page.prompts ?? [], nextCursor: page.nextCursor };
+    }, stop);
+    return { capabilities, tools, prompts };
+  } catch (err) {
+    return { capabilities, tools, prompts: null, promptsError: errorText(err) };
+  }
+}
+
+/**
+ * Lists already read, as the operations a refresh reads them through, so it
+ * asks no kernel for them again. A failed read of the prompts is refused in the
+ * kernel's words, so the refresh keeps the prompts it has, as it does when its
+ * own read fails: answered as no prompts, it cached that empty list over a good
+ * one (#122).
+ */
+export function opsFrom(lists: KernelLists): DirectOps {
+  const { capabilities, tools, prompts, promptsError, source } = lists;
+  return {
+    source,
+    capabilities: async () => capabilities,
+    listTools: async () => ({ tools }),
+    listPrompts: async () => {
+      if (promptsError !== undefined) throw new Error(promptsError);
+      return { prompts: prompts ?? [] };
+    },
+  };
+}
+
+/**
  * Before a ready hook sends anything new: once the start has stopped waiting
  * for it (`KernelSessionOptions.onReady`'s `late`), nothing more is asked.
  */
@@ -440,6 +502,9 @@ export class RequestExpired extends RequestDropped {
     this.name = "RequestExpired";
   }
 }
+
+/** `runIfUp`'s turn, finding no kernel up and free: never seen outside the session. */
+const NOT_UP = new Error("no kernel is up and free");
 
 /** How a single unit of work is to be run. */
 export interface RunOptions {
@@ -1011,6 +1076,34 @@ export class KernelSession {
     fn: (client: Client, request: RequestOptions, source: string | undefined) => Promise<T>,
     options: RunOptions = {},
   ): Promise<T> {
+    return this.#run(fn, options, false);
+  }
+
+  /**
+   * `run`, but only on the kernel already up and holding no abandoned call, or
+   * `null` with nothing sent: never a start, a restart after an idle shutdown,
+   * or the stop that takes a kernel back from abandoned work. For re-reading a
+   * session's lists, which no kernel may be started or stopped for (#198).
+   * Decided as its turn comes, since the kernel may have idled out, or been
+   * left an abandoned call, while it queued.
+   */
+  async runIfUp<T>(
+    fn: (client: Client, request: RequestOptions, source: string | undefined) => Promise<T>,
+    options: RunOptions = {},
+  ): Promise<T | null> {
+    try {
+      return await this.#run(fn, options, true);
+    } catch (err) {
+      if (err === NOT_UP) return null;
+      throw err;
+    }
+  }
+
+  async #run<T>(
+    fn: (client: Client, request: RequestOptions, source: string | undefined) => Promise<T>,
+    options: RunOptions,
+    upOnly: boolean,
+  ): Promise<T> {
     const ticket = ++this.#queued;
     this.#inRun++;
     // The caller's ceiling, counted from where the request arrived (#80): a
@@ -1043,6 +1136,7 @@ export class KernelSession {
     const task = this.#queue.then(async () => {
       // Answered at its ceiling while it waited: its turn starts nothing.
       if (expired || pastDeadline()) throw expire();
+      if (upOnly && (!this.running || this.abandoned)) throw NOT_UP;
       // Queued behind a start that failed: that failure is this call's too. It
       // was never sent, so its caller may send it again, as a new call.
       const failed = this.#failedStart;

@@ -889,8 +889,33 @@ export class KernelPool {
       throw new RequestExpired(options.deadlineMs ?? 0);
     }
     const slot = await this.#acquire(flavour, options);
+    return this.#runOn(slot, () => slot.session.run(fn, options));
+  }
+
+  /**
+   * `run`, on a kernel of this flavour that is running and free, or `null` with
+   * nothing run: never a start, a growth, a swap, a wait, or the take tier's
+   * slot whose kernel idled out, which restarts it. For re-reading a session's
+   * lists, which no kernel may be started for: as three ordinary requests, the
+   * re-read grew the pool beside a kernel another session had busy (#198).
+   * Nothing here is an error, so a healthy kernel is never quarantined for it.
+   */
+  async runIfIdle<T>(
+    flavour: KernelFlavour,
+    fn: (client: Client, request: RequestOptions, source: string | undefined) => Promise<T>,
+    options: RunOptions = {},
+  ): Promise<T | null> {
+    // `#servable` as the refusal window reads it: a kernel that is running.
+    const slot = this.#slots.find((s) => this.#servable(s, flavour, true));
+    if (!slot) return null;
+    slot.busy = true;
+    return this.#runOn(slot, () => slot.session.runIfUp(fn, options));
+  }
+
+  /** Hold `slot` for `work`, and give it back, or vouch for it, as `work` ends. */
+  async #runOn<T>(slot: Slot, work: () => Promise<T>): Promise<T> {
     try {
-      const result = await slot.session.run(fn, options);
+      const result = await work();
       this.#release(slot);
       return result;
     } catch (err) {

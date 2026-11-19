@@ -52,10 +52,12 @@ import {
   isServerNotResolved,
   KernelSession,
   listAllTools,
+  readLists,
   RequestExpired,
   requestOptions,
   SessionClosed,
   stopIfLate,
+  type KernelLists,
 } from "./kernel.js";
 import { elapsedText, waitText } from "./duration.js";
 import type { KernelInstall } from "./locate.js";
@@ -178,6 +180,14 @@ export interface KernelBackend {
    */
   servedFrom?(): string | undefined;
   /**
+   * The lists, read in one hold on a kernel of this session's that is already
+   * up and free, or `null` where there is none: never a start, a growth of a
+   * pool, or a preparation. What the proxy re-reads its lists with when a
+   * kernel of another source answered (#3): as three ordinary requests, the
+   * re-read started a kernel, or grew a broker's pool, to list tools (#198).
+   */
+  relist?(): Promise<KernelLists | null>;
+  /**
    * What this backend's latest kernel start began from, and where it was read,
    * whether or not it succeeded: a failed start is backed off until that
    * changes, not until whatever is on disk when the failure is recorded does.
@@ -277,6 +287,13 @@ export class LocalBackend implements KernelBackend {
 
   servedFrom(): string | undefined {
     return this.#session.source;
+  }
+
+  async relist(): Promise<KernelLists | null> {
+    return this.#session.runIfUp(async (c, request, source) => ({
+      ...(await readLists(c, request)),
+      source,
+    }));
   }
 
   attempt(): readonly SourceRead[] {
@@ -516,6 +533,19 @@ export class DeferredBackend implements KernelBackend {
 
   servedFrom(): string | undefined {
     return this.#resolved?.servedFrom?.();
+  }
+
+  /**
+   * The chosen backend's re-read, or `null` where none is chosen or it has gone:
+   * never a preparation, which would start a private kernel, or a broker, to
+   * list tools (#198). Nor a fallback to a private kernel when the broker
+   * fails it: the lists are re-read on the next answer from a kernel instead.
+   */
+  async relist(): Promise<KernelLists | null> {
+    const backend = this.#resolved;
+    await backend?.settled?.();
+    if (!backend || backend !== this.#resolved || backend.usable?.() === false) return null;
+    return (await backend.relist?.()) ?? null;
   }
 
   backoff(): BackoffState | null {
