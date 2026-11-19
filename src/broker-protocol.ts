@@ -67,6 +67,14 @@ export type BrokerOp =
   | "cancel"
   | "status"
   /**
+   * What lists did a kernel of this session's flavour give as it started from
+   * `params.source`? Answered with what `kernelReady` carried, from memory, or
+   * null where none is known: no kernel is held, started or grown (#198). A new
+   * op, not a new frame shape, so `BROKER_PROTOCOL` is unchanged; a broker too
+   * old to know it refuses it, which the client takes as nothing known.
+   */
+  | "relist"
+  /**
    * What environment were this broker's kernels started with?
    *
    * Answered with the flavour digest from `flavour.ts`, so a proxy can tell

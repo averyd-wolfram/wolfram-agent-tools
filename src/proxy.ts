@@ -31,7 +31,7 @@ import { doctorCommand } from "./doctor.js";
 import { budgetText, elapsedText, idleText, waitText } from "./duration.js";
 import { NOT_RESOLVED_ADVICE, type BackoffState } from "./prepare.js";
 import { readFacts } from "./inspect.js";
-import { drainPages } from "./kernel.js";
+import { drainPages, opsFrom } from "./kernel.js";
 import { exampleKernelPath, listKernels, locateKernel, type KernelInstall } from "./locate.js";
 import { bareMcpText, errorText, type Logger } from "./log.js";
 import { sessionSource } from "./server-source.js";
@@ -618,16 +618,12 @@ export function createWolframServer(
     let listedFrom = caps.prompts ? promptsFrom : source;
     if (caps.prompts) {
       try {
+        // Of the kernel that listed the tools: every refresh reads one kernel's
+        // lists, its own client's or already read in one hold on it (`opsFrom`).
+        // Asked apart, as three requests on a broker, they could come from two
+        // kernels an upgrade had come between, and one definition's prompts be
+        // cached under the other's (#6).
         const listed = await drainPrompts(ops);
-        // Asked apart from the tools, so on a broker possibly of a kernel an
-        // upgrade had replaced in between, or of one whose source is unknown:
-        // kept together, one definition's prompts would be cached under the
-        // other's (#6). Asked again on the next answer from a kernel instead.
-        if (listed.source !== source) {
-          log("the lists came from kernels started from different sources; re-reading later");
-          seen = undefined;
-          return;
-        }
         prompts = listed.prompts;
         listedFrom = listed.source;
         promptsSeen = true;
@@ -677,7 +673,18 @@ export function createWolframServer(
     }
   }
 
-  backend.onKernelReady((ops) => reload(ops));
+  // Kernel starts heard, counted, so a re-read asked before one is not applied
+  // after it: on a broker the event and the re-read's answer can arrive in one
+  // read of the socket, and the event's refresh is then under way before the
+  // answer's, with nothing yet moved to show it.
+  let readies = 0;
+  backend.onKernelReady((ops) => {
+    readies++;
+    return reload(ops);
+  });
+
+  // A re-read in flight, which answers arriving meanwhile leave to finish.
+  let relisting = false;
 
   /**
    * Re-read the lists when the kernel that just answered was started from
@@ -685,23 +692,45 @@ export function createWolframServer(
    * kernel is current, and after a paclet upgrade that kernel serves the new
    * definition. A session that attached only for its first call reuses a
    * kernel another session started, and hears no `kernelReady`, so its client
-   * was held to the old tools for good (#3). Once per source, so a read that
-   * fails is not retried by every call; the next kernel start corrects it.
+   * was held to the old tools for good (#3).
+   *
+   * From what the broker read as that source's kernel started (`relist`), so
+   * nothing is asked of a kernel: read as three ordinary requests, the re-read
+   * started one after a request no kernel answered, and grew a broker's pool
+   * beside one another session had busy, to list tools (#198). Where nothing
+   * is known, nothing is marked, and a later answer asks again. A private
+   * kernel's lists are this session's own, read as it started, so one whose
+   * read failed is corrected by its next start, or its own `list_changed`.
    */
   function follow(): void {
     const served = backend.servedFrom?.();
-    if (served === undefined || served === seen) return;
-    seen = served;
-    log("a kernel started from another server source answered; re-reading the lists");
-    // Each list says which kernel it came from, so nothing is read here from
-    // whichever answer happened to arrive last.
-    void reload({
-      capabilities: () => backend.capabilities(),
-      listTools: (cursor) => backend.listTools(cursor),
-      listPrompts: (cursor) => backend.listPrompts(cursor),
-    }).catch((err: unknown) => {
-      log(`re-reading the lists failed, keeping them: ${errorText(err)}`);
-    });
+    const relist = backend.relist?.bind(backend);
+    if (served === undefined || served === seen || relisting || !relist) return;
+    relisting = true;
+    const heard = readies;
+    void (async () => {
+      try {
+        const lists = await relist(served);
+        // Nothing known; or a kernel's lists arrived meanwhile, and these,
+        // read as an older one started, would undo them.
+        if (lists === null || readies !== heard) return;
+        seen = served;
+        log("a kernel started from another server source answered; re-reading the lists");
+        await reload(opsFrom(lists));
+      } catch (err) {
+        // Nothing marked, so a later answer asks again: the re-read costs no
+        // kernel, and marked, a broker gone mid-request left the session on
+        // its old lists after it chose the next, whose kernel of that source
+        // it had not heard start.
+        log(`re-reading the lists failed, keeping them: ${errorText(err)}`);
+      } finally {
+        relisting = false;
+      }
+      // An answer from another source while this was under way was let go, as
+      // in flight; followed now, or its lists waited for an answer that may
+      // never come but from the cache. Again only on a change, so it ends.
+      if (backend.servedFrom?.() !== served) follow();
+    })();
   }
 
   fromKernel(ListToolsRequestSchema, async (_request, extra) => {
@@ -727,6 +756,14 @@ export function createWolframServer(
     // holds is exactly what the kernel reported and a refresh compares like
     // with like.
     const live = await backend.listTools();
+    // Kept where no refresh has filled the list: with the start-time read of
+    // this session's kernel failed, nothing else would, and every later list
+    // came back here, to a kernel (#198). In memory only, since the cache's
+    // entry holds prompts this read did not ask for; a refresh replaces it.
+    if (!toolCache && live.tools?.length) {
+      toolCache = live.tools;
+      toolCachedAt = Date.now();
+    }
     return { tools: [...(live.tools ?? []), STATUS_TOOL] };
   });
 

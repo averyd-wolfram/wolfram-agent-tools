@@ -56,6 +56,7 @@ import {
   requestOptions,
   SessionClosed,
   stopIfLate,
+  type KernelLists,
 } from "./kernel.js";
 import { elapsedText, waitText } from "./duration.js";
 import type { KernelInstall } from "./locate.js";
@@ -177,6 +178,16 @@ export interface KernelBackend {
    * is current, which after a paclet upgrade serves another definition (#3).
    */
   servedFrom?(): string | undefined;
+  /**
+   * The lists a kernel of this session's flavour gave as it started from
+   * `source`, or `null` where none are known: what the proxy re-reads its lists
+   * with when a kernel of another source answered (#3). Answered from memory,
+   * never by a kernel: as three ordinary requests, the re-read started one, or
+   * grew a broker's pool, to list tools (#198). A broker keeps them; a private
+   * kernel's are the session's own, so a backend may leave this undefined, and
+   * is then never re-read from.
+   */
+  relist?(source: string): Promise<KernelLists | null>;
   /**
    * What this backend's latest kernel start began from, and where it was read,
    * whether or not it succeeded: a failed start is backed off until that
@@ -516,6 +527,19 @@ export class DeferredBackend implements KernelBackend {
 
   servedFrom(): string | undefined {
     return this.#resolved?.servedFrom?.();
+  }
+
+  /**
+   * The chosen backend's re-read, or `null` where none is chosen or it has gone:
+   * never a preparation, which would start a private kernel, or a broker, to
+   * list tools (#198). Nor a fallback to a private kernel when the broker
+   * cannot answer it: the lists are re-read on a later answer instead.
+   */
+  async relist(source: string): Promise<KernelLists | null> {
+    const backend = this.#resolved;
+    await backend?.settled?.();
+    if (!backend || backend !== this.#resolved || backend.usable?.() === false) return null;
+    return (await backend.relist?.(source)) ?? null;
   }
 
   backoff(): BackoffState | null {

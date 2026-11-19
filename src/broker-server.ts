@@ -10,7 +10,7 @@
  */
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
-import { McpError, type Prompt, type ServerCapabilities } from "@modelcontextprotocol/sdk/types.js";
+import { McpError, type ServerCapabilities } from "@modelcontextprotocol/sdk/types.js";
 import { createServer, type Server, type Socket } from "node:net";
 import { randomBytes } from "node:crypto";
 import { linkSync, statSync, unlinkSync } from "node:fs";
@@ -32,7 +32,7 @@ import {
   SOCKET_MODE,
 } from "./broker-protocol.js";
 import { settingValue, type KernelFlavour } from "./flavour.js";
-import { drainPages, listAllTools, requestOptions, type RunOptions } from "./kernel.js";
+import { drainPages, listAllTools, type RunOptions } from "./kernel.js";
 import { errorText, type Logger } from "./log.js";
 
 /** How long to linger with no connections before exiting. */
@@ -313,92 +313,35 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
       onFacts: (facts, chosen) => {
         if (options.allowInspect) recordFacts(options.bin, facts, chosen, log);
       },
-      onKernelReady: (client, flavour, late, source) =>
-        announceKernel(client, flavour, late, source),
+      // Only the sessions this kernel can serve, as the pool decides it: not
+      // only of its digest, but not one stripping a name the kernel inherited
+      // (#180), which the pool would never hand it. Told, such a session cached
+      // that kernel's lists under its own key. A proxy that hears nothing keeps
+      // its lists.
+      onKernelLists: (lists, serves) =>
+        broadcast({ event: "kernelReady", ...lists }, (flavour) => serves(flavour)),
     });
   })();
   // Nothing may reject unhandled while nobody is awaiting it yet.
   preparing.catch(() => {});
 
   /**
-   * Read the new kernel's lists and push them to every attached proxy.
-   *
-   * Runs inside the queue, holding the slot that just started, so it must use
-   * this client directly and never `pool.run`.
-   */
-  async function announceKernel(
-    client: Client,
-    flavour: string,
-    late: AbortSignal | undefined,
-    source: string | undefined,
-  ): Promise<void> {
-    // Only the sessions this kernel can serve. Telling the others would put one
-    // flavour's tool list into another's cache entry, under a key that exists to
-    // keep them apart.
-    const audience = [...connections.values()].filter((s) => s.flavour?.digest === flavour);
-    if (audience.length === 0) return; // nobody to tell; the cache will do
-    try {
-      const capabilities = client.getServerCapabilities() ?? {};
-      // Whole lists, so a broadcast carries every page, not page one.
-      // This server's request options, as `pool.run` gives every other request:
-      // with the SDK's own, a slow list was cancelled at 60 s (#70). And nothing
-      // new once the start has stopped waiting for this (`late`).
-      const tools = await listAllTools(client, requestOptions(), late);
-      // Read apart from the tools, so a failure costs the prompts alone. Read
-      // together, any failure of prompts/list lost the whole broadcast, and a
-      // cold machine's cache stayed cold until the next kernel start (#122).
-      // The failure goes with the tools, so a proxy keeps the prompts it has.
-      let prompts: Prompt[] | null = null;
-      let promptsError: string | undefined;
-      if (capabilities.prompts) {
-        try {
-          prompts = await drainPages<Prompt>(async (cursor) => {
-            const page = await client.listPrompts(
-              cursor ? { cursor } : undefined,
-              requestOptions(),
-            );
-            return { items: page.prompts ?? [], nextCursor: page.nextCursor };
-          }, late);
-        } catch (err) {
-          promptsError = errorText(err);
-          log(`could not read the new kernel's prompts; sessions keep theirs: ${promptsError}`);
-        }
-      }
-      broadcast(
-        {
-          event: "kernelReady",
-          capabilities,
-          tools,
-          prompts,
-          ...(promptsError === undefined ? {} : { promptsError }),
-          ...(source === undefined ? {} : { source }),
-        },
-        flavour,
-      );
-    } catch (err) {
-      // A proxy that hears nothing keeps its cached list, which is the same
-      // position it was in before the kernel started.
-      log(`could not read the new kernel's tools: ${errorText(err)}`);
-    }
-  }
-
-  /**
-   * Tell the attached proxies, optionally only those of one flavour.
+   * Tell the attached proxies, optionally only those of the flavours `to` takes.
    *
    * Scoped, because `kernelReady` carries a tool list and a capability set read
    * from one kernel, and a session of another flavour would cache that as its
    * own — the capability cache is keyed by flavour precisely so those cannot be
    * confused, and an unscoped broadcast would put the wrong answer under the
-   * right key.
+   * right key. A session that has not declared one is told nothing scoped.
    */
-  function broadcast(event: BrokerEvent, flavour?: string): void {
+  function broadcast(event: BrokerEvent, to?: (flavour: KernelFlavour) => boolean): void {
     const frame = eventFrame(event);
     if (frame === undefined) {
       log(`not sending a ${event.event} event over the ${FRAME_CAP} cap`);
       return;
     }
     for (const [socket, state] of connections) {
-      if (flavour !== undefined && state.flavour?.digest !== flavour) continue;
+      if (to !== undefined && (state.flavour === null || !to(state.flavour))) continue;
       if (socket.writable) socket.write(frame);
     }
   }
@@ -481,6 +424,13 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
             return listAllTools(c, options);
           });
           return reply({ tools, source, capabilities });
+        }
+        // The lists a kernel of this session's flavour gave as it started from
+        // the source named, from memory: no kernel is held, started or grown
+        // for it, and null where none is known (#198).
+        case "relist": {
+          const named = (request.params as { source?: unknown } | undefined)?.source;
+          return reply(typeof named === "string" ? pool.lists(flavour, named) : null);
         }
         case "listPrompts":
           return reply({

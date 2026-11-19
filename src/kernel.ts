@@ -30,8 +30,10 @@ import {
   type ListToolsResult,
   type Prompt,
   type Resource,
+  type ServerCapabilities,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
+import type { DirectOps } from "./backend.js";
 import { deadlineDelay, MAX_TIMER_MS, timerDelay } from "./config.js";
 import { LIST_CAP } from "./broker-protocol.js";
 import { FilteringStdioTransport } from "./transport.js";
@@ -384,6 +386,68 @@ export function listAllTools(
     const page = await client.listTools(cursor ? { cursor } : undefined, options);
     return { items: page.tools ?? [], nextCursor: page.nextCursor };
   }, stop);
+}
+
+/**
+ * A kernel's lists, read in one hold on it as it starts, or as it says its lists
+ * changed: what a broker's `kernelReady` carries, and what it keeps to answer a
+ * session re-reading its lists (`relist`).
+ */
+export interface KernelLists {
+  capabilities: ServerCapabilities;
+  tools: Tool[];
+  /** Null when the kernel does not advertise prompts, or they could not be read. */
+  prompts: Prompt[] | null;
+  /** Why they could not be, in the kernel's words (#122). */
+  promptsError?: string | undefined;
+  /** What the kernel was started from (`KernelSession.source`), where known. */
+  source?: string | undefined;
+}
+
+/**
+ * Read a kernel's lists under the hold the caller has. The prompts apart from
+ * the tools, so a failure costs the prompts alone: read together, any failure
+ * of prompts/list lost the tools as well, and a cold machine's cache stayed
+ * cold until the next kernel start (#122).
+ */
+export async function readLists(
+  client: Client,
+  request: RequestOptions,
+  stop?: AbortSignal,
+): Promise<KernelLists> {
+  const capabilities = client.getServerCapabilities() ?? {};
+  const tools = await listAllTools(client, request, stop);
+  if (!capabilities.prompts) return { capabilities, tools, prompts: null };
+  try {
+    const prompts = await drainPages<Prompt>(async (cursor) => {
+      const page = await client.listPrompts(cursor ? { cursor } : undefined, request);
+      return { items: page.prompts ?? [], nextCursor: page.nextCursor };
+    }, stop);
+    return { capabilities, tools, prompts };
+  } catch (err) {
+    return { capabilities, tools, prompts: null, promptsError: errorText(err) };
+  }
+}
+
+/**
+ * Lists already read, as the operations a refresh reads them through, so it
+ * asks no kernel for them again. A failed read of the prompts is refused in the
+ * kernel's words, so the refresh keeps the prompts it has, as it does when its
+ * own read fails: answered as no prompts, it cached that empty list over a good
+ * one (#122). Here rather than beside `DirectOps`, since the broker client uses
+ * it too, and from `backend.ts` it would import that module back at runtime.
+ */
+export function opsFrom(lists: KernelLists): DirectOps {
+  const { capabilities, tools, prompts, promptsError, source } = lists;
+  return {
+    source,
+    capabilities: async () => capabilities,
+    listTools: async () => ({ tools }),
+    listPrompts: async () => {
+      if (promptsError !== undefined) throw new Error(promptsError);
+      return { prompts: prompts ?? [] };
+    },
+  };
 }
 
 /**

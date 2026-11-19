@@ -47,6 +47,7 @@ export {
   PACLET_KERNEL_ARGS,
   ServerNotResolved,
   isServerNotResolved,
+  type KernelLists,
   type KernelSessionOptions,
 } from "./kernel.js";
 export {

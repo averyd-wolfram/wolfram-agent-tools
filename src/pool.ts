@@ -19,9 +19,12 @@ import type { KernelFlavour } from "./flavour.js";
 import {
   isServerNotResolved,
   KernelSession,
+  readLists,
   RequestDropped,
   RequestExpired,
+  requestOptions,
   ServerNotResolved,
+  type KernelLists,
   type RunOptions,
 } from "./kernel.js";
 import { deadlineDelay, timerDelay } from "./config.js";
@@ -125,6 +128,16 @@ export interface KernelPoolOptions {
         source: string | undefined,
       ) => void | Promise<void>)
     | undefined;
+  /**
+   * Called with a kernel's lists each time the pool reads them: as it starts,
+   * and as it says they changed. The pool reads them itself, to answer `lists`,
+   * so a caller that wants them takes them here rather than reading again.
+   * `serves` says whether the pool would hand this kernel to a session of a
+   * flavour, so they reach only a session they describe.
+   */
+  onKernelLists?:
+    | ((lists: KernelLists, serves: (flavour: KernelFlavour) => boolean) => void | Promise<void>)
+    | undefined;
   /** For the suite, which cannot wait out a window of real time. */
   clock?: (() => number) | undefined;
 }
@@ -146,6 +159,14 @@ interface Slot {
    * unset, but an inherited one reaches the kernel as it is.
    */
   inherited: ReadonlySet<string>;
+  /**
+   * The lists its kernel gave as it started, or as it last said they changed:
+   * what a session re-reading its lists is answered with (`lists`), so the
+   * re-read holds no kernel and starts none (#198).
+   */
+  lists?: KernelLists;
+  /** When `lists` were read, in the order the pool read any slot's. */
+  listsRead?: number;
 }
 
 interface Waiter {
@@ -206,6 +227,8 @@ interface Window {
 export class KernelPool {
   readonly #options: KernelPoolOptions;
   readonly #slots: Slot[] = [];
+  /** Lists read so far, any slot's: what orders them (`Slot.listsRead`). */
+  #listsRead = 0;
   readonly #waiters: Waiter[] = [];
   #budget: number;
   #licence: LicenceInfo;
@@ -287,6 +310,27 @@ export class KernelPool {
   get busy(): number {
     return this.#slots.filter((s) => s.busy).length;
   }
+
+  /**
+   * The lists a kernel of this flavour gave as it started from `source`, or
+   * null where none did: what a session re-reads its lists from, after an
+   * answer from a kernel of another source (#3). From memory, so no kernel is
+   * held, started or grown for it (#198). Only one `#mine` would hand this
+   * session, so a kernel that could not have served it never answers it. By
+   * the lists' own source, not the slot's: a slot restarted from another
+   * source, whose read then failed, still holds the lists of the one before.
+   * Compared first, so `#mine` reads the disk only for a slot that could answer.
+   * The newest of them, since two kernels of one source can list differently,
+   * one having said since it started that its list changed.
+   */
+  lists(flavour: KernelFlavour, source: string): KernelLists | null {
+    let newest: Slot | undefined;
+    for (const s of this.#slots) {
+      if (s.lists?.source !== source || (s.listsRead ?? 0) <= (newest?.listsRead ?? -1)) continue;
+      if (this.#mine(s, flavour)) newest = s;
+    }
+    return newest?.lists ?? null;
+  }
   get licence(): LicenceInfo {
     return this.#licence;
   }
@@ -357,10 +401,38 @@ export class KernelPool {
       onStartFailed: (err) =>
         this.#recordFailedStart(flavour.digest, err, () => session.attemptChanged()),
       onReady: async (client: Client, late?: AbortSignal) => {
-        // Proven: what its held requests were waiting to learn (#19).
+        // Proven: what its held requests were waiting to learn (#19), before
+        // a read that may take as long as the start lets it.
         this.#proven.add(flavour.digest);
         this.#schedule();
+        // Read whether or not a session is attached to hear them, so a session
+        // that attaches to this kernel later can be answered from them: a
+        // kernel whose session left during its start was never read (#198).
+        // The first request waits for this as it waited for the broadcast.
         await this.#options.onKernelReady?.(client, flavour.digest, late, session.source);
+        let lists: KernelLists;
+        try {
+          lists = { ...(await readLists(client, requestOptions(), late)), source: session.source };
+        } catch (err) {
+          // Whoever has lists keeps them, as before the kernel started; and the
+          // slot keeps its last, which say which kernel's they are (`lists`).
+          this.#options.log(`could not read the new kernel's tools: ${errorText(err)}`);
+          return;
+        }
+        if (lists.promptsError !== undefined) {
+          this.#options.log(
+            `could not read the new kernel's prompts; sessions keep theirs: ${lists.promptsError}`,
+          );
+        }
+        const slot = this.#slots.find((s) => s.session === session);
+        if (slot) {
+          slot.lists = lists;
+          slot.listsRead = ++this.#listsRead;
+        }
+        await this.#options.onKernelLists?.(
+          lists,
+          (f) => slot !== undefined && this.#mine(slot, f),
+        );
       },
     });
     const inherited = new Set(

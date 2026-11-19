@@ -361,12 +361,14 @@ Use the official specification when working on `proxy.ts` or `transport.ts`.
   cache holds that; `tools/list` is served from cache when one is warm. Work added to
   `createWolframServer` must not block and must not spawn.
 - **Sharing is an optimisation, never a dependency.** Every broker failure must fall back to a
-  private kernel, with the reason logged, but for two, each deliberate: a start deadline spent
+  private kernel, with the reason logged, but for three, each deliberate: a start deadline spent
   attaching to the broker or waiting for it to prepare, since a private kernel started with no
-  time left would spend a second seat only to fail, and a request the broker already had, which
+  time left would spend a second seat only to fail; a request the broker already had, which
   fails rather than run again since it may have run: one sent to a broker that goes (resending
   one it never read is #102), or one whose reply is too long for the socket, which the broker
-  answers at once with an error. A request whose parameters pass `REQUEST_CAP` is refused on both
+  answers at once with an error; and a session's re-read of its lists (`relist`), answered from
+  what the broker read as its kernels started, and left to a later answer where the broker
+  cannot answer it, rather than start a kernel to list tools (#198). A request whose parameters pass `REQUEST_CAP` is refused on both
   paths alike, before any kernel sees it (#200).
 - **Sharing may never change an answer.** A kernel reads its environment at startup, so two
   sessions share only where their *flavour* matches (`flavour.ts`); the broker starts a kernel
@@ -461,7 +463,7 @@ these are the consequential ones; formatting, lint and types are CI's.
   budget, and any path outside `doctor` that can reach discovery's step 7 (`wolframscript`):
   each spends a licence seat the user may not have.
 - **The four invariants.** Flag output on stdout that is not a JSON-RPC frame, a kernel started
-  on the `initialize` path, a broker failure other than the invariant's two exceptions that does
+  on the `initialize` path, a broker failure other than the invariant's three exceptions that does
   not fall back to a private kernel, and sessions of different flavours sharing a kernel.
 - **Broker protocol.** Flag a frame that changes shape without a `BROKER_PROTOCOL` bump, and a
   bump for a new op alone, which strands running brokers holding seats.
