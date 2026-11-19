@@ -19,9 +19,12 @@ import type { KernelFlavour } from "./flavour.js";
 import {
   isServerNotResolved,
   KernelSession,
+  readLists,
   RequestDropped,
   RequestExpired,
+  requestOptions,
   ServerNotResolved,
+  type KernelLists,
   type RunOptions,
 } from "./kernel.js";
 import { deadlineDelay, timerDelay } from "./config.js";
@@ -110,21 +113,13 @@ export interface KernelPoolOptions {
   /** Each kernel's report, for the caller to keep. */
   onFacts?: ((facts: KernelFacts, chosen: string[]) => void) | undefined;
   /**
-   * Called once per freshly started kernel, with that kernel's client.
-   *
-   * The client is passed deliberately: this runs inside the queue, while the
-   * slot is still held, so anything the caller needs from the new kernel has to
-   * be read here rather than by going back through `run`. `source` is what
-   * the kernel was started from, so its lists can be cached under that (#6).
+   * Called with a kernel's lists each time the pool reads them: as it starts,
+   * and as it says they changed. Read here, inside the queue while the slot is
+   * still held, since going back through `run` for them grew the pool to the
+   * whole budget on one call. With what the kernel was started from, so they
+   * are cached under that (#6).
    */
-  onKernelReady?:
-    | ((
-        client: Client,
-        flavour: string,
-        late: AbortSignal | undefined,
-        source: string | undefined,
-      ) => void | Promise<void>)
-    | undefined;
+  onKernelReady?: ((lists: KernelLists, flavour: string) => void | Promise<void>) | undefined;
   /** For the suite, which cannot wait out a window of real time. */
   clock?: (() => number) | undefined;
 }
@@ -146,6 +141,12 @@ interface Slot {
    * unset, but an inherited one reaches the kernel as it is.
    */
   inherited: ReadonlySet<string>;
+  /**
+   * The lists its kernel gave as it started, or as it last said they changed:
+   * what a session re-reading its lists is answered with (`lists`), so the
+   * re-read holds no kernel and starts none (#198).
+   */
+  lists?: KernelLists;
 }
 
 interface Waiter {
@@ -287,6 +288,19 @@ export class KernelPool {
   get busy(): number {
     return this.#slots.filter((s) => s.busy).length;
   }
+
+  /**
+   * The lists a kernel of this flavour gave as it started from `source`, or
+   * null where none did: what a session re-reads its lists from, after an
+   * answer from a kernel of another source (#3). From memory, so no kernel is
+   * held, started or grown for it (#198). Only one `#mine` would hand this
+   * session, so a kernel that could not have served it never answers it.
+   */
+  lists(flavour: KernelFlavour, source: string): KernelLists | null {
+    return (
+      this.#slots.find((s) => this.#mine(s, flavour) && s.session.source === source)?.lists ?? null
+    );
+  }
   get licence(): LicenceInfo {
     return this.#licence;
   }
@@ -357,10 +371,30 @@ export class KernelPool {
       onStartFailed: (err) =>
         this.#recordFailedStart(flavour.digest, err, () => session.attemptChanged()),
       onReady: async (client: Client, late?: AbortSignal) => {
-        // Proven: what its held requests were waiting to learn (#19).
+        // Proven: what its held requests were waiting to learn (#19), before
+        // a read that may take as long as the start lets it.
         this.#proven.add(flavour.digest);
         this.#schedule();
-        await this.#options.onKernelReady?.(client, flavour.digest, late, session.source);
+        // Read whether or not a session is attached to hear them, so a session
+        // that attaches to this kernel later can be answered from them: a
+        // kernel whose session left during its start was never read (#198).
+        // The first request waits for this as it waited for the broadcast.
+        let lists: KernelLists;
+        try {
+          lists = { ...(await readLists(client, requestOptions(), late)), source: session.source };
+        } catch (err) {
+          // Whoever has lists keeps them, as before the kernel started.
+          this.#options.log(`could not read the new kernel's tools: ${errorText(err)}`);
+          return;
+        }
+        if (lists.promptsError !== undefined) {
+          this.#options.log(
+            `could not read the new kernel's prompts; sessions keep theirs: ${lists.promptsError}`,
+          );
+        }
+        const slot = this.#slots.find((s) => s.session === session);
+        if (slot) slot.lists = lists;
+        await this.#options.onKernelReady?.(lists, flavour.digest);
       },
     });
     const inherited = new Set(
@@ -889,33 +923,8 @@ export class KernelPool {
       throw new RequestExpired(options.deadlineMs ?? 0);
     }
     const slot = await this.#acquire(flavour, options);
-    return this.#runOn(slot, () => slot.session.run(fn, options));
-  }
-
-  /**
-   * `run`, on a kernel of this flavour that is running and free, or `null` with
-   * nothing run: never a start, a growth, a swap, a wait, or the take tier's
-   * slot whose kernel idled out, which restarts it. For re-reading a session's
-   * lists, which no kernel may be started for: as three ordinary requests, the
-   * re-read grew the pool beside a kernel another session had busy (#198).
-   * Nothing here is an error, so a healthy kernel is never quarantined for it.
-   */
-  async runIfIdle<T>(
-    flavour: KernelFlavour,
-    fn: (client: Client, request: RequestOptions, source: string | undefined) => Promise<T>,
-    options: RunOptions = {},
-  ): Promise<T | null> {
-    // `#servable` as the refusal window reads it: a kernel that is running.
-    const slot = this.#slots.find((s) => this.#servable(s, flavour, true));
-    if (!slot) return null;
-    slot.busy = true;
-    return this.#runOn(slot, () => slot.session.runIfUp(fn, options));
-  }
-
-  /** Hold `slot` for `work`, and give it back, or vouch for it, as `work` ends. */
-  async #runOn<T>(slot: Slot, work: () => Promise<T>): Promise<T> {
     try {
-      const result = await work();
+      const result = await slot.session.run(fn, options);
       this.#release(slot);
       return result;
     } catch (err) {

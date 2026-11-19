@@ -366,9 +366,9 @@ Use the official specification when working on `proxy.ts` or `transport.ts`.
   time left would spend a second seat only to fail; a request the broker already had, which
   fails rather than run again since it may have run: one sent to a broker that goes (resending
   one it never read is #102), or one whose reply is too long for the socket, which the broker
-  answers at once with an error; and a session's re-read of its lists (`relist`), which only a
-  kernel already up and free answers, so it is left to the next answer rather than start a
-  kernel to list tools (#198). A request whose parameters pass `REQUEST_CAP` is refused on both
+  answers at once with an error; and a session's re-read of its lists (`relist`), answered from
+  what the broker read as its kernels started, and left to a later answer where the broker
+  cannot answer it, rather than start a kernel to list tools (#198). A request whose parameters pass `REQUEST_CAP` is refused on both
   paths alike, before any kernel sees it (#200).
 - **Sharing may never change an answer.** A kernel reads its environment at startup, so two
   sessions share only where their *flavour* matches (`flavour.ts`); the broker starts a kernel

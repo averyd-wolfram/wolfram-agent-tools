@@ -67,10 +67,11 @@ export type BrokerOp =
   | "cancel"
   | "status"
   /**
-   * What are the lists, on a kernel of this session's flavour that is already
-   * up and free? Answered with what `kernelReady` carries, or null where no
-   * kernel is: never a start, a growth or a wait (#198). A new op, not a new
-   * frame shape, so `BROKER_PROTOCOL` is unchanged.
+   * What lists did a kernel of this session's flavour give as it started from
+   * `params.source`? Answered with what `kernelReady` carried, from memory, or
+   * null where none is known: no kernel is held, started or grown (#198). A new
+   * op, not a new frame shape, so `BROKER_PROTOCOL` is unchanged; a broker too
+   * old to know it refuses it, which the client takes as nothing known.
    */
   | "relist"
   /**

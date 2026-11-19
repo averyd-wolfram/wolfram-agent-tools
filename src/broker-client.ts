@@ -45,7 +45,7 @@ import {
 import { deadlineDelay, DEFAULT_START_TIMEOUT_MS, timerDelay } from "./config.js";
 import type { KernelFlavour } from "./flavour.js";
 import { budgetText } from "./duration.js";
-import { DEFAULT_DEADLINE_MS, opsFrom, RELIST_DEADLINE_MS, type KernelLists } from "./kernel.js";
+import { DEFAULT_DEADLINE_MS, opsFrom, type KernelLists } from "./kernel.js";
 import { bareMcpText, errorText, type Logger } from "./log.js";
 import type { Deadline } from "./prepare.js";
 
@@ -78,7 +78,7 @@ const FROM_KERNEL: Record<BrokerOp, boolean> = {
   listResources: true,
   readResource: true,
   callTool: true,
-  // A kernel answers it, but only one already up: it starts none to wait for.
+  // Answered from what the broker read as its kernels started.
   relist: false,
   cancel: false,
   status: false,
@@ -230,6 +230,8 @@ export class BrokerBackend implements KernelBackend {
   #onKernelReady: KernelReadyHandler | undefined;
   /** `servedFrom`: the source the latest answer from a kernel carried. */
   #served: string | undefined;
+  /** The broker refused `relist` as an op it does not know. */
+  #noRelist = false;
   /** No new work goes out on this connection; the next call chooses again. */
   #closed = false;
   /** The session has chosen again, and left this connection to drain (`retire`). */
@@ -817,9 +819,22 @@ export class BrokerBackend implements KernelBackend {
   listPrompts(cursor?: string): Promise<PromptPage> {
     return this.#request<PromptPage>("listPrompts", cursor ? { cursor } : undefined);
   }
-  relist(): Promise<KernelLists | null> {
-    // Its ceiling sent, so the broker holds the kernel to the same one.
-    return this.#request<KernelLists | null>("relist", undefined, RELIST_DEADLINE_MS);
+  async relist(source: string): Promise<KernelLists | null> {
+    if (this.#noRelist) return null;
+    try {
+      return await this.#request<KernelLists | null>("relist", { source });
+    } catch (err) {
+      // A broker older than the op, met where neither build's code could be
+      // read (`codeIdentity`): it knows nothing to answer with, so nothing,
+      // and is not asked again. Read as a failure, the session was marked as
+      // re-read, and a broker that also predates reading lists unheard left
+      // it on its old lists for the broker's life.
+      if (/unknown broker op/.test(errorText(err))) {
+        this.#noRelist = true;
+        return null;
+      }
+      throw err;
+    }
   }
   getPrompt(
     params: GetPromptRequest["params"],

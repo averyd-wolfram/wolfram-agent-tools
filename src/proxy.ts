@@ -686,31 +686,39 @@ export function createWolframServer(
    * kernel another session started, and hears no `kernelReady`, so its client
    * was held to the old tools for good (#3).
    *
-   * Only from a kernel already up and free (`relist`). Read as three ordinary
-   * requests, the re-read started a kernel after a request no kernel answered,
-   * once the last had idled out, and grew a broker's pool beside a kernel
-   * another session had busy, to list tools (#198). With none free, nothing is
-   * marked, so the next answer asks again. Once per source otherwise, so a read
-   * that fails is not retried by every call; the next kernel start corrects it.
+   * From what the broker read as that source's kernel started (`relist`), so
+   * nothing is asked of a kernel: read as three ordinary requests, the re-read
+   * started one after a request no kernel answered, and grew a broker's pool
+   * beside one another session had busy, to list tools (#198). Where nothing
+   * is known, nothing is marked, and a later answer asks again. A private
+   * kernel's lists are this session's own, read as it started, so one whose
+   * read failed is corrected by its next start, or its own `list_changed`.
    */
   function follow(): void {
     const served = backend.servedFrom?.();
     if (served === undefined || served === seen || relisting || !backend.relist) return;
     relisting = true;
+    const was = seen;
     void backend
-      .relist()
+      .relist(served)
       .then(
         async (lists) => {
-          if (lists === null) return;
+          // Nothing known; or a kernel's start moved the lists on meanwhile,
+          // and these, read as an older one started, would undo that.
+          if (lists === null || seen !== was) return;
           seen = served;
           log("a kernel started from another server source answered; re-reading the lists");
           await reload(opsFrom(lists));
         },
         (err: unknown) => {
+          // Once per source, so a broker that cannot answer is not asked by every call.
           seen = served;
           log(`re-reading the lists failed, keeping them: ${errorText(err)}`);
         },
       )
+      .catch((err: unknown) => {
+        log(`re-reading the lists failed, keeping them: ${errorText(err)}`);
+      })
       .finally(() => {
         relisting = false;
       });

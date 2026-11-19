@@ -52,8 +52,6 @@ import {
   isServerNotResolved,
   KernelSession,
   listAllTools,
-  readLists,
-  RELIST_DEADLINE_MS,
   RequestExpired,
   requestOptions,
   SessionClosed,
@@ -181,13 +179,15 @@ export interface KernelBackend {
    */
   servedFrom?(): string | undefined;
   /**
-   * The lists, read in one hold on a kernel of this session's that is already
-   * up and free, or `null` where there is none: never a start, a growth of a
-   * pool, or a preparation. What the proxy re-reads its lists with when a
-   * kernel of another source answered (#3): as three ordinary requests, the
-   * re-read started a kernel, or grew a broker's pool, to list tools (#198).
+   * The lists a kernel of this session's flavour gave as it started from
+   * `source`, or `null` where none are known: what the proxy re-reads its lists
+   * with when a kernel of another source answered (#3). Answered from memory,
+   * never by a kernel: as three ordinary requests, the re-read started one, or
+   * grew a broker's pool, to list tools (#198). A broker keeps them; a private
+   * kernel's are the session's own, so a backend may leave this undefined, and
+   * is then never re-read from.
    */
-  relist?(): Promise<KernelLists | null>;
+  relist?(source: string): Promise<KernelLists | null>;
   /**
    * What this backend's latest kernel start began from, and where it was read,
    * whether or not it succeeded: a failed start is backed off until that
@@ -288,13 +288,6 @@ export class LocalBackend implements KernelBackend {
 
   servedFrom(): string | undefined {
     return this.#session.source;
-  }
-
-  async relist(): Promise<KernelLists | null> {
-    return this.#session.runIfUp(
-      async (c, request, source) => ({ ...(await readLists(c, request)), source }),
-      { deadlineMs: RELIST_DEADLINE_MS },
-    );
   }
 
   attempt(): readonly SourceRead[] {
@@ -540,13 +533,13 @@ export class DeferredBackend implements KernelBackend {
    * The chosen backend's re-read, or `null` where none is chosen or it has gone:
    * never a preparation, which would start a private kernel, or a broker, to
    * list tools (#198). Nor a fallback to a private kernel when the broker
-   * fails it: the lists are re-read on the next answer from a kernel instead.
+   * cannot answer it: the lists are re-read on a later answer instead.
    */
-  async relist(): Promise<KernelLists | null> {
+  async relist(source: string): Promise<KernelLists | null> {
     const backend = this.#resolved;
     await backend?.settled?.();
     if (!backend || backend !== this.#resolved || backend.usable?.() === false) return null;
-    return (await backend.relist?.()) ?? null;
+    return (await backend.relist?.(source)) ?? null;
   }
 
   backoff(): BackoffState | null {

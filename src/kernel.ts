@@ -146,13 +146,6 @@ const SDK_REQUEST_TIMEOUT_MS = MAX_TIMER_MS;
 export const DEFAULT_DEADLINE_MS = 60_000;
 
 /**
- * How long a re-read of a kernel's lists (`readLists`) is waited for: the
- * minute each list had when they were read as requests of their own, so the
- * tools a slow pair of lists read are not lost to one minute shared (#198).
- */
-export const RELIST_DEADLINE_MS = 2 * DEFAULT_DEADLINE_MS;
-
-/**
  * The SDK options for a request to a kernel, and the only place they are built:
  * `run` hands them to the work it runs. Each request site built its own, so
  * only the two tool-call sites gave the timeout that cannot fire first, and
@@ -396,8 +389,9 @@ export function listAllTools(
 }
 
 /**
- * A kernel's lists, read in one hold on it: what a broker's `kernelReady`
- * carries, and what a session re-reading its lists is answered (`relist`).
+ * A kernel's lists, read in one hold on it as it starts, or as it says its lists
+ * changed: what a broker's `kernelReady` carries, and what it keeps to answer a
+ * session re-reading its lists (`relist`).
  */
 export interface KernelLists {
   capabilities: ServerCapabilities;
@@ -440,7 +434,8 @@ export async function readLists(
  * asks no kernel for them again. A failed read of the prompts is refused in the
  * kernel's words, so the refresh keeps the prompts it has, as it does when its
  * own read fails: answered as no prompts, it cached that empty list over a good
- * one (#122).
+ * one (#122). Here rather than beside `DirectOps`, since the broker client uses
+ * it too, and from `backend.ts` it would import that module back at runtime.
  */
 export function opsFrom(lists: KernelLists): DirectOps {
   const { capabilities, tools, prompts, promptsError, source } = lists;
@@ -509,9 +504,6 @@ export class RequestExpired extends RequestDropped {
     this.name = "RequestExpired";
   }
 }
-
-/** `runIfUp`'s turn, finding no kernel up and free: never seen outside the session. */
-const NOT_UP = new Error("no kernel is up and free");
 
 /** How a single unit of work is to be run. */
 export interface RunOptions {
@@ -1083,37 +1075,6 @@ export class KernelSession {
     fn: (client: Client, request: RequestOptions, source: string | undefined) => Promise<T>,
     options: RunOptions = {},
   ): Promise<T> {
-    return this.#run(fn, options, false);
-  }
-
-  /**
-   * `run`, but only on the kernel already up, free and holding no abandoned
-   * call, or `null` with nothing sent: never a start, a restart after an idle shutdown,
-   * or the stop that takes a kernel back from abandoned work. For re-reading a
-   * session's lists, which no kernel may be started or stopped for (#198).
-   * Decided as its turn comes, since the kernel may have idled out, or been
-   * left an abandoned call, while it queued.
-   */
-  async runIfUp<T>(
-    fn: (client: Client, request: RequestOptions, source: string | undefined) => Promise<T>,
-    options: RunOptions = {},
-  ): Promise<T | null> {
-    // Busy, or with work queued, is not free: queued behind it, the re-read
-    // held up the calls after it, and one with no ceiling for good.
-    if (this.#inRun > 0) return null;
-    try {
-      return await this.#run(fn, options, true);
-    } catch (err) {
-      if (err === NOT_UP) return null;
-      throw err;
-    }
-  }
-
-  async #run<T>(
-    fn: (client: Client, request: RequestOptions, source: string | undefined) => Promise<T>,
-    options: RunOptions,
-    upOnly: boolean,
-  ): Promise<T> {
     const ticket = ++this.#queued;
     this.#inRun++;
     // The caller's ceiling, counted from where the request arrived (#80): a
@@ -1146,7 +1107,6 @@ export class KernelSession {
     const task = this.#queue.then(async () => {
       // Answered at its ceiling while it waited: its turn starts nothing.
       if (expired || pastDeadline()) throw expire();
-      if (upOnly && (!this.running || this.abandoned)) throw NOT_UP;
       // Queued behind a start that failed: that failure is this call's too. It
       // was never sent, so its caller may send it again, as a new call.
       const failed = this.#failedStart;
@@ -1175,15 +1135,7 @@ export class KernelSession {
       dropIfCancelled();
       let client: Client;
       try {
-        // The kernel it was checked against, never `ensure`: one stopped while
-        // `#reclaim` yielded, by an idle shutdown or a pool stopping, would be
-        // started again, outside anything that tracks it.
-        if (upOnly) {
-          if (!this.#client) throw NOT_UP;
-          client = this.#client;
-        } else {
-          client = await this.ensure();
-        }
+        client = await this.ensure();
       } catch (err) {
         if (isKernelStartFailed(err)) {
           this.#failedStart = { err, upTo: this.#queued };

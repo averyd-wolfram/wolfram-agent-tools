@@ -32,14 +32,7 @@ import {
   SOCKET_MODE,
 } from "./broker-protocol.js";
 import { settingValue, type KernelFlavour } from "./flavour.js";
-import {
-  drainPages,
-  listAllTools,
-  readLists,
-  RELIST_DEADLINE_MS,
-  requestOptions,
-  type RunOptions,
-} from "./kernel.js";
+import { drainPages, listAllTools, type RunOptions } from "./kernel.js";
 import { errorText, type Logger } from "./log.js";
 
 /** How long to linger with no connections before exiting. */
@@ -320,49 +313,14 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
       onFacts: (facts, chosen) => {
         if (options.allowInspect) recordFacts(options.bin, facts, chosen, log);
       },
-      onKernelReady: (client, flavour, late, source) =>
-        announceKernel(client, flavour, late, source),
+      // Only the sessions this kernel can serve. Telling the others would put
+      // one flavour's tool list into another's cache entry, under a key that
+      // exists to keep them apart. A proxy that hears nothing keeps its lists.
+      onKernelReady: (lists, flavour) => broadcast({ event: "kernelReady", ...lists }, flavour),
     });
   })();
   // Nothing may reject unhandled while nobody is awaiting it yet.
   preparing.catch(() => {});
-
-  /**
-   * Read the new kernel's lists and push them to every attached proxy.
-   *
-   * Runs inside the queue, holding the slot that just started, so it must use
-   * this client directly and never `pool.run`.
-   */
-  async function announceKernel(
-    client: Client,
-    flavour: string,
-    late: AbortSignal | undefined,
-    source: string | undefined,
-  ): Promise<void> {
-    // Only the sessions this kernel can serve. Telling the others would put one
-    // flavour's tool list into another's cache entry, under a key that exists to
-    // keep them apart.
-    const audience = [...connections.values()].filter((s) => s.flavour?.digest === flavour);
-    if (audience.length === 0) return; // nobody to tell; the cache will do
-    try {
-      // This server's request options, as `pool.run` gives every other request:
-      // with the SDK's own, a slow list was cancelled at 60 s (#70). And nothing
-      // new once the start has stopped waiting for this (`late`). A failure of
-      // the prompts goes with the tools, so a proxy keeps the prompts it has.
-      const lists = await readLists(client, requestOptions(), late);
-      if (lists.promptsError !== undefined) {
-        log(`could not read the new kernel's prompts; sessions keep theirs: ${lists.promptsError}`);
-      }
-      broadcast(
-        { event: "kernelReady", ...lists, ...(source === undefined ? {} : { source }) },
-        flavour,
-      );
-    } catch (err) {
-      // A proxy that hears nothing keeps its cached list, which is the same
-      // position it was in before the kernel started.
-      log(`could not read the new kernel's tools: ${errorText(err)}`);
-    }
-  }
 
   /**
    * Tell the attached proxies, optionally only those of one flavour.
@@ -464,17 +422,12 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
           });
           return reply({ tools, source, capabilities });
         }
-        // Only from a kernel already up and free, and null otherwise (#198).
+        // The lists a kernel of this session's flavour gave as it started from
+        // the source named, from memory: no kernel is held, started or grown
+        // for it, and null where none is known (#198).
         case "relist": {
-          const lists = await pool.runIfIdle(
-            flavour,
-            (c, options, served) => {
-              source = served;
-              return readLists(c, options);
-            },
-            { deadlineMs: request.timeoutMs ?? RELIST_DEADLINE_MS },
-          );
-          return reply(lists && { ...lists, ...(source === undefined ? {} : { source }) });
+          const named = (request.params as { source?: unknown } | undefined)?.source;
+          return reply(typeof named === "string" ? pool.lists(flavour, named) : null);
         }
         case "listPrompts":
           return reply({
