@@ -35,6 +35,7 @@ import { drainPages } from "./kernel.js";
 import { exampleKernelPath, listKernels, locateKernel, type KernelInstall } from "./locate.js";
 import { bareMcpText, errorText, type Logger } from "./log.js";
 import { sessionSource } from "./server-source.js";
+import { REQUEST_CAP } from "./broker-protocol.js";
 import { PKG } from "./version.js";
 
 /**
@@ -184,6 +185,31 @@ function relayable(err: McpError): Error {
     code: err.code,
     ...(err.data === undefined ? {} : { data: err.data }),
   });
+}
+
+/**
+ * A request whose parameters are no longer than `REQUEST_CAP` (#200), so the
+ * frame carrying them always fits the broker's socket. Refused here, ahead of
+ * either backend, so both paths answer it alike and no kernel is asked. Longer,
+ * a private kernel read it from stdin while the broker dropped it unread and its
+ * caller waited out the ceiling.
+ */
+function refuseOverlong(method: string, params: unknown): void {
+  let length: number;
+  try {
+    length = JSON.stringify(params ?? {}).length;
+  } catch {
+    // A value JSON cannot hold fails where it is sent, as it did, and as a
+    // failed call: an embedder's BigInt is no protocol error.
+    return;
+  }
+  if (length <= REQUEST_CAP) return;
+  throw relayable(
+    new McpError(
+      ErrorCode.InvalidParams,
+      `the ${method} request's parameters are ${length} characters, longer than the ${REQUEST_CAP} this server sends`,
+    ),
+  );
 }
 
 /**
@@ -457,9 +483,8 @@ export function createWolframServer(
   const usableCache = install && config.cacheEnabled ? readCache(key) : null;
 
   // Capabilities are frozen at `initialize`, before we may start a kernel, so
-  // prompts and resources come from the cache when we have one and from the
-  // known shape of the serverName when we do not.
-  // Only what a kernel has actually been seen to offer. Advertising prompts
+  // prompts and resources come from the cache when we have one, and are not
+  // offered when we do not: only what a kernel has actually been seen to offer. Advertising prompts
   // from a static table meant a cold first run either answered prompts/list
   // with -32601 (no installation) or started a kernel to enumerate them
   // (installation present) — one a protocol violation, the other the end of
@@ -511,13 +536,23 @@ export function createWolframServer(
 
   const backend = makeBackend(install);
 
+  // Requests a list answered from this server's own copy. No kernel answered
+  // them, so there is nothing to follow: following one re-read the lists
+  // through the backend, which started a kernel, idled out or never started, to
+  // serve a list the cache had just served (#185).
+  const fromCache = new WeakSet<object>();
+
   // The one way a handler the kernel answers is registered, so each relays a
   // kernel's protocol error once. Wrapped one by one, a handler added later
   // could forget, and its errors would arrive doubled again (#62). `tools/call`
   // is the exception: it alone has an `isError` form, and decides for itself.
   const fromKernel: typeof server.setRequestHandler = (schema, handler) =>
     server.setRequestHandler(schema, (request, extra) =>
-      relayed(Promise.resolve(handler(request, extra)).finally(follow)),
+      relayed(
+        Promise.resolve(handler(request, extra)).finally(() => {
+          if (!fromCache.has(extra)) follow();
+        }),
+      ),
     );
 
   let toolCache: Tool[] | null = usableCache?.tools ?? null;
@@ -669,13 +704,14 @@ export function createWolframServer(
     });
   }
 
-  fromKernel(ListToolsRequestSchema, async () => {
+  fromKernel(ListToolsRequestSchema, async (_request, extra) => {
     // Deliberately no cursor handling, and none advertised: see `fullToolList`.
     // A cursor is upstream paging state belonging to one kernel, and the pool
     // hands out whichever kernel is free — so page 2 could be asked of a kernel
     // that never issued page 1.
 
     if (toolCache) {
+      fromCache.add(extra);
       log(`tools/list served from cache (${toolCache.length} tools), kernel not started`);
       return { tools: [...toolCache, STATUS_TOOL] };
     }
@@ -730,6 +766,7 @@ export function createWolframServer(
         ],
       };
     }
+    refuseOverlong("tools/call", { name, arguments: args ?? {} });
     try {
       // extra.signal fires when the client cancels. Passing it on is what turns
       // "the caller stopped waiting" into "the kernel stopped working".
@@ -792,11 +829,14 @@ export function createWolframServer(
   });
 
   if (capabilities.prompts) {
-    fromKernel(ListPromptsRequestSchema, async () => {
+    fromKernel(ListPromptsRequestSchema, async (_request, extra) => {
       // No cursor handling, for the reason tools/list has none: the backends
       // drain inside one hold on a kernel and answer complete lists, so there is
       // no upstream paging state for anyone to page through.
-      if (promptCache) return { prompts: promptCache };
+      if (promptCache) {
+        fromCache.add(extra);
+        return { prompts: promptCache };
+      }
       // The list alone: its source is this server's bookkeeping, not the client's.
       const { prompts } = await backend.listPrompts();
       return { prompts };
@@ -804,26 +844,33 @@ export function createWolframServer(
     // A prompt runs its own function in the kernel, so it waits as long as a
     // tool call would, and a cancel stops it as one does. Given no ceiling, it
     // was cut at the SDK's minute (#39).
-    fromKernel(GetPromptRequestSchema, async (request, extra) =>
-      backend.getPrompt(request.params, {
+    fromKernel(GetPromptRequestSchema, async (request, extra) => {
+      // Counted from here, as a call's is: sizing it is part of its time.
+      const expiresAt = expiryOf(config.callTimeoutMs);
+      refuseOverlong("prompts/get", request.params);
+      return backend.getPrompt(request.params, {
         timeoutMs: config.callTimeoutMs,
-        expiresAt: expiryOf(config.callTimeoutMs),
+        expiresAt,
         signal: extra.signal,
-      }),
-    );
+      });
+    });
   }
 
   if (capabilities.resources) {
-    fromKernel(ListResourcesRequestSchema, async (request) =>
-      backend.listResources(request.params),
-    );
-    fromKernel(ReadResourceRequestSchema, async (request, extra) =>
-      backend.readResource(request.params, {
+    fromKernel(ListResourcesRequestSchema, async (request) => {
+      refuseOverlong("resources/list", request.params);
+      return backend.listResources(request.params);
+    });
+    fromKernel(ReadResourceRequestSchema, async (request, extra) => {
+      // Counted from here, as a call's is: sizing it is part of its time.
+      const expiresAt = expiryOf(config.callTimeoutMs);
+      refuseOverlong("resources/read", request.params);
+      return backend.readResource(request.params, {
         timeoutMs: config.callTimeoutMs,
-        expiresAt: expiryOf(config.callTimeoutMs),
+        expiresAt,
         signal: extra.signal,
-      }),
-    );
+      });
+    });
   }
 
   return {

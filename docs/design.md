@@ -353,7 +353,32 @@ immediately, because its canned reply does not parse.
 
 **Sharing is never a dependency.** Any failure to reach or start a broker falls back to a
 private kernel, with the reason logged. It is an optimisation of a scarce resource, not a
-requirement for the server to work.
+requirement for the server to work. Two failures do not fall back, deliberately:
+- **A start deadline spent attaching to the broker or waiting for it to prepare** is backed
+  off like any stage that ran out of time, naming the stage. A private kernel started with no
+  time left would spend a second seat only to fail.
+- **A request the broker already had** fails rather than run again, since it may already
+  have run: one sent to a broker that goes, or one whose reply is too long for the socket,
+  which the broker answers at once with an error naming its length. One the broker never read
+  could be sent again safely, which is #102.
+
+A frame either end receives that is not JSON, or is over the socket's cap, is dropped and
+logged by its size, never its content, and neither end sends one over it (#200). What decides
+whether something is answered is held to the same limits on both paths, so the socket never
+decides an answer; the limits are in `docs/environment.md`'s constants table:
+- **A request** whose parameters pass `REQUEST_CAP` is refused by the proxy before any
+  backend sees it. A private kernel would have read it from stdin while the broker dropped it
+  unread, and a kernel started for it alone would spend a seat outside the pool's budget.
+- **A reply** longer than a kernel's line (`KERNEL_LINE_CAP`) is dropped by the kernel's
+  transport, and the request it names is answered at once with an error giving its length;
+  the kernel, which answered, is kept.
+- **A list** joined from pages longer than `LIST_CAP` is refused where the pages are joined
+  (`drainPages`), since a broker sends the whole list in one frame, and a kernel's start sends
+  its tools and its prompts in one event.
+
+The socket's cap (`FRAME_CAP`) leaves room past all of these, since a reply the broker parses
+and writes again can grow: a JSON number written `1e20` comes out written in full. Past it, a
+response is answered in its place with an error naming its length, and an event is not sent.
 
 **What it does not fix.** A kernel is single-threaded, so requests beyond the budget
 queue. With a 2-seat licence that means one kernel serving every session; agent calls are
@@ -715,9 +740,14 @@ cloner has no reason to know about, and it mutates global state.
 - **No `uncaughtException` handler.** An escaped rejection is logged, because the request
   that caused it was already answered. An uncaught exception is left to crash, so the
   client restarts a server whose state is no longer trustworthy.
-- **Cold-start capabilities are a static table.** `MCP_SERVERS` in `config.ts` carries
-  measured per-server capabilities for the first run, and the cache replaces them once a
-  kernel has actually run.
+- **A cold session advertises tools only.** Capabilities are fixed at `initialize`, before
+  a kernel may start. Advertising prompts from a table instead answered `prompts/list` with
+  Method not found where there is no installation, and started a kernel to list them where
+  there is, which ends lazy start for every client that lists prompts at launch. So a session
+  advertises what the cache says a kernel reported: tools only when it is cold, and prompts
+  once a kernel has listed them and the cache holds that, which it does not under
+  `WOLFRAM_MCP_CACHE=0`. `MCP_SERVERS` in `config.ts` records what each built-in server was
+  measured to offer, for diagnostics, never for advertising.
 - **The SDK is heavy for what we use.** `npm run metrics` sizes the production tree; most
   of it is express, hono, cors, jose and eventsource, serving HTTP/SSE transports and OAuth
   this server never touches. We already hand-roll the stdio transport, so dropping the

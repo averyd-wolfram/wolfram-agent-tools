@@ -357,9 +357,11 @@ limited to steps 1–6, filesystem and cache only.
     next step, and `doctor` is the only route to step 7. No unlisted tool is ever the
     trigger.
   - *Custom server names* behave the same way, keyed on their own cache entry.
-- Existing callers of `locateKernel` keep their behaviour unless deliberately moved. The
-  library's `createWolframServer` defaults to the seat-free mode, which is a behaviour change
-  for library callers on machines found only by step 7, and is documented as one.
+- `locateKernel` itself stops at step 6 unless its caller asks for step 7
+  (`allowWolframScript`), and only `doctor` asks. It used to default to step 7 so that callers
+  kept their behaviour, and `broker` run by hand without `--kernel` was one of them (#179). Both
+  that and `createWolframServer`'s seat-free mode are behaviour changes for library callers on
+  machines found only by step 7, documented as such.
 
 **Server selection.** Precedence, first non-blank value wins; blank values and
 unsubstituted `${…}` placeholders count as unset:

@@ -419,6 +419,17 @@ const socketsHere = (part = "") => {
   return false;
 };
 
+// The system's `which`, by absolute path, for a fixture PATH that must hold it
+// and no other system binary: looked up in /usr/bin and /bin, where the
+// fixtures used to search, not through whatever PATH started the suite, which
+// may name it relatively or not at all.
+const systemWhich = () => {
+  const found = spawnSync("sh", ["-c", "command -v which"], { encoding: "utf8", env: { PATH: "/usr/bin:/bin" } });
+  const path = found.stdout.trim();
+  if (!path.startsWith("/")) throw new Error(`no which in /usr/bin or /bin: ${found.stderr || path}`);
+  return path;
+};
+
 // ---------------------------------------------------------------------------
 heading("Unit — kernel discovery");
 {
@@ -484,18 +495,26 @@ heading("Unit — kernel discovery");
     mkdirSync(join(installDir, "Executables"), { recursive: true });
     mkdirSync(stubDir, { recursive: true });
 
+    // Each run leaves a line in `ran`, so a check can tell a stub never asked.
+    const ran = join(stubDir, "ran");
     const stub = (reportedDir) =>
       writeFileSync(
         join(stubDir, "wolframscript"),
-        `#!/bin/sh\nprintf '${reportedDir}|10000.0.0 for Test'\n`,
+        `#!/bin/sh\necho ran >> '${ran}'\nprintf '${reportedDir}|10000.0.0 for Test'\n`,
         { mode: 0o755 },
       );
 
+    // The stub, and a directory holding only `which`, and nothing else: a real
+    // wolframscript can live in /usr/bin and /bin (it does on Linux, through
+    // alternatives), so a stub that cannot run — a scratch directory mounted
+    // noexec — must find nothing rather than fall through to a real one.
+    const whichDir = join(home, "stub-which");
+    mkdirSync(whichDir, { recursive: true });
+    symlinkSync(systemWhich(), join(whichDir, "which"));
+    const stubPath = `${stubDir}:${whichDir}`;
     const isolated = (fn) => {
       const saved = { ...process.env };
-      // The stub first, then just enough for `which` itself to exist. The real
-      // wolframscript lives in /usr/local/bin, which is deliberately not here.
-      process.env.PATH = `${stubDir}:/usr/bin:/bin`;
+      process.env.PATH = stubPath;
       process.env.HOME = join(home, "stub-home");
       process.env.XDG_CONFIG_HOME = join(home, "stub-home", ".config");
       for (const key of [
@@ -517,7 +536,7 @@ heading("Unit — kernel discovery");
     // A wolframscript reporting a directory with no kernel in it must yield
     // nothing, and must never fall back to naming the script itself.
     stub(join(home, "stub-empty"));
-    const nothing = isolated(() => lib.locateKernel({ minVersion: "9999" }));
+    const nothing = isolated(() => lib.locateKernel({ minVersion: "9999", allowWolframScript: true }));
     check(
       "a wolframscript with no kernel behind it yields nothing",
       nothing === null,
@@ -528,7 +547,7 @@ heading("Unit — kernel discovery");
     const kernel = join(installDir, "Executables", "wolfram");
     writeFileSync(kernel, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     stub(installDir);
-    const picked = isolated(() => lib.locateKernel({ minVersion: "9999" }));
+    const picked = isolated(() => lib.locateKernel({ minVersion: "9999", allowWolframScript: true }));
     check(
       "wolframscript is never selected as a kernel",
       picked !== null && !/wolframscript/i.test(picked.bin),
@@ -539,6 +558,47 @@ heading("Unit — kernel discovery");
       picked?.bin === realpathSync(kernel),
       `${picked?.bin} (source: ${picked?.source})`,
     );
+
+    // Step 7 starts a kernel, so it runs only for a caller that asks, and
+    // `doctor` is the one that does. It defaulted to on, so a caller that had
+    // not chosen reached it: `broker` run by hand without --kernel spent a seat
+    // before it had bound its socket (#179). The stub reports an empty
+    // directory, so a run that does reach it still finds nothing to start.
+    stub(join(home, "stub-empty"));
+    rmSync(ran, { force: true });
+    const unasked = isolated(() => lib.locateKernel({ minVersion: "9999" }));
+    check(
+      "discovery stops at step 6 unless the caller asks for wolframscript",
+      unasked === null && !existsSync(ran),
+      existsSync(ran) ? "wolframscript ran" : (unasked?.bin ?? "null"),
+    );
+    const cli = (args) => {
+      rmSync(ran, { force: true });
+      const { stderr } = spawnSync(process.execPath, [join(root, "dist", "index.js"), ...args], {
+        env: {
+          PATH: stubPath,
+          HOME: join(home, "stub-home"),
+          XDG_CONFIG_HOME: join(home, "stub-home", ".config"),
+          WOLFRAM_MCP_MIN_VERSION: "9999",
+        },
+        encoding: "utf8",
+        timeout: 30_000,
+      });
+      return { asked: existsSync(ran), stderr };
+    };
+    // Its own words, so a broker that died before discovery cannot pass for one
+    // that looked and stopped; and they say how to go on.
+    const broker = cli(["broker", "--address", join(home, "stub-broker.sock")]);
+    check(
+      "a broker run by hand without --kernel never asks wolframscript",
+      !broker.asked && /nothing to broker/.test(broker.stderr),
+      broker.asked ? "wolframscript ran" : broker.stderr.trim().split("\n").pop(),
+    );
+    check(
+      "and says how to reach a kernel only wolframscript knows about",
+      /--kernel/.test(broker.stderr) && /doctor/.test(broker.stderr),
+    );
+    check("doctor still does, the one caller that may", cli(["doctor"]).asked);
   }
 
   check("version comparison is numeric", lib.compareVersions("14.10.0", "14.9.0") > 0);
@@ -1219,6 +1279,114 @@ heading("A session's own directories stay that session's");
 }
 
 // ---------------------------------------------------------------------------
+// A broker strips every name any session has declared from each kernel it
+// starts, but a kernel keeps what it started with: one started before a name
+// was first declared kept the broker's value for it. A session declaring it
+// unset has the same digest as one that never declared it, and matched on the
+// digest alone it was handed that kernel, and the value (#180). This process
+// stands in for the broker: its environment is what the pool's kernels inherit,
+// and `stripAlso` is its union of declared names, as broker-server passes it.
+heading("A kernel holding a variable declared since it started is not handed to a session that strips it");
+{
+  wipeCache();
+  const keys = ["FAKE_MARKER", "FAKE_REPORT_ENV", "MY_MODE", "MY_OTHER", "MY_BLANK", "MY_PLACEHOLDER"];
+  const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  const declaredNow = new Set();
+  const poolOf = () =>
+    new lib.KernelPool({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 60_000,
+      startTimeoutMs: 10_000,
+      clientInfo: { name: "smoke", version: "1.0.0" },
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: "unknown", type: null },
+      learnFromKernels: false,
+      stripAlso: () => declaredNow,
+    });
+  const pools = [];
+  try {
+    process.env.FAKE_MARKER = marker;
+    process.env.FAKE_REPORT_ENV = "MY_MODE";
+    process.env.MY_MODE = "the-brokers";
+    process.env.MY_BLANK = "";
+    process.env.MY_PLACEHOLDER = "${user_config.mode}";
+    delete process.env.MY_OTHER;
+    const pool = poolOf();
+    pools.push(pool);
+    const said = async (target, flavour) =>
+      (await target.run(flavour, (client) =>
+        client.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }),
+      )).content?.[0]?.text ?? "";
+    const plain = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" });
+    const declaring = (names) =>
+      lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage", WOLFRAM_MCP_KERNEL_ENV: names });
+
+    const first = await said(pool, plain);
+    check(
+      "a kernel started before anyone declared MY_MODE holds this process's value",
+      first.includes("MY_MODE=the-brokers"),
+      first.slice(-40),
+    );
+    declaredNow.add("MY_MODE");
+    const declared = await said(pool, declaring("MY_MODE"));
+    check(
+      "a session that declares MY_MODE unset, of the same digest, never sees it",
+      declaring("MY_MODE").digest === plain.digest && declared.includes("MY_MODE=(unset)"),
+      declared.slice(-40),
+    );
+    const kept = startCount();
+    await said(pool, plain);
+    check(
+      "a session that never declared it is not turned away from the kernels it had",
+      startCount() === kept,
+      `${startCount() - kept} start(s)`,
+    );
+    // Most names a declaration adds were never in the broker's environment, so
+    // no kernel could hold them.
+    declaredNow.add("MY_OTHER");
+    const quiet = startCount();
+    await said(pool, declaring("MY_OTHER"));
+    check(
+      "a declared name this process never held retires no kernel",
+      startCount() === quiet,
+      `${startCount() - quiet} start(s)`,
+    );
+    // Blank, or an unsubstituted `${...}`, reads as unset where a flavour sets a
+    // name, since a flavour strips it then; inherited, it reaches the kernel as
+    // it is, which a session declaring the name unset must not be handed.
+    // One at a time: a kernel started for the first would strip both.
+    for (const name of ["MY_BLANK", "MY_PLACEHOLDER"]) {
+      declaredNow.add(name);
+      const before = startCount();
+      await said(pool, declaring(name));
+      check(
+        `a ${name === "MY_BLANK" ? "blank" : "`${...}`"} value a kernel inherited counts as one it holds`,
+        startCount() === before + 1,
+        `${startCount() - before} start(s)`,
+      );
+    }
+    // The union is read as a kernel starts: one started after a declaration
+    // runs without the name, for whichever session it is started for.
+    const fresh = poolOf();
+    pools.push(fresh);
+    const later = await said(fresh, plain);
+    check(
+      "a kernel started after MY_MODE was declared runs without it, for any session",
+      later.includes("MY_MODE=(unset)"),
+      later.slice(-40),
+    );
+  } finally {
+    for (const pool of pools) await pool.stop();
+    for (const key of keys) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // The broker's address and its kernels read WOLFRAMINIT with blank and an
 // unsubstituted `${...}` as unset; its licence read any non-blank value as an
 // entitlement, ignored the installation's cached licence, and started at one
@@ -1476,6 +1644,96 @@ heading("Regression — a transient tools/list failure must not poison the cache
     "regression: the empty list was persisted and served forever",
   );
   await second.client.close();
+}
+
+// ---------------------------------------------------------------------------
+heading("A list served from the cache asks the backend nothing, so it starts no kernel (#185)");
+{
+  // After a re-read of the lists failed, they can be another source's than the
+  // kernel the backend last had, and that kernel may since have idled out.
+  // Following a list the cache answered then re-read them through the backend,
+  // which started a kernel to serve what the cache already had. Driven in
+  // process, against a backend that records what it is asked: any request of
+  // it is a kernel start a real one would make.
+  const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+  const { sessionSource } = await import(join(root, "dist", "server-source.js"));
+  wipeCache();
+  // The source is read from these, not the machine's own paclet directories,
+  // so a paclet installed mid-run cannot move the cache key between sessions.
+  const empty = join(home, "185-paclets");
+  mkdirSync(empty, { recursive: true });
+  const config = {
+    ...lib.loadConfig(() => {}),
+    kernelPath: fakeKernel,
+    serverName: "WolframLanguage",
+    inspect: false,
+    cacheEnabled: true,
+    flavour: lib.kernelFlavour({
+      ...process.env,
+      MCP_SERVER_NAME: "WolframLanguage",
+      WOLFRAM_USERBASE: empty,
+      WOLFRAM_BASE: empty,
+    }),
+  };
+  const asked = [];
+  let ready;
+  const lists = (source) => ({
+    capabilities: async () => (asked.push("capabilities"), { tools: {}, prompts: {} }),
+    listTools: async () => (
+      asked.push("tools/list"), { tools: [{ name: "Demo", inputSchema: { type: "object" } }], source }
+    ),
+    listPrompts: async () => (asked.push("prompts/list"), { prompts: [{ name: "DemoPrompt" }], source }),
+  });
+  // `served`: the source of the kernel this backend last had.
+  const stub = (served) => ({
+    ...lists(served),
+    servedFrom: () => served,
+    onKernelReady: (handler) => {
+      ready = handler;
+    },
+    getPrompt: async () => (asked.push("prompts/get"), { messages: [] }),
+    listResources: async () => (asked.push("resources/list"), { resources: [] }),
+    readResource: async () => (asked.push("resources/read"), { contents: [] }),
+    callTool: async () => (asked.push("tools/call"), { content: [] }),
+    stop: async () => {},
+  });
+
+  // The cache, as a kernel started from what is on disk leaves it: tools and
+  // prompts, under that source.
+  const warming = lib.createWolframServer(config, () => {}, () => stub(undefined));
+  const source = sessionSource(config.serverName, config.flavour, warming.install.bin, config.inspect).digest;
+  await ready(lists(source));
+
+  // One session per list, so neither's follow changes what the other finds.
+  const servedFromCache = async (list) => {
+    const logged = [];
+    const { server } = lib.createWolframServer(config, (line) => logged.push(line), () => stub("elsewhere"));
+    const client = new Client({ name: "smoke", version: "1.0.0" }, { capabilities: {} });
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverSide);
+    await client.connect(clientSide);
+    asked.length = 0;
+    // A miss leaves prompts unregistered, and that refusal must fail a check
+    // rather than end the run.
+    const answer = await list(client).catch((err) => ({ error: String(err) }));
+    // Long enough for a re-read the answer set off to reach the backend.
+    await until(() => asked.length > 0, 500);
+    await client.close();
+    return { answer, asked: [...asked], logged };
+  };
+  const tools = await servedFromCache((client) => client.listTools());
+  check(
+    "a tools/list served from the cache, after a kernel of another source, asks the backend nothing",
+    upstreamTools(tools.answer.tools ?? []).map((t) => t.name).join() === "Demo" && tools.asked.length === 0,
+    `asked: ${tools.asked.join(", ") || "nothing"}; ${tools.logged.find((l) => /served from cache/.test(l)) ?? "not served from the cache"}`,
+  );
+  const prompts = await servedFromCache((client) => client.listPrompts());
+  check(
+    "a prompts/list served from the cache, after a kernel of another source, asks the backend nothing",
+    (prompts.answer.prompts ?? []).map((p) => p.name).join() === "DemoPrompt" && prompts.asked.length === 0,
+    prompts.answer.error ?? `asked: ${prompts.asked.join(", ") || "nothing"}`,
+  );
+  wipeCache();
 }
 
 // ---------------------------------------------------------------------------
@@ -2824,6 +3082,507 @@ heading("A session that stops closes a connection still draining, at once");
   // and its seat, that may still be held.
   const traced = stubbornLog.filter((m) => /did not stop cleanly: could not close/.test(m)).length;
   check("and logs each one that would not", traced === 2, `${traced} logged: ${stubbornLog.join(" | ").slice(0, 160)}`);
+}
+
+// ---------------------------------------------------------------------------
+// Dropped silently, a reply over the size cap left its request to wait out its
+// whole ceiling, with nothing in either log to say why (#186).
+heading("A frame either end cannot read is dropped and logged with its size (#186)");
+if (socketsHere()) {
+  // The session's end, against a stub broker that answers a call with a line
+  // that is not JSON, then a frame over the cap.
+  const { FRAME_CAP } = await import(join(root, "dist", "broker-protocol.js"));
+  const overCap = `${"x".repeat(FRAME_CAP + 1)}\n`;
+  let callsSeen = 0;
+  const stub = createServer((socket) => {
+    socket.setEncoding("utf8");
+    socket.on("error", () => socket.destroy());
+    const send = (text) => socket.writable && socket.write(text);
+    let buffered = "";
+    socket.on("data", (chunk) => {
+      buffered += chunk;
+      for (let at; (at = buffered.indexOf("\n")) !== -1; buffered = buffered.slice(at + 1)) {
+        const frame = JSON.parse(buffered.slice(0, at));
+        if (frame.op === "hello") {
+          send(`${JSON.stringify({ id: frame.id, ok: true, result: { flavours: true, flavour: frame.params?.digest } })}\n`);
+        } else if (frame.op === "ping") {
+          send(`${JSON.stringify({ id: frame.id, ok: true, result: {} })}\n`);
+        } else if (frame.op === "callTool") {
+          callsSeen++;
+          send(`not a frame\n${overCap}`);
+        }
+      }
+    });
+  });
+  const stubAddress = join(privateDir(join(home, "run-dropped-frames-stub")), "broker.sock");
+  await listening(stub, stubAddress);
+  const sessionLog = [];
+  const backend = await lib.BrokerBackend.attachIfRunning({
+    address: stubAddress,
+    flavour: lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" }),
+    spawnCommand: join(home, "definitely-not-a-binary"),
+    spawnArgs: [],
+    spawnEnv: {},
+    log: (message) => sessionLog.push(message),
+  });
+  const call = backend
+    ?.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, { timeoutMs: 1_000 })
+    .catch(() => {});
+  const dropped = () => sessionLog.filter((m) => /dropped a frame/.test(m));
+  await until(() => dropped().length >= 2, 5_000);
+  check(
+    "the session logs a frame from the broker that is not JSON, by its size and not its content",
+    sessionLog.includes("broker connection: dropped a frame of 11 characters that is not JSON") &&
+      !sessionLog.some((m) => /not a frame/.test(m)),
+    dropped().join(" | ").slice(0, 160) || "nothing logged",
+  );
+  check(
+    "and a frame over the size cap",
+    sessionLog.includes(`broker connection: dropped a frame of ${FRAME_CAP + 1} characters, over the ${FRAME_CAP} cap`),
+    dropped().join(" | ").slice(0, 160) || "nothing logged",
+  );
+  // BrokerBackend is public, and its callers catch what a call rejects with.
+  let threw = null;
+  let rejected = null;
+  try {
+    await backend
+      ?.callTool({ name: "WolframLanguageEvaluator", arguments: { n: 1n } }, { timeoutMs: 1_000 })
+      .catch((err) => (rejected = err.message));
+  } catch (err) {
+    threw = err.message;
+  }
+  check(
+    "a call whose arguments JSON cannot hold rejects, as any failure of a call does, rather than throwing",
+    rejected !== null && threw === null,
+    `rejected: ${rejected}; threw: ${threw}`,
+  );
+  // The proxy refuses such a call first; this is the socket's own guard, for a
+  // caller that drives a BrokerBackend itself.
+  const callsBefore = callsSeen;
+  const tooLong = await backend
+    ?.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "x".repeat(FRAME_CAP) } }, { timeoutMs: 5_000 })
+    .then(
+      () => "answered",
+      (err) => err.message,
+    );
+  await new Promise((r) => setTimeout(r, 200));
+  check(
+    "a call too long for the socket is refused before it is sent, naming its length",
+    /over the \d+ the broker's socket carries/.test(tooLong ?? "") && callsSeen === callsBefore,
+    `${callsSeen - callsBefore} sent; ${String(tooLong).slice(0, 120)}`,
+  );
+  // Stopped first, which fails the call now rather than at its ceiling.
+  await backend?.stop();
+  await call;
+  stub.close();
+
+  // The broker's end, sent a line that is not JSON by a proxy.
+  const brokerLog = [];
+  const brokerAddress = join(privateDir(join(home, "run-dropped-frames-broker")), "broker.sock");
+  const broker = await lib.startBroker({
+    address: brokerAddress,
+    bin: fakeKernel,
+    serverName: "WolframLanguage",
+    idleMs: 60_000,
+    startTimeoutMs: 10_000,
+    reserveSeats: 0,
+    allowInspect: false,
+    clientInfo: { name: "smoke", version: "1.0.0" },
+    log: (message) => brokerLog.push(message),
+  });
+  const probe = connectSocket(brokerAddress);
+  probe.on("error", () => {});
+  probe.write("not a frame\n");
+  await until(() => brokerLog.some((m) => /dropped a frame/.test(m)), 5_000);
+  check(
+    "the broker logs a frame from a session that is not JSON, with its size",
+    brokerLog.includes("proxy connection: dropped a frame of 11 characters that is not JSON"),
+    brokerLog.find((m) => /dropped a frame/.test(m)) ?? "nothing logged",
+  );
+  probe.destroy();
+  await broker.stop();
+}
+{
+  // The reader alone, given its chunks exactly as a socket might split them.
+  const { FrameReader, FRAME_CAP: cap } = await import(join(root, "dist", "broker-protocol.js"));
+  const read = (...chunks) => {
+    const frames = [];
+    const dropped = [];
+    const reader = new FrameReader((frame) => frames.push(frame), (why) => dropped.push(why));
+    for (const chunk of chunks) reader.push(chunk);
+    return { frames, dropped };
+  };
+  // The chunk that crosses the cap also ends the frame and carries a reply.
+  const crossing = read("x".repeat(cap - 4), `xxxxxxxx\n${JSON.stringify({ id: 7, ok: true })}\n`);
+  check(
+    "a reply in the chunk that crosses the size cap is still read",
+    crossing.frames.some((f) => f?.id === 7),
+    `frames: ${JSON.stringify(crossing.frames)}; dropped: ${crossing.dropped.join(" | ")}`,
+  );
+  // A frame over the cap, its rest in later chunks, then a reply.
+  const over = read("x".repeat(cap + 1), "x".repeat(1000), `rest of it\n${JSON.stringify({ id: 8, ok: true })}\n`);
+  check(
+    "the rest of a frame over the cap is dropped with it, not reported as another, and a reply after it is read",
+    over.dropped.length === 2 &&
+      over.dropped[1] === `dropped a frame of ${cap + 1 + 1000 + 10} characters, over the ${cap} cap` &&
+      over.frames.some((f) => f?.id === 8),
+    `frames: ${JSON.stringify(over.frames)}; dropped: ${over.dropped.join(" | ")}`,
+  );
+  // A valid frame over the cap, its newline in the chunk that crosses the cap
+  // or in the next one: whether it is read must not depend on the split.
+  const oversized = JSON.stringify({ id: 11, ok: true, result: "y".repeat(cap) });
+  const splits = [
+    read(oversized.slice(0, cap - 10), `${oversized.slice(cap - 10)}\n`),
+    read(oversized, "\n"),
+  ];
+  check(
+    "a valid frame over the cap is dropped and logged with its length, whichever chunk its newline arrives in",
+    splits.every(
+      (r) =>
+        r.frames.length === 0 &&
+        r.dropped.at(-1) === `dropped a frame of ${oversized.length} characters, over the ${cap} cap`,
+    ),
+    splits.map((r) => `read ${r.frames.length}, dropped: ${r.dropped.join(" | ") || "nothing"}`).join("; "),
+  );
+  // A peer that never ends its frame: logged as it passes the cap, since its
+  // end, which says how long it was, may never come.
+  const unended = read("x".repeat(cap + 1));
+  check(
+    "a frame over the cap is logged as it passes it, though it never ends",
+    unended.dropped.length === 1 && /^dropping a frame over the \d+ cap, \d+ characters in with no newline yet$/.test(unended.dropped[0]),
+    unended.dropped.join(" | ") || "nothing logged",
+  );
+  // BrokerBackend is public and takes its logger from its caller.
+  const kept = [];
+  const thrown = [];
+  const stubborn = new FrameReader(
+    (frame) => kept.push(frame),
+    () => {
+      throw new Error("a logger that throws");
+    },
+  );
+  for (const chunk of [
+    `not a frame\n${JSON.stringify({ id: 9, ok: true })}\n`,
+    "x".repeat(cap + 1),
+    `rest of it\n${JSON.stringify({ id: 10, ok: true })}\n`,
+  ]) {
+    try {
+      stubborn.push(chunk);
+    } catch (err) {
+      thrown.push(err.message);
+    }
+  }
+  check(
+    "a logger that throws loses only its own line: the frames after each drop are still read",
+    kept.map((f) => f?.id).join() === "9,10" && thrown.length === 0,
+    `read: ${kept.map((f) => f?.id).join() || "none"}; thrown: ${thrown.join(" | ") || "nothing"}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// A frame the broker's socket could not carry was dropped unread, and its
+// request waited out its ceiling, or with none for ever, where a private
+// kernel answered it: sharing changed an answer (#200).
+heading("A request or reply too long for a kernel's stdout or the broker's socket is answered at once, alike on both paths (#200)");
+{
+  const { KERNEL_LINE_CAP } = await import(join(root, "dist", "transport.js"));
+  const { FRAME_CAP, REQUEST_CAP, LIST_CAP } = await import(join(root, "dist", "broker-protocol.js"));
+  // A call whose code is "long" is answered past a kernel's line; one whose
+  // code is "growing" within it, in numbers that, written again at 22
+  // characters each, run past twice a kernel's line, and stay within the
+  // 10 MB the SDK's own client reads.
+  const methods = join(home, "200-methods.log");
+  const env = {
+    WOLFRAM_MCP_CALL_TIMEOUT_SECONDS: "20",
+    WOLFRAM_MCP_CACHE: "0",
+    FAKE_LONG_REPLY: String(KERNEL_LINE_CAP),
+    FAKE_GROWING_REPLY: String(Math.floor((2 * KERNEL_LINE_CAP) / 20)),
+    FAKE_METHOD_LOG: methods,
+  };
+  const callsReached = () => methodLog(methods).filter((m) => m === "tools/call").length;
+  // Timed, and bounded on this side too, so a run of the code before this
+  // fails in seconds rather than hanging where a call has no ceiling.
+  const timed = async (client, code) => {
+    const began = Date.now();
+    const text = await client
+      .callTool({ name: "WolframLanguageEvaluator", arguments: { code } }, undefined, { timeout: 30_000 })
+      .then(
+        (r) => `${r.isError ? "isError: " : ""}${r.content?.[0]?.text ?? ""}`,
+        (err) => `failed: ${err.message}`,
+      );
+    return { text, ms: Date.now() - began, short: text.slice(0, 160) };
+  };
+  // Past a kernel's line and within the 10 MB a stdio client or server reads.
+  const pastLine = "x".repeat(KERNEL_LINE_CAP + 1);
+  const named = (answer) => /longer than the \d+ this server reads from a kernel/.test(answer.text);
+
+  wipeCache();
+  rmSync(methods, { force: true });
+  const startsBefore = startCount();
+  const own = await connect({ ...env, WOLFRAM_MCP_SHARE: "0" });
+  const ownReply = await timed(own.client, "long");
+  check(
+    "a private session's reply too long for the kernel's stdout is answered at once, naming its length",
+    named(ownReply) && ownReply.ms < 10_000,
+    `${ownReply.ms} ms: ${ownReply.short}`,
+  );
+  const ownNext = await timed(own.client, "1+1");
+  check(
+    "and the kernel, which answered, is kept: the next call is answered by it",
+    answeredByFake({ content: [{ text: ownNext.text }] }) && startCount() === startsBefore + 1,
+    `${startCount() - startsBefore} start(s); ${ownNext.short}`,
+  );
+  const ownReached = callsReached();
+  const ownPastLine = await timed(own.client, pastLine);
+  check(
+    "a request past a kernel's line, within what a frame carries, reaches the kernel",
+    callsReached() === ownReached + 1 && ownPastLine.ms < 10_000,
+    `${callsReached() - ownReached} reached; ${ownPastLine.short}`,
+  );
+  const ownGrowing = await timed(own.client, "growing");
+  check(
+    "a reply of numbers that grow written again is answered on a private session",
+    ownGrowing.text === "grown",
+    ownGrowing.short,
+  );
+  await own.client.close();
+
+  // Each page within a kernel's line, and too long joined.
+  const pages = Math.ceil(LIST_CAP / (KERNEL_LINE_CAP * 0.9)) + 1;
+  const toolsFile = join(home, "200-long-tools.json");
+  writeFileSync(
+    toolsFile,
+    JSON.stringify(
+      Array.from({ length: pages }, (_, i) => ({
+        name: `Long${i}`,
+        description: "d".repeat(Math.floor(KERNEL_LINE_CAP * 0.9)),
+        inputSchema: { type: "object", properties: {} },
+      })),
+    ),
+  );
+  const listed = async (extra) => {
+    const session = await connect({ ...env, FAKE_MODE: "paged-tools", FAKE_TOOLS_FILE: toolsFile, ...extra });
+    const began = Date.now();
+    const text = await session.client.listTools(undefined, { timeout: 30_000 }).then(
+      (r) => `listed ${r.tools.length}`,
+      (err) => `failed: ${err.message}`,
+    );
+    await session.client.close();
+    return { text, ms: Date.now() - began };
+  };
+  const ownList = await listed({ WOLFRAM_MCP_SHARE: "0" });
+  check(
+    "a list too long joined from its pages is refused at once, naming its length",
+    /^failed: .*over \d+ characters joined from its pages/.test(ownList.text) && ownList.ms < 10_000,
+    `${ownList.ms} ms: ${ownList.text.slice(0, 160)}`,
+  );
+
+  if (socketsHere("the shared half")) {
+    const shared = await connect({
+      ...env,
+      WOLFRAM_MCP_SHARE: "1",
+      WOLFRAM_MCP_RUNTIME_DIR: privateDir(join(home, "run-200-shared")),
+    });
+    const sharedReply = await timed(shared.client, "long");
+    check(
+      "a shared session's reply too long for the kernel's stdout is answered at once, as a private one is",
+      sharedReply.text === ownReply.text && sharedReply.ms < 10_000,
+      `${sharedReply.ms} ms: ${sharedReply.short}`,
+    );
+    const sharedReached = callsReached();
+    const sharedPastLine = await timed(shared.client, pastLine);
+    check(
+      "and a request past a kernel's line reaches the broker's kernel, answered as a private session's is",
+      sharedPastLine.text === ownPastLine.text && callsReached() === sharedReached + 1 && sharedPastLine.ms < 10_000,
+      `${sharedPastLine.ms} ms, ${callsReached() - sharedReached} reached: ${sharedPastLine.short}`,
+    );
+    const sharedGrowing = await timed(shared.client, "growing");
+    check(
+      "and a reply that grows as the broker writes it again is answered, as a private session answers it",
+      sharedGrowing.text === ownGrowing.text,
+      `shared: ${sharedGrowing.short}; private: ${ownGrowing.short}`,
+    );
+    await shared.client.close();
+
+    const sharedList = await listed({
+      WOLFRAM_MCP_SHARE: "1",
+      WOLFRAM_MCP_RUNTIME_DIR: privateDir(join(home, "run-200-paged")),
+    });
+    check(
+      "and a shared session refuses that list as a private one does, at once",
+      sharedList.text === ownList.text && sharedList.ms < 10_000,
+      `${sharedList.ms} ms: ${sharedList.text.slice(0, 160)}`,
+    );
+  }
+
+  // A request past REQUEST_CAP is past the 10 MB a stdio server reads, so an
+  // embedder's is driven in process, against a backend that records what it is
+  // asked. Refused ahead of either backend, it is answered alike on both paths.
+  {
+    const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+    const { sessionSource } = await import(join(root, "dist", "server-source.js"));
+    wipeCache();
+    const empty = join(home, "200-paclets");
+    mkdirSync(empty, { recursive: true });
+    const config = {
+      ...lib.loadConfig(() => {}),
+      kernelPath: fakeKernel,
+      serverName: "WolframLanguage",
+      inspect: false,
+      cacheEnabled: true,
+      flavour: lib.kernelFlavour({ ...process.env, MCP_SERVER_NAME: "WolframLanguage", WOLFRAM_USERBASE: empty, WOLFRAM_BASE: empty }),
+    };
+    const asked = [];
+    let ready;
+    const lists = (source) => ({
+      capabilities: async () => (asked.push("capabilities"), { tools: {}, prompts: {}, resources: {} }),
+      listTools: async () => (asked.push("tools/list"), { tools: [{ name: "Demo", inputSchema: { type: "object" } }], source }),
+      listPrompts: async () => (asked.push("prompts/list"), { prompts: [{ name: "DemoPrompt" }], source }),
+    });
+    const stub = () => ({
+      ...lists(undefined),
+      onKernelReady: (handler) => {
+        ready = handler;
+      },
+      getPrompt: async () => (asked.push("prompts/get"), { messages: [] }),
+      listResources: async () => (asked.push("resources/list"), { resources: [] }),
+      readResource: async () => (asked.push("resources/read"), { contents: [] }),
+      callTool: async () => (asked.push("tools/call"), { content: [{ type: "text", text: "called" }] }),
+      stop: async () => {},
+    });
+    // Seeded as a kernel's start leaves the cache, so prompts and resources are offered.
+    const seeding = lib.createWolframServer(config, () => {}, stub);
+    await ready(lists(sessionSource(config.serverName, config.flavour, seeding.install.bin, config.inspect).digest));
+    const { server } = lib.createWolframServer(config, () => {}, stub);
+    const client = new Client({ name: "smoke", version: "1.0.0" }, { capabilities: {} });
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverSide);
+    await client.connect(clientSide);
+    const overlong = "x".repeat(REQUEST_CAP + 1);
+    const outcome = (request) => request.then(() => "answered", (err) => `failed: ${err.message}`);
+    asked.length = 0;
+    const refusals = {
+      "tools/call": await outcome(client.callTool({ name: "Demo", arguments: { code: overlong } })),
+      "prompts/get": await outcome(client.getPrompt({ name: "DemoPrompt", arguments: { text: overlong } })),
+      "resources/read": await outcome(client.readResource({ uri: `ui://${overlong}` })),
+      "resources/list": await outcome(client.listResources({ cursor: overlong })),
+    };
+    check(
+      "a request whose parameters pass the cap is refused, naming their length, before any backend is asked",
+      Object.values(refusals).every((r) => /longer than the \d+ this server sends/.test(r)) && asked.length === 0,
+      `asked: ${asked.join(", ") || "nothing"}; ${Object.entries(refusals).map(([m, r]) => `${m}: ${r.slice(0, 50)}`).join(" | ")}`,
+    );
+    const meta = await outcome(client.callTool({ name: "Demo", arguments: { code: "1+1" }, _meta: { note: overlong } }));
+    check(
+      "but a call is measured as it is sent: a client's own long _meta, which is not, refuses nothing",
+      meta === "answered" && asked.includes("tools/call"),
+      `${meta}; asked: ${asked.join(", ")}`,
+    );
+    await client.close();
+    wipeCache();
+  }
+
+  // The transport alone, against a child that prints what a kernel might.
+  // Only a dropped line that begins as the reply to a request outstanding
+  // answers it; anything else leaves it to its own reply.
+  const { FilteringStdioTransport, replyId } = await import(join(root, "dist", "transport.js"));
+  const against = async (lines) => {
+    const child = [
+      "process.stdin.once('data', (d) => {",
+      "  const { id } = JSON.parse(String(d).split('\\n')[0]);",
+      ...lines.map((line) => `  process.stdout.write(${line} + '\\n');`),
+      "});",
+      "setTimeout(() => {}, 10000);",
+    ].join("\n");
+    const transport = new FilteringStdioTransport({ command: process.execPath, args: ["-e", child] });
+    const received = [];
+    const errors = [];
+    transport.onmessage = (message) => received.push(message);
+    transport.onerror = (err) => errors.push(err.message);
+    await transport.start();
+    await transport.send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: {} });
+    const answers = (m) =>
+      m?.jsonrpc === "2.0" && m.id === 1 && (m.error !== undefined || (typeof m.result === "object" && m.result !== null));
+    await until(() => received.some(answers), 10_000);
+    await transport.close();
+    return { answer: received.find(answers), errors };
+  };
+  const stray = await against([
+    "'[1,2]'",
+    `JSON.stringify({ jsonrpc: '2.0', method: 'notifications/message', params: { data: 'y'.repeat(${KERNEL_LINE_CAP}) } })`,
+    "JSON.stringify({ jsonrpc: '2.0', id, result: { said: 'its own' } })",
+  ]);
+  check(
+    "a line too long for the kernel's stdout that is not a reply fails no request, and stray JSON on stdout ends nothing",
+    stray.answer?.result?.said === "its own" && stray.errors.length === 0,
+    `answer: ${JSON.stringify(stray.answer ?? null).slice(0, 120)}; errors: ${stray.errors.join(" | ") || "none"}`,
+  );
+  const lookalike = await against([
+    "JSON.stringify({ id, result: { stray: true } })",
+    "JSON.stringify({ jsonrpc: '2.0', id, result: null })",
+    `JSON.stringify({ jsonrpc: '2.0', id, result: { said: 'y'.repeat(${KERNEL_LINE_CAP}) } })`,
+  ]);
+  check(
+    "a stray line holding the request's id, which the SDK takes for no reply, is none, so the long reply after it still answers it",
+    /longer than the \d+ this server reads from a kernel/.test(lookalike.answer?.error?.message ?? ""),
+    JSON.stringify(lookalike.answer ?? null).slice(0, 160),
+  );
+  const idLast = await against([
+    `JSON.stringify({ jsonrpc: '2.0', result: { said: 'y'.repeat(${KERNEL_LINE_CAP}) }, id })`,
+  ]);
+  check(
+    "a long reply that names its id after its result answers its request too",
+    /longer than the \d+ this server reads from a kernel/.test(idLast.answer?.error?.message ?? ""),
+    JSON.stringify(idLast.answer ?? null).slice(0, 160),
+  );
+  const ends = (head, tail = '"}]}}') => replyId({ head, tail });
+  check(
+    "a dropped reply is matched to its request by its id, before or after its result, and nothing else is taken for one",
+    ends('{"jsonrpc":"2.0","id":7,"result":{"content"') === 7 &&
+      ends('{"id":7,"jsonrpc":"2.0","result":{"content"') === 7 &&
+      ends('{ "jsonrpc": "2.0", "id": 9, "error": {') === 9 &&
+      ends('{"jsonrpc":"2.0","id":"a\\"b","error":{') === 'a"b' &&
+      ends('{"result":{"content"', 'yyy"}]},"jsonrpc":"2.0","id":11}') === 11 &&
+      ends('{"jsonrpc":"2.0","result":{"x"', 'yyy","id":12}}') === undefined &&
+      ends('{"jsonrpc":"2.0","id":7,"result":{"content"', "yyyy") === undefined &&
+      ends('{"jsonrpc":"2.0","id":7,"result":"yyyy') === undefined &&
+      ends('{"id":7,"result":{"content"') === undefined &&
+      ends('{"jsonrpc":"2.0","method":"notifications/message","params"') === undefined &&
+      ends('{"jsonrpc":"2.0","id":3,"method":"roots/list"') === undefined &&
+      ends("yyyy") === undefined,
+    "",
+  );
+  // A list joined from pages is measured as it is written joined, so one that
+  // is exactly the cap long is kept, and one character more refused.
+  const { drainPages } = await import(join(root, "dist", "kernel.js"));
+  const joined = (second) =>
+    drainPages(async (cursor) =>
+      cursor ? { items: ["b".repeat(second)] } : { items: ["a".repeat(1000)], nextCursor: "2" },
+    ).then(
+      (all) => JSON.stringify(all).length,
+      (err) => err.message,
+    );
+  const exactly = await joined(LIST_CAP - 1007);
+  const over = await joined(LIST_CAP - 1006);
+  check(
+    "a list joined from pages exactly as long as the cap is kept, and one character longer refused",
+    exactly === LIST_CAP && /joined from its pages/.test(String(over)),
+    `${exactly}; ${String(over).slice(0, 100)}`,
+  );
+
+  // The broker's last guards, which no kernel's answer reaches any more.
+  const { fitted, eventFrame } = await import(join(root, "dist", "broker-server.js"));
+  const sent = JSON.parse(fitted({ id: 4, ok: true, result: "r".repeat(FRAME_CAP) }));
+  check(
+    "a response the socket cannot carry is answered in its place with an error naming its length, and an event is not sent",
+    sent.id === 4 &&
+      sent.ok === false &&
+      /over the \d+ its socket carries/.test(sent.error) &&
+      eventFrame({ event: "kernelReady", capabilities: {}, tools: [{ name: "r".repeat(FRAME_CAP) }], prompts: null }) === undefined &&
+      typeof eventFrame({ event: "shuttingDown" }) === "string",
+    JSON.stringify(sent).slice(0, 160),
+  );
+  wipeCache();
 }
 
 // ---------------------------------------------------------------------------
@@ -7933,6 +8692,196 @@ heading("A kernel on PATH is discoverable on its own");
       lib.resolveKernelBinary(join(install, "wolfram")),
     `${lib.resolveKernelBinary(join(binDir, "wolfram"))} vs ${lib.resolveKernelBinary(join(install, "wolfram"))}`,
   );
+
+  // The rest of this section names discovery's every input itself: no
+  // installation variable, preference or hint of the developer's may answer.
+  const discovering = (env, fn) => {
+    const before = { ...process.env };
+    for (const key of ["WOLFRAM_INSTALLATION_DIRECTORY", "WOLFRAM_HOME", "WOLFRAMSCRIPT_KERNELPATH", "WOLFRAMSCRIPT_CONFIGURATIONPATH"]) {
+      delete process.env[key];
+    }
+    Object.assign(process.env, {
+      HOME: join(home, "discovering-home"),
+      XDG_CONFIG_HOME: join(home, "discovering-home", ".config"),
+      XDG_CACHE_HOME: join(home, "discovering-home", ".cache"),
+      ...env,
+    });
+    try {
+      return fn();
+    } finally {
+      for (const key of Object.keys(process.env)) delete process.env[key];
+      Object.assign(process.env, before);
+    }
+  };
+
+  // A pinned version was matched against the platform scan alone, so a kernel
+  // reachable only through PATH could not be pinned, and was reported as none
+  // found (#182).
+  const pinned = discovering({ PATH: `${dir}:/usr/bin:/bin` }, () =>
+    lib.locateKernel({ version: "10000", log: () => {} }),
+  );
+  check(
+    "a pinned version matches a kernel found only on PATH",
+    pinned?.bin === realpathSync(join(dir, "wolfram")),
+    pinned?.bin ?? "null — matched against the scan alone",
+  );
+  // `15` selects the newest 15.x, whichever step names it: matches were taken
+  // in the order they were gathered, so an older one WOLFRAM_HOME named beat a
+  // newer one on PATH.
+  const older = join(home, "install-10000.0.5");
+  mkdirSync(join(older, "Executables"), { recursive: true });
+  writeFileSync(join(older, "Executables", "wolfram"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const newerDir = join(home, "path-kernel-10000.2.0");
+  mkdirSync(newerDir, { recursive: true });
+  writeFileSync(join(newerDir, "wolfram"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const newest = discovering({ PATH: `${newerDir}:/usr/bin:/bin`, WOLFRAM_HOME: older }, () =>
+    lib.locateKernel({ version: "10000", log: () => {} }),
+  );
+  check(
+    "and of several that match, the newest, whichever step names it",
+    newest?.version === "10000.2.0",
+    `${newest?.bin ?? "null"} version=${newest?.version}`,
+  );
+
+  // Building a server runs this lookup before `initialize` is answered, where
+  // nothing may spawn: it ran `which`, twice where nothing earlier found a
+  // kernel, each for up to a 5 s timeout (#183). A `which` first on PATH that
+  // only records it ran, and finds nothing, shows the search is this process's.
+  const whichStub = join(home, "which-stub");
+  mkdirSync(whichStub, { recursive: true });
+  const whichRan = join(whichStub, "ran");
+  writeFileSync(join(whichStub, "which"), `#!/bin/sh\necho ran >> '${whichRan}'\nexit 1\n`, { mode: 0o755 });
+  const searched = discovering({ PATH: `${whichStub}:${dir}:/usr/bin:/bin` }, () =>
+    lib.locateKernel({ minVersion: "9999", log: () => {} }),
+  );
+  check(
+    "a kernel on PATH is found without running which",
+    searched?.bin === realpathSync(join(dir, "wolfram")) && !existsSync(whichRan),
+    existsSync(whichRan) ? "which ran" : (searched?.bin ?? "null"),
+  );
+  // A shell reads an empty or relative PATH entry against the working
+  // directory, and a server's may be any checkout: a `wolfram` there must not
+  // be run as the kernel.
+  const checkout = join(home, "checkout-10000.0.0");
+  mkdirSync(join(checkout, "bin"), { recursive: true });
+  writeFileSync(join(checkout, "wolfram"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  writeFileSync(join(checkout, "bin", "wolfram"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const cwd = process.cwd();
+  process.chdir(checkout);
+  let fromCheckout;
+  try {
+    fromCheckout = discovering({ PATH: `:bin:/usr/bin:/bin` }, () =>
+      lib.locateKernel({ minVersion: "9999", log: () => {} }),
+    );
+  } finally {
+    process.chdir(cwd);
+  }
+  check(
+    "an empty or relative PATH entry never finds a kernel in the working directory",
+    fromCheckout === null,
+    fromCheckout?.bin ?? "null",
+  );
+  // Appended, not joined: an entry through a directory that is gone is one a
+  // shell skips, and `join` collapsed `missing/..` before the filesystem saw it.
+  const throughMissing = discovering({ PATH: `${dir}/missing/..:/usr/bin:/bin` }, () =>
+    lib.locateKernel({ minVersion: "9999", log: () => {} }),
+  );
+  check(
+    "a PATH entry through a directory that is gone finds nothing",
+    throughMissing === null,
+    throughMissing?.bin ?? "null",
+  );
+  // A pin sees both names on PATH, not the first usable one, which a `wolfram`
+  // of another version would otherwise be.
+  const kernelOnly = join(home, "kernel-only-10000.3.0");
+  mkdirSync(kernelOnly, { recursive: true });
+  writeFileSync(join(kernelOnly, "WolframKernel"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const second = discovering({ PATH: `${dir}:${kernelOnly}:/usr/bin:/bin` }, () =>
+    lib.locateKernel({ version: "10000.3", log: () => {} }),
+  );
+  check(
+    "a pin matches a WolframKernel on PATH behind a wolfram of another version",
+    second?.bin === realpathSync(join(kernelOnly, "WolframKernel")),
+    second?.bin ?? "null — only the first name on PATH was matched",
+  );
+  // Two sources can know one binary by two versions: its path's, and the one
+  // doctor recorded. Merged before matching, the recorded one was dropped.
+  const hinted = discovering({ PATH: `${dir}:/usr/bin:/bin` }, () => {
+    const bin = realpathSync(join(dir, "wolfram"));
+    const { mtimeMs, size } = statSync(bin);
+    const hint = join(lib.cacheDir(), "installations", "discovery-hint.json");
+    mkdirSync(dirname(hint), { recursive: true });
+    // As doctor writes it: the binary's mtime rounded, as binaryIdentity reads it back.
+    writeFileSync(hint, JSON.stringify({ bin, version: "10000.0.1", mtimeMs: Math.round(mtimeMs), size }));
+    return lib.locateKernel({ version: "10000.0.1", log: () => {} });
+  });
+  check(
+    "a pin matches the version doctor recorded for a binary its path reads otherwise",
+    hinted?.version === "10000.0.1",
+    hinted ? `${hinted.bin} version=${hinted.version}` : "null",
+  );
+  // A hint file holding JSON `null` read `.bin` off nothing, and threw out of
+  // server construction.
+  let nullHint;
+  try {
+    nullHint = discovering({ PATH: `${dir}:/usr/bin:/bin` }, () => {
+      const hint = join(lib.cacheDir(), "installations", "discovery-hint.json");
+      mkdirSync(dirname(hint), { recursive: true });
+      writeFileSync(hint, "null");
+      return lib.locateKernel({ version: "10000", log: () => {} });
+    });
+  } catch (err) {
+    nullHint = err;
+  }
+  check(
+    "a discovery hint holding null is ignored, not thrown",
+    nullHint?.bin === realpathSync(join(dir, "wolfram")),
+    nullHint instanceof Error ? nullHint.message : (nullHint?.bin ?? "null"),
+  );
+  // Every entry on PATH, for a pin: a `wolfram` earlier on PATH hid a later one.
+  const later = join(home, "path-kernel-10000.4.0");
+  mkdirSync(later, { recursive: true });
+  writeFileSync(join(later, "wolfram"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const behind = discovering({ PATH: `${dir}:${later}:/usr/bin:/bin` }, () =>
+    lib.locateKernel({ version: "10000.4", log: () => {} }),
+  );
+  check(
+    "a pin matches a kernel later on PATH than another of the same name",
+    behind?.bin === realpathSync(join(later, "wolfram")),
+    behind?.bin ?? "null — only the first on PATH was seen",
+  );
+  // The version doctor recorded came from the kernel, so for its binary it
+  // outranks the path's guess: a pin for the path's version may not launch a
+  // kernel that reported another.
+  const hintAt = (bin, version) => {
+    const { mtimeMs, size } = statSync(bin);
+    const hint = join(lib.cacheDir(), "installations", "discovery-hint.json");
+    mkdirSync(dirname(hint), { recursive: true });
+    writeFileSync(hint, JSON.stringify({ bin, version, mtimeMs: Math.round(mtimeMs), size }));
+  };
+  const guessed = discovering({ PATH: `${dir}:/usr/bin:/bin` }, () => {
+    hintAt(realpathSync(join(dir, "wolfram")), "9999.9.9");
+    return lib.locateKernel({ version: "10000.0", log: () => {} });
+  });
+  check(
+    "a pin for a path's version does not match a kernel doctor recorded as another",
+    guessed === null,
+    guessed ? `${guessed.bin} version=${guessed.version}` : "null",
+  );
+  // A kernel that lost its execute bit keeps its size and mtime, so its hint
+  // still matched, and it was chosen and then failed to start.
+  const lapsed = join(home, "lapsed-10000.5.0", "wolfram");
+  mkdirSync(dirname(lapsed), { recursive: true });
+  writeFileSync(lapsed, "#!/bin/sh\nexit 0\n", { mode: 0o644 });
+  const notExecutable = discovering({ PATH: "/usr/bin:/bin" }, () => {
+    hintAt(lapsed, "10000.5.0");
+    return lib.locateKernel({ version: "10000.5", log: () => {} });
+  });
+  check(
+    "a recorded kernel that is no longer executable is not chosen",
+    notExecutable === null,
+    notExecutable?.bin ?? "null",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -7962,8 +8911,15 @@ heading("Discovery spends no seat; doctor is the only route to wolframscript");
   );
   const invocations = () =>
     existsSync(asked) ? readFileSync(asked, "utf8").split("\n").filter(Boolean).length : 0;
+  // The stub and a directory holding only `which`: doctor asks wolframscript
+  // here, and a real one can live in /usr/bin and /bin, so a stub that cannot
+  // run must find nothing rather than fall through to it (as in the unit
+  // section's wolframscript fallback).
+  const whichDir = join(home, "ws-which");
+  mkdirSync(whichDir, { recursive: true });
+  symlinkSync(systemWhich(), join(whichDir, "which"));
   const env = {
-    PATH: `${stubDir}:/usr/bin:/bin`,
+    PATH: `${stubDir}:${whichDir}`,
     WOLFRAM_MCP_KERNEL: "",
     WOLFRAM_MCP_MIN_VERSION: "9999",
   };
@@ -8235,6 +9191,16 @@ heading("Configuration that names a kernel fails closed");
     "and a version pin outranks it, as all three documents say",
     pinned === null,
     pinned ? `ignored the pin and used ${pinned.bin}` : "null",
+  );
+  // Matched against every installation found, the scan's and WOLFRAM_HOME's
+  // alike, as the same documents say: it was the scan's alone (#182). A version
+  // no installation on this machine can have, so only the stub answers.
+  const pinnedHome = isolated({ WOLFRAM_HOME: stub("10000.1.0") }, () =>
+    lib.locateKernel({ version: "10000.1", log: () => {} }));
+  check(
+    "a pin matches an installation WOLFRAM_HOME names, which the scan does not see",
+    pinnedHome?.version === "10000.1.0",
+    pinnedHome ? `${pinnedHome.bin} version=${pinnedHome.version}` : "null — matched against the scan alone",
   );
 }
 
@@ -11044,6 +12010,91 @@ heading("CLI");
     shown.size > 0 && unreported.length === 0,
     unreported.length ? `not in CONFIG_VARS: ${unreported.join(", ")}` : "",
   );
+
+  // .codex/config.toml serves the plugin's server to Codex, from the assembled
+  // tree Claude Code runs here, so that both run the same bytes and share a
+  // broker. Codex reads only its own config and passes a server only the
+  // variables `env_vars` names: a setting added to src/ and not there works in
+  // Claude Code and silently not in Codex, and an entry that drifts from the
+  // manifest is a second program, a second pool against one licence. Read as
+  // text: Node has no TOML parser, and the file is ours. Its comments go first,
+  // so a commented-out value does not count as one set; no value in the entry
+  // holds a `#`.
+  {
+    const manifest = JSON.parse(readFileSync(join(root, "plugin", ".claude-plugin", "plugin.json"), "utf8"))
+      .mcpServers.WolframLanguage;
+    // Up to the next table only: a later table of the same shape would otherwise
+    // supply the line this one drifted from.
+    const entry = (
+      readFileSync(join(root, ".codex", "config.toml"), "utf8")
+        .split(/^\[mcp_servers\.wolfram-agent-tools-dev\]$/m)[1]
+        ?.split(/^\[/m)[0] ?? ""
+    ).replace(/#.*$/gm, "");
+    // `npm run release:artifacts` assembles the plugin at release/plugin, which
+    // the entry's shell finds from the repository's root: Codex starts a server
+    // where the session was launched, and resolves a relative `cwd` there too.
+    const rootOf = "$(git rev-parse --show-toplevel 2>/dev/null || pwd)/release/plugin";
+    const paths = manifest.args.map((arg) => arg.replace("${CLAUDE_PLUGIN_ROOT}", rootOf));
+    const args = ["-c", `exec ${manifest.command} ${paths.map((path) => `"${path}"`).join(" ")}`];
+    const pairs = Object.entries(manifest.env).map(([name, value]) => `${name} = ${JSON.stringify(value)}`);
+    const drifted = [
+      ["command", `command = "sh"`],
+      ["args", `args = [${args.map((arg) => JSON.stringify(arg)).join(", ")}]`],
+      ["env", `env = { ${pairs.join(", ")} }`],
+    ]
+      // Whole lines: as a substring, `launcher_args = [...]` passed for `args`.
+      .filter(([, line]) => !entry.split("\n").some((text) => text.trim() === line))
+      .map(([field]) => field);
+    check(
+      "Codex's server entry runs the plugin's own server",
+      entry !== "" && drifted.length === 0,
+      drifted.length ? `differs in: ${drifted.join(", ")}` : "",
+    );
+    // What failed in practice: `cwd = ".."` beside `release/plugin/...` held
+    // only where Codex happened to start one directory down, and from the root
+    // named the repository's parent. Resolve the entry's own path the way its
+    // shell does, from a directory other than the root, and expect the bundle's.
+    // The path is read out of the entry itself, not the expectation above. In
+    // trees of the check's own: a repository, two directories down, and a
+    // source export with no .git, where Codex loads the file only from the
+    // launch directory, which is then the root.
+    const configured = /^args = \["-c", "exec node \\"([^"]+)\\""\]$/m.exec(entry)?.[1];
+    const repo = realpathSync(mkdtempSync(join(tmpdir(), "wmcp-codex-root-")));
+    const exported = realpathSync(mkdtempSync(join(tmpdir(), "wmcp-codex-export-")));
+    spawnSync("git", ["init", "-q"], { cwd: repo });
+    mkdirSync(join(repo, "a", "b"), { recursive: true });
+    const resolveIn = (dir) =>
+      configured ? spawnSync("sh", ["-c", `printf %s "${configured}"`], { cwd: dir, encoding: "utf8" }) : undefined;
+    const bundleIn = (dir) => join(dir, "release", "plugin", "wolfram-mcp-server.mjs");
+    for (const [where, from, top] of [
+      ["two directories down in a repository", join(repo, "a", "b"), repo],
+      ["at the root of a tree with no .git", exported, exported],
+    ]) {
+      const resolved = resolveIn(from);
+      check(
+        `Codex's server entry finds the assembled plugin ${where}`,
+        resolved?.stdout === bundleIn(top),
+        resolved ? resolved.stdout || resolved.stderr.trim() : "no `exec node \"<path>\"` in the entry's args",
+      );
+    }
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(exported, { recursive: true, force: true });
+    const forwarded = new Set(
+      [...(/^env_vars = \[([\s\S]*?)\]/m.exec(entry)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map(([, name]) => name),
+    );
+    const windowsOnly = new Set(["LOCALAPPDATA", "APPDATA", "ProgramFiles"]);
+    // Read by Node's tmpdir(), which picks the broker's directory when nothing
+    // names one, so not by name anywhere in src/.
+    const readByNode = ["TMPDIR", "TMP", "TEMP"];
+    const unforwarded = [...envNames(sourceText), ...readByNode]
+      .filter((name) => !windowsOnly.has(name) && !(name in manifest.env) && !forwarded.has(name))
+      .sort();
+    check(
+      "Codex forwards every variable the code reads",
+      forwarded.size > 0 && unforwarded.length === 0,
+      unforwarded.length ? `not in env_vars: ${unforwarded.join(", ")}` : `${forwarded.size} forwarded`,
+    );
+  }
 
   const version = run(["--version"]);
   check("--version prints the package version", version.stdout.trim() === lib.PKG.version);

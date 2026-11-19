@@ -66,7 +66,10 @@ code, so whoever changes a constant changes its row.
 |---|---|---|---|
 | `BROKER_PROTOCOL` | `9` | `broker-protocol.ts` | Part of the socket path, so proxies and brokers that cannot understand each other never meet. |
 | `SUN_PATH_BYTES` | `process.platform === "linux" ? 108 : 104` | `broker-protocol.ts` | `sockaddr_un.sun_path`, its NUL included. An address this long or longer is refused, and the session uses a private kernel: Node truncates one, possibly into a directory above the one checked, or cannot listen at it. The socket's descriptive name is used where it fits, the terse `wm-<digest>.sock` where only that does. |
-| `MAX_UNTERMINATED_BYTES` | `4 * 1024 * 1024` | `transport.ts`, `broker-protocol.ts` | Output held from a kernel, or a frame from a socket peer, before it is dropped unread. Two separate boundaries, deliberately: one trusts a kernel, the other an unauthenticated socket. |
+| `KERNEL_LINE_CAP` | `4 * 1024 * 1024` | `transport.ts` | The longest line read from a kernel's stdout, in characters, ended or not. A reply longer is dropped, and the request it names gets an error giving its length at once, alike on either path (#200). |
+| `FRAME_CAP` | `6 * KERNEL_LINE_CAP` | `broker-protocol.ts` | The longest frame either end of the broker's socket reads or sends, past what a reply read from a kernel can grow to when the broker writes it again. A response past it is answered with an error naming its length, and an event past it is not sent (#200). |
+| `REQUEST_CAP` | `FRAME_CAP - KERNEL_LINE_CAP` | `broker-protocol.ts`, `proxy.ts` | The longest a request's parameters may run to. Longer is refused by the proxy before any backend sees it, alike on either path, so the frame carrying a request always fits (#200). |
+| `LIST_CAP` | `REQUEST_CAP / 2` | `broker-protocol.ts`, `kernel.ts` | The longest list joined from pages, written as a broker writes it: half a request's room, since a kernel's start sends its tools and its prompts in one event. Longer is refused where the pages are joined, alike on either path (#200). |
 | `RECENT_LINE_LIMIT` | `15` | `transport.ts` | Lines of non-protocol kernel output kept, to quote back in an error. |
 | `KILL_ESCALATION_MS` | `5_000` | `transport.ts` | Grace between `SIGTERM` and `SIGKILL` for a kernel that will not exit. |
 | `REAP_TIMEOUT_MS` | `8_000` | `transport.ts` | Longest wait for a kernel to exit before giving up on it. |
@@ -133,7 +136,10 @@ A server you built yourself may read variables this package has never heard of. 
 ```
 
 Blank and unset are the same flavour, so `MCP_TOOL_OPTIONS=""` shares with a session that
-omits it. `wolfram-mcp-server doctor` prints the flavour in effect.
+omits it. Once any session declares a name, each kernel the broker adds afterwards starts
+without it, unless its session sets it, and a session that declares it is never handed a kernel
+that holds a value for it from the broker's own environment.
+`wolfram-mcp-server doctor` prints the flavour in effect.
 
 ## Choosing the installation
 
@@ -168,9 +174,9 @@ cause rather than silently substituting a different installation.
 6. `wolfram` or `WolframKernel` on `PATH`, then the installation `doctor` recorded, if
    step 7 is what found it
 7. `wolframscript -code '$InstallationDirectory'` — the only step that starts a kernel, so
-   only `doctor` runs it. A session, the LSP and the library's `createWolframServer` stop at
-   step 6; a kernel only `wolframscript` knows about is reached by running `doctor` once,
-   which records it
+   only an explicit command runs it: `locateKernel` stops at step 6 unless its caller asks,
+   and only `doctor` and `npm run test:custom` do. A kernel only `wolframscript` knows about
+   is reached by running `doctor` once, which records it
 
 Step 4 outranks the scan deliberately. It is a preference somebody recorded, whereas
 "highest version number on disk" is a guess — and on a machine with an experimental build

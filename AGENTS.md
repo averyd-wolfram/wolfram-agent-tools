@@ -130,6 +130,8 @@ built-ins, which is the bug it exists for.
     failure means for the kernel
   - `transport.ts`: `FilteringStdioTransport` — splits kernel stdout into JSON-RPC frames and
     noise, keeps the last 15 noise lines for error messages, bounded kill escalation
+  - `lines.ts`: `CappedLines`, the one line splitter behind a kernel's stdout and the broker's
+    socket — a line over its cap is dropped whole, ended or not, and reported by its length
   - `pool.ts`: several kernels behind a licence-derived budget, with FIFO waiters.
     `deriveBudget` is the seat arithmetic and is pure, so the 2- and 4-seat cases test on a
     machine with neither
@@ -153,8 +155,9 @@ built-ins, which is the bug it exists for.
   - `server-source.ts`: what a server is served from, read off the disk without a kernel —
     the installed paclets that mention AgentTools and the user's own server file, by inode
     and ctime — which the cache key carries and each kernel records as it starts (#6)
-  - `config.ts`: every knob, all environment-driven, plus `MCP_SERVERS`, the cold-start
-    capability table — the paclet's *built-in* servers, never the whole name space
+  - `config.ts`: every knob, all environment-driven, plus `MCP_SERVERS`, what the paclet's
+    *built-in* servers were measured to offer — for diagnostics, never what `initialize`
+    advertises, and never the whole name space
   - `flavour.ts`: which environment values decide whether two sessions may share a kernel.
     `FLAVOUR_VARS` is what the paclet reads, pinned by the `.wlt`; `applyFlavour` builds a
     kernel's environment *exactly*, stripping what the flavour leaves unset rather than
@@ -231,8 +234,35 @@ built-ins, which is the bug it exists for.
 - `.claude-plugin/marketplace.json`: makes the repo its own marketplace, serving
   `release/plugin/` in place: `.claude/settings.json` enables `wolfram@wolfram` for sessions
   in this repo — what they run is what was last assembled, which is what ships — and disables
-  `.mcp.json`'s copy of the same server, so the tools appear once
+  `.mcp.json`'s copy of the same server, so the tools appear once. It also declares two
+  third-party review plugins, each marketplace pinned to the commit trialled on #188 and moved
+  only on purpose: claudex-loop (a plan reviewed by the other provider, Codex for a Claude
+  session, which `.codex/config.toml` enables for Codex too) and Trail of Bits'
+  `spec-to-code-compliance` (code checked against the document that specifies it). A pin by
+  commit needs Claude Code 2.1.324 or newer; older ones pass the SHA to `git clone --branch`
+  and register neither. A session started in the trusted folder registers both (the larger
+  clone may outlast a short one), and then a contributor installs each once, `claude plugin
+  install <name>@<marketplace> --scope project`, which rewrites `.claude/settings.json`'s
+  formatting: restore it with `git checkout`. A user-scope copy from before may survive the
+  pin, marketplace and installed files alike, so first `claude plugin uninstall
+  <name>@<marketplace> --scope user` and `claude plugin marketplace remove <name> --scope user`
+  (without `--scope` that removes this file's declaration too). The pin is the commit
+  declared, not a guarantee of the files run: `gitCommitSha` in
+  `~/.claude/plugins/installed_plugins.json` names what was installed, and Claude Code keeps one
+  copy per plugin version, so another project pinning another commit of it can replace them
 - `.mcp.json`: committed, so this repo runs its own working tree as an MCP server
+- `.codex/`: Codex's project layer, which it loads only once the user marks the repository
+  trusted in `~/.codex/config.toml`, and otherwise ignores without a word. `config.toml` sets
+  the reasoning effort reviews run at, and serves Codex the plugin's server from the assembled
+  `release/plugin/`, as Claude Code runs it here: the same bytes, so one broker. What a branch
+  you have not reviewed can make either tool run as a session starts is #181. It
+  is named apart so a user's server of the same name cannot clash, and the suite holds it to
+  the plugin's manifest. Codex lists tools as a session starts, as Claude Code does, so on a
+  cold cache its first session starts a kernel to learn them
+- `.agents/skills/`: where Codex reads a repository's skills. `wolfram-language` links the
+  plugin's own, so Codex knows the Wolfram tools a Claude Code session learns from the plugin.
+  It is written for Claude Code until §5 MA renders skills per client (D30): in Codex, its
+  `/wolfram:doctor` is `npm run doctor`
 - `.github/dependabot.yml`: weekly npm and Actions updates, and security updates; its header
   says how their titles fit the release pipeline
 - `.github/workflows/`: `ci.yml` runs `npm test` (hermetic, no seat) matrixed over the Node floor
@@ -284,9 +314,9 @@ installation that cannot be used stops discovery rather than substituting anothe
 6. `wolfram` or `WolframKernel` on `PATH`, then the installation `doctor` recorded, if
    step 7 is what found it
 7. `wolframscript -code '$InstallationDirectory'` — the only step that starts a kernel, so
-   only `doctor` runs it. A session, the LSP and the library's `createWolframServer` stop at
-   step 6; a kernel only `wolframscript` knows about is reached by running `doctor` once,
-   which records it
+   only an explicit command runs it: `locateKernel` stops at step 6 unless its caller asks,
+   and only `doctor` and `npm run test:custom` do. A kernel only `wolframscript` knows about
+   is reached by running `doctor` once, which records it
 
 The 14.3 floor applies in every auto-detection branch (3–7). An explicit `WOLFRAM_MCP_KERNEL`
 path or `WOLFRAM_MCP_VERSION` pin is honoured as named — the fake kernel has no version, so the
@@ -326,11 +356,18 @@ Use the official specification when working on `proxy.ts` or `transport.ts`.
   session. There is no `console.log` in `src/` and there must not be — everything goes through
   `log.ts`, to stderr. `FilteringStdioTransport` exists because the kernel prints banners and
   messages to *its* stdout.
-- **Nothing on the `initialize` path starts a kernel.** Capabilities come from the disk cache or
-  from `MCP_SERVERS`; `tools/list` is served from cache when one is warm. Work added to
+- **Nothing on the `initialize` path starts a kernel.** Capabilities come from the disk cache:
+  a cold session advertises tools only, and prompts once a kernel has reported them and the
+  cache holds that; `tools/list` is served from cache when one is warm. Work added to
   `createWolframServer` must not block and must not spawn.
 - **Sharing is an optimisation, never a dependency.** Every broker failure must fall back to a
-  private kernel, with the reason logged.
+  private kernel, with the reason logged, but for two, each deliberate: a start deadline spent
+  attaching to the broker or waiting for it to prepare, since a private kernel started with no
+  time left would spend a second seat only to fail, and a request the broker already had, which
+  fails rather than run again since it may have run: one sent to a broker that goes (resending
+  one it never read is #102), or one whose reply is too long for the socket, which the broker
+  answers at once with an error. A request whose parameters pass `REQUEST_CAP` is refused on both
+  paths alike, before any kernel sees it (#200).
 - **Sharing may never change an answer.** A kernel reads its environment at startup, so two
   sessions share only where their *flavour* matches (`flavour.ts`); the broker starts a kernel
   per flavour and its pool retires an idle one of another flavour rather than exceed the seat
@@ -341,7 +378,9 @@ Use the official specification when working on `proxy.ts` or `transport.ts`.
 
 Every knob is an environment variable, so the command line stays argument-free. Adding one means
 updating `CONFIG_VARS` in `doctor.ts` and the `HELP` text in `index.ts` — the suite's CLI
-section fails otherwise, because those are what a stuck user sees — plus `docs/environment.md`.
+section fails otherwise, because those are what a stuck user sees — plus `docs/environment.md`,
+and `env_vars` in `.codex/config.toml`, without which Codex never passes it on (the suite fails
+there too).
 
 `MCP_SERVER_NAME` and `MCP_TOOL_OPTIONS` are Wolfram's own variables, not ours. A server
 name is **not** restricted to `MCP_SERVERS`: the paclet resolves a user's own server out of
@@ -406,6 +445,30 @@ conversation).
 repo runs the working tree through the plugin (`wolfram@wolfram`) and only through it —
 `.claude/settings.json` retires `.mcp.json`'s copy of the same server so the tools appear
 once. `.mcp.json` stays committed as the harness-agnostic entry: it is what an MCP client
-without Claude Code's plugin system points at. Consider how a change affects the session you
-are typing into — and note that it keeps running the code it loaded at startup, however many
-times you rebuild.
+without Claude Code's plugin system points at. A Codex session here runs the plugin's server
+too (`.codex/config.toml`), from the same assembled tree, so the two share a broker; run
+anything else beside them, `.mcp.json`'s working tree say, and it is a second program with a
+broker of its own, sizing its pool from the whole licence (#59). Consider how a change affects
+the session you are typing into — and note that it keeps running the code it loaded at
+startup, however many times you rebuild.
+
+## Code Review Rules
+
+What GitHub's Codex review checks on every pull request. It posts only P0 and P1 findings, so
+these are the consequential ones; formatting, lint and types are CI's.
+
+- **A seat spent unasked.** Flag a new path that starts a Wolfram kernel outside the pool's
+  budget, and any path outside `doctor` that can reach discovery's step 7 (`wolframscript`):
+  each spends a licence seat the user may not have.
+- **The four invariants.** Flag output on stdout that is not a JSON-RPC frame, a kernel started
+  on the `initialize` path, a broker failure other than the invariant's two exceptions that does
+  not fall back to a private kernel, and sessions of different flavours sharing a kernel.
+- **Broker protocol.** Flag a frame that changes shape without a `BROKER_PROTOCOL` bump, and a
+  bump for a new op alone, which strands running brokers holding seats.
+- **One answer on both paths.** Flag a kernel message paraphrased, and the private and broker
+  paths disagreeing on what is a protocol error and what is an `isError` result.
+- **A promise wider than its paths.** In code or in `docs/`, flag a guarantee about every
+  kernel, session or release that is not checked against every path in `src/` it covers, and a
+  figure asserted in prose rather than derived by `npm run metrics`.
+- **A fix without its check.** Flag a fix with no check that fails without it, and a check that
+  passes only because the fake kernel answers instantly.

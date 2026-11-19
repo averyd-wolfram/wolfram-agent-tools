@@ -20,7 +20,9 @@ import { KernelPool, type LicenceInfo } from "./pool.js";
 import { installationEnv, readFacts, recordFacts } from "./inspect.js";
 import {
   encodeFrame,
+  FRAME_CAP,
   FrameReader,
+  overCap,
   type BrokerEvent,
   type BrokerOp,
   type BrokerRequest,
@@ -210,6 +212,38 @@ function resolveLicence(options: BrokerOptions): LicenceInfo {
 }
 
 /**
+ * A response as the socket can carry it. One over `FRAME_CAP` is answered in
+ * its place, with an error naming its length: sent, the session dropped it
+ * and its caller waited out the ceiling, or with none waited for ever, for an
+ * answer the broker already had (#200). The last guard, not the limit: a reply
+ * a kernel's line held fits written again, and `drainPages` holds each list to
+ * `LIST_CAP`, so only capabilities that grow past their room reach it.
+ */
+export function fitted(response: BrokerResponse): string {
+  const frame = encodeFrame(response);
+  if (!overCap(frame)) return frame;
+  return encodeFrame({
+    id: response.id,
+    ok: false,
+    error:
+      `the kernel's reply was ${frame.length - 1} characters as the broker sends it, ` +
+      `over the ${FRAME_CAP} its socket carries`,
+    ...(response.source === undefined ? {} : { source: response.source }),
+  });
+}
+
+/**
+ * An event as the socket can carry it, or undefined for one over `FRAME_CAP`,
+ * which is not sent rather than dropped unread at the other end. The last guard,
+ * as `fitted` is: a kernel's start sends its tools and its prompts in one event,
+ * and `LIST_CAP` holds each list to half the room there is.
+ */
+export function eventFrame(event: BrokerEvent): string | undefined {
+  const frame = encodeFrame(event);
+  return overCap(frame) ? undefined : frame;
+}
+
+/**
  * Serve kernels to proxies at `options.address`, or return null when another
  * broker already does, or the address cannot be used safely.
  *
@@ -271,6 +305,9 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
       reserveSeats: options.reserveSeats,
       licence,
       extraEnv,
+      // Every name any session has declared, stripped from each kernel the pool
+      // starts, read as it starts one.
+      stripAlso: () => declaredNames,
       learnFromKernels: options.allowInspect,
       licenceConfigured: options.licenceOverride !== undefined,
       onFacts: (facts, chosen) => {
@@ -355,7 +392,11 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
    * right key.
    */
   function broadcast(event: BrokerEvent, flavour?: string): void {
-    const frame = encodeFrame(event);
+    const frame = eventFrame(event);
+    if (frame === undefined) {
+      log(`not sending a ${event.event} event over the ${FRAME_CAP} cap`);
+      return;
+    }
     for (const [socket, state] of connections) {
       if (flavour !== undefined && state.flavour?.digest !== flavour) continue;
       if (socket.writable) socket.write(frame);
@@ -387,13 +428,11 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
         error: "this session has not declared the environment its kernels need",
       };
     }
-    // Widened to every name anybody declared, so a kernel started for this
-    // session cannot inherit another session's variable from this process. The
-    // digest is untouched: it still identifies which kernels are this session's.
-    const flavour: KernelFlavour = {
-      ...declared,
-      names: [...new Set([...declared.names, ...declaredNames])],
-    };
+    // The session's own names: the pool strips every name anybody declared
+    // from each kernel it starts (`stripAlso`), and matches a session against
+    // only the names it declared itself, so a session that never declared one
+    // is not turned away from a kernel that holds it (#180).
+    const flavour = declared;
     // An evaluation is registered as its frame is read, before anything here
     // awaits, so a `cancel` frame that follows it can reach it. Registered
     // after `await preparing`, a cancel read first — in the same chunk, or
@@ -544,7 +583,7 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
     // routinely use the same number for different work.
     const inFlight = new Map<number, AbortController>();
     const state = connections.get(socket) ?? { flavour: null };
-    const reader = new FrameReader((frame) => {
+    const onFrame = (frame: unknown): void => {
       const request = frame as BrokerRequest;
       if (typeof request?.id !== "number") return;
       if (request.op === "cancel") {
@@ -607,18 +646,22 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
         if (socket.writable) socket.write(encodeFrame({ id: request.id, ok: true }));
         return;
       }
-      const emit = (frame: BrokerEvent) => {
-        if (socket.writable) socket.write(encodeFrame(frame));
+      const emit = (event: BrokerEvent) => {
+        const frame = eventFrame(event);
+        if (frame === undefined)
+          log(`not sending a ${event.event} event over the ${FRAME_CAP} cap`);
+        else if (socket.writable) socket.write(frame);
       };
       outstanding++;
       void handle(request, state, inFlight, emit)
         .then((response) => {
-          if (socket.writable) socket.write(encodeFrame(response));
+          if (socket.writable) socket.write(fitted(response));
         })
         .finally(() => {
           outstanding--;
         });
-    });
+    };
+    const reader = new FrameReader(onFrame, (why) => log(`proxy connection: ${why}`));
     socket.on("data", (chunk: string) => reader.push(chunk));
     socket.on("error", () => socket.destroy());
     socket.on("close", () => {

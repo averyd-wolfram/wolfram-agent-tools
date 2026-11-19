@@ -59,6 +59,13 @@
  * FAKE_INIT_DELAY_MS  delay before answering initialize: a slow handshake, the
  *                     last stage of a preparation, that does eventually answer
  * FAKE_EMPTY_TOOLS    report zero tools, successfully
+ * FAKE_REPORT_ENV     a variable name: tools/call reports its value, or (unset), so a
+ *                     check can see what a shared kernel was started with (#180)
+ * FAKE_LONG_REPLY     a length: a call whose code is "long" answers with that many
+ *                     characters more, a reply longer than its request (#200)
+ * FAKE_GROWING_REPLY  a count: a call whose code is "growing" answers with that
+ *                     many numbers written 1e20, which JavaScript writes again
+ *                     five times longer, as a broker does (#200)
  * FAKE_EXTRA_TOOLS    JSON array: tools to list as given, after the others, for a
  *                     list holding a tool this server cannot relay
  * FAKE_TOOLS_FILE     a JSON array of tools to list after the others, read once,
@@ -554,6 +561,16 @@ function run() {
         });
         return;
       }
+      if (process.env.FAKE_GROWING_REPLY && msg.params.arguments?.code === "growing") {
+        // Written by hand: JSON.stringify would write each number at its full
+        // length, which is the growth this exists to show.
+        const numbers = new Array(Number(process.env.FAKE_GROWING_REPLY)).fill("1e20").join(",");
+        process.stdout.write(
+          `{"jsonrpc":"2.0","id":${JSON.stringify(msg.id)},"result":{"content":` +
+            `[{"type":"text","text":"grown"}],"_meta":{"n":[${numbers}]}}}\n`,
+        );
+        return;
+      }
       // Evaluating Exit[] ends a real kernel mid-call, answering nothing: the
       // way to have a busy kernel die rather than be released.
       if (msg.params?.arguments?.code === "Exit[]") process.exit(0);
@@ -607,7 +624,13 @@ function run() {
               // startup and it is what sets each tool's effective
               // TimeConstraint. It reaches the kernel only because kernel.ts
               // spreads process.env, so it is reported here to be checked.
-              ` toolOptions=${process.env.MCP_TOOL_OPTIONS ?? "(unset)"}`,
+              ` toolOptions=${process.env.MCP_TOOL_OPTIONS ?? "(unset)"}` +
+              (process.env.FAKE_REPORT_ENV
+                ? ` ${process.env.FAKE_REPORT_ENV}=${process.env[process.env.FAKE_REPORT_ENV] ?? "(unset)"}`
+                : "") +
+              (process.env.FAKE_LONG_REPLY && msg.params.arguments?.code === "long"
+                ? ` ${"y".repeat(Number(process.env.FAKE_LONG_REPLY))}`
+                : ""),
           },
         ],
         // A tool that declares an output schema owes its caller structured
