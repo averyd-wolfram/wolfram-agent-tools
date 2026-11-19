@@ -311,10 +311,11 @@ export class KernelPool {
    * session, so a kernel that could not have served it never answers it. By
    * the lists' own source, not the slot's: a slot restarted from another
    * source, whose read then failed, still holds the lists of the one before.
+   * Compared first, so `#mine` reads the disk only for a slot that could answer.
    */
   lists(flavour: KernelFlavour, source: string): KernelLists | null {
     return (
-      this.#slots.find((s) => this.#mine(s, flavour) && s.lists?.source === source)?.lists ?? null
+      this.#slots.find((s) => s.lists?.source === source && this.#mine(s, flavour))?.lists ?? null
     );
   }
   get licence(): LicenceInfo {

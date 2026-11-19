@@ -1826,7 +1826,12 @@ heading("Re-reading the lists starts no kernel and grows no pool (#198)");
             if (failing) throw new Error("no kernel answered");
             return { content: [] };
           },
-          relist: async (source) => (asked.push(`relist ${source}`), relisted.shift() ?? null),
+          relist: async (source) => {
+            asked.push(`relist ${source}`);
+            const next = relisted.shift();
+            if (next instanceof Error) throw next;
+            return next ?? null;
+          },
         }),
       );
       const askedBy = async () => {
@@ -1839,6 +1844,11 @@ heading("Re-reading the lists starts no kernel and grows no pool (#198)");
       const afterFailure = await askedBy();
       failing = false;
       const afterNothingKnown = await askedBy();
+      // A broker gone mid-request: the session may choose another, whose
+      // kernel of that source it never heard start.
+      relisted.push(new Error("the broker went away"));
+      await askedBy();
+      const afterFailedReread = await askedBy();
       relisted.push(listsOf("Demo", "elsewhere"));
       await askedBy();
       const afterReread = await askedBy();
@@ -1852,6 +1862,11 @@ heading("Re-reading the lists starts no kernel and grows no pool (#198)");
         "and with nothing known, the next answer asks again",
         afterNothingKnown === "tools/call, relist elsewhere",
         afterNothingKnown,
+      );
+      check(
+        "and after a re-read that failed, the next answer asks again",
+        afterFailedReread === "tools/call, relist elsewhere",
+        afterFailedReread,
       );
       check("once they are re-read, an answer re-reads nothing", afterReread === "tools/call", afterReread);
     }

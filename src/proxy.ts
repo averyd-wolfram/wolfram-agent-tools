@@ -704,32 +704,29 @@ export function createWolframServer(
    */
   function follow(): void {
     const served = backend.servedFrom?.();
-    if (served === undefined || served === seen || relisting || !backend.relist) return;
+    const relist = backend.relist?.bind(backend);
+    if (served === undefined || served === seen || relisting || !relist) return;
     relisting = true;
     const heard = readies;
-    void backend
-      .relist(served)
-      .then(
-        async (lists) => {
-          // Nothing known; or a kernel's lists arrived meanwhile, and these,
-          // read as an older one started, would undo them.
-          if (lists === null || readies !== heard) return;
-          seen = served;
-          log("a kernel started from another server source answered; re-reading the lists");
-          await reload(opsFrom(lists));
-        },
-        (err: unknown) => {
-          // Once per source, so a broker that cannot answer is not asked by every call.
-          seen = served;
-          log(`re-reading the lists failed, keeping them: ${errorText(err)}`);
-        },
-      )
-      .catch((err: unknown) => {
+    void (async () => {
+      try {
+        const lists = await relist(served);
+        // Nothing known; or a kernel's lists arrived meanwhile, and these,
+        // read as an older one started, would undo them.
+        if (lists === null || readies !== heard) return;
+        seen = served;
+        log("a kernel started from another server source answered; re-reading the lists");
+        await reload(opsFrom(lists));
+      } catch (err) {
+        // Nothing marked, so a later answer asks again: the re-read costs no
+        // kernel, and marked, a broker gone mid-request left the session on
+        // its old lists after it chose the next, whose kernel of that source
+        // it had not heard start.
         log(`re-reading the lists failed, keeping them: ${errorText(err)}`);
-      })
-      .finally(() => {
+      } finally {
         relisting = false;
-      });
+      }
+    })();
   }
 
   fromKernel(ListToolsRequestSchema, async (_request, extra) => {
