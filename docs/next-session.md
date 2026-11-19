@@ -6,16 +6,15 @@ in `docs/design.md`.
 
 ## Where things stand
 
-- **`v0.2.3` is Latest** (2026-11-18), and 0.2.4's release PR, #199, is open.
-  `CHANGELOG.md` says what each release holds, and each release's milestone lists its issues
-  and PRs. The history before that is in the closed issues, the PRs and `git log`; this file
-  no longer retells it.
+- **`v0.2.4` is Latest** (2026-11-19). `CHANGELOG.md` says what each release holds, and each
+  release's milestone lists its issues and PRs. The history before that is in the closed
+  issues, the PRs and `git log`; this file no longer retells it.
 - **The release pipeline versions itself** from the commit types on `main`, publishes a
   pre-release on every update of the release PR, and moves the `release` branch and Latest
   once a release is out. `docs/releasing.md` has the whole of it; the short form is under *How
   releases work* below.
 - **Releases from 0.2.0 on carry signed build provenance** (#47), when the run their merge
-  started builds them, as 0.2.0's to 0.2.3's did. A pre-release, or a release finished by a
+  started builds them, as 0.2.0's to 0.2.4's did. A pre-release, or a release finished by a
   later run, is published without one and says why in a `Not attested` notice.
 - **What changed since 0.1.6**, in outline:
   - **Kernel starts** (0.1.7–0.1.10): a failed start backs off by what failed, in the pool as
@@ -39,38 +38,35 @@ in `docs/design.md`.
 
 ## What to do next, in order
 
-1. **Release 0.2.4 when the maintainer says.** Milestone `0.2.4` holds #197, #201 and #202,
-   which fix #185, #186 and #200, and the release PR #199; merge it only on the maintainer's
-   word.
-2. **The open bugs that need design**, each agreed with the maintainer before code: #198
+1. **The open bugs that need design**, each agreed with the maintainer before code: #198
    (re-reading the lists after an answer from a kernel of another source can start a
    kernel), #187 (a pool swapping one kernel environment for another starts the replacement
    before the retired kernel exits), and #192 (the edges of #180's union of declared names).
-3. **Measure a seat refusal, then fix #143** (`blocked` until then): a kernel start the
+2. **Measure a seat refusal, then fix #143** (`blocked` until then): a kernel start the
    licence refuses is backed off for ten minutes, as though the installation were broken.
    Record the licence manager's words and how the kernel exits, then classify it with a short
    back-off. It needs a limited licence: this machine's facts now say `unlimited` (re-read on
    2026-11-16), so it can't refuse a start. Find out too which count the facts read: on
-   2026-11-10 they said 2 seats while five kernels ran, and the lease (item 4) will size
+   2026-11-10 they said 2 seats while five kernels ran, and the lease (item 3) will size
    itself from them. `npm run test:container` with a test entitlement
    (`WOLFRAM_MCP_TEST_ENTITLEMENT`, or the 0600 file `docs/releasing.md` names) is the
    route; none is set up here yet, and the maintainer creates one. Its licensed scenario
    starts one broker kernel and then `doctor`, so it never asks for a seat past the limit:
    extend it to hold every seat and start one more, recording the words and the exit.
-4. **#59: the seat lease** (D35, decided 2026-11-17). Every kernel this package starts itself
+3. **#59: the seat lease** (D35, decided 2026-11-17). Every kernel this package starts itself
    — a broker's, a private one, the LSP's — takes a seat from one lease per licence before it
    spawns, so once the lease has a size, the releases that take it never together start more
-   kernels than it allows. Each release keeps its own broker. `docs/plugin-plan.md` §5 MD item 2 has the
-   decision, what the lease can't count, and why one broker shared across releases was
-   rejected; #59 has what is open for the implementation, each with its check. It follows
-   item 3, whose measured refusal its checks compare against.
-5. **Settings for the maintainer**, no PR needed:
+   kernels than it allows. Each release keeps its own broker. `docs/plugin-plan.md` §5 MD
+   item 2 has the decision, what the lease can't count, and why one broker shared across
+   releases was rejected; #59 has what is open for the implementation, each with its check.
+   It follows item 2, whose measured refusal its checks compare against.
+4. **Settings for the maintainer**, no PR needed:
    - **A `refs/tags/v*` ruleset** (#48): only `release` and `wolfram--v*` are protected
      (rulesets 24615785 and 24615786), so a published release's own tag can still be moved.
      Check first that nothing deletes pre-release tags.
    - **#82's first half:** require resolved conversations on `main`. It is off (checked
      2026-11-14); the review process already resolves every thread by hand.
-6. **The design backlog**, each `needs design`; agree the approach before code.
+5. **The design backlog**, each `needs design`; agree the approach before code.
    - **Broker:** #74 (sharing where the runtime directory is too deep for a socket path),
      #102 (resend a request a leaving broker never read), #129 (run the suite where sockets
      are refused).
@@ -83,21 +79,21 @@ in `docs/design.md`.
      unreviewed branch can make Codex and Claude Code run as a session starts).
    - **#40** (overlap the suite's long-call minute) is left for now, by the maintainer
      (2026-11-10).
-7. **The one link of #7 left unobserved**: Claude Code saying `Plugin updated: wolfram` in an
+6. **The one link of #7 left unobserved**: Claude Code saying `Plugin updated: wolfram` in an
    interactive session after it auto-updates. The update itself is seen: `v0.2.1` was
    published at 02:47 UTC on 2026-11-10, and `~/.claude/plugins/cache/wolfram-agent-tools/
    wolfram/0.2.1/` existed at 02:54, installed by no one. The maintainer runs the
    interactive check, since it needs a signed-in client; `docs/releasing.md` has the headless
    one.
-8. **MA's experiments**, each a ledger row (plan §5 MA, *Order of work*): Codex installing a
+7. **MA's experiments**, each a ledger row (plan §5 MA, *Order of work*): Codex installing a
    Claude Code marketplace entry and trusting our hook; Cursor importing an installed Claude
    Code plugin; Copilot honouring `userConfig`; the Agent Plugins precedence in VS Code;
    Codex's filtered environment against our broker, which #60 measured once.
-9. **The rest of M1** (plan §5 M1): the chat checklist and M1b's client version,
+8. **The rest of M1** (plan §5 M1): the chat checklist and M1b's client version,
    `SessionStart` and file workflow (run by a maintainer); entitlement leases outliving clean
    kernel exits by about an hour (measured, cause not found); a resumed Claude Desktop session
    after a re-upload may lose the LSP.
-10. **M2's design checkpoint**, which starts with the stable-2.2.0 union experiment and needs
+9. **M2's design checkpoint**, which starts with the stable-2.2.0 union experiment and needs
    AgentTools 2.2.7 disabled. Agree it with the maintainers first.
 
 ## How releases work
