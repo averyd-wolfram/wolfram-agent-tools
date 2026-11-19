@@ -958,12 +958,12 @@ function $constructor(name, initializer3, proto, params) {
     inst._zod.traits.add(name);
     initializer3(inst, def);
     if (initialized) {
-      const own2 = Object.getPrototypeOf(inst);
+      const own3 = Object.getPrototypeOf(inst);
       const ctorProto = inst._zod.constr.prototype;
-      let up = own2;
+      let up = own3;
       while (up && up !== ctorProto)
         up = Object.getPrototypeOf(up);
-      const target = up ?? own2;
+      const target = up ?? own3;
       if (!initialized.has(target)) {
         initialized.add(target);
         members(target, protoMembers);
@@ -8208,7 +8208,7 @@ var init_version = __esm({
   "dist/version.js"() {
     "use strict";
     here = dirname(fileURLToPath(import.meta.url));
-    PKG = true ? JSON.parse('{"name":"wolfram-mcp-server","version":"0.2.3","description":"MCP server that drives a locally installed Wolfram kernel, with lazy start and idle shutdown."}') : JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8"));
+    PKG = true ? JSON.parse('{"name":"wolfram-mcp-server","version":"0.2.4","description":"MCP server that drives a locally installed Wolfram kernel, with lazy start and idle shutdown."}') : JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8"));
   }
 });
 
@@ -8381,11 +8381,449 @@ var init_flavour = __esm({
   }
 });
 
+// dist/lines.js
+function own2(text) {
+  return Array.from(text).join("");
+}
+var CappedLines, ENDS, BLOCK;
+var init_lines = __esm({
+  "dist/lines.js"() {
+    "use strict";
+    CappedLines = class {
+      cap;
+      onLine;
+      onDropped;
+      /**
+       * The line so far, as the chunks it came in. Each chunk is searched for a
+       * newline once and joined only when a line ends: appended to one string and
+       * searched from its start, a line near the cap cost seconds of the event loop
+       * every other connection shares.
+       */
+      #pieces = [];
+      /**
+       * The newest pieces, joined into one of `#pieces` each time there are
+       * `BLOCK`: a line that came in many small chunks held a string apiece, and
+       * several times its own size for them.
+       */
+      #recent = [];
+      #held = 0;
+      /**
+       * A line being dropped for its length: how long it has run, how it began and
+       * how it has ended so far. Nothing else of it is kept, so the cap holds while
+       * it runs on.
+       */
+      #dropping = null;
+      /**
+       * @param cap the longest line kept, in characters. It bounds what a peer that
+       * never sends a newline can make this process hold.
+       * @param onDropped told of each line dropped for its length, with its first
+       * and last characters, which say what kind of line it was and are no log's to
+       * keep. Told as it ends or the stream does, `ended`, with its whole length
+       * however the stream was split. A line that runs past the cap before its
+       * newline is told of then too, with the length so far, since it may never end.
+       */
+      constructor(cap, onLine, onDropped) {
+        this.cap = cap;
+        this.onLine = onLine;
+        this.onDropped = onDropped;
+      }
+      push(chunk) {
+        let from = 0;
+        for (let end; (end = chunk.indexOf("\n", from)) !== -1; from = end + 1) {
+          this.#end(chunk.slice(from, end));
+        }
+        if (from < chunk.length)
+          this.#hold(chunk.slice(from));
+      }
+      /** What is held with no newline after it, taken as the stream ends: its last line. */
+      take() {
+        if (this.#dropping) {
+          this.#end("");
+          return "";
+        }
+        const tail = this.#line("");
+        this.#reset();
+        return tail;
+      }
+      /** Part of a line whose newline has not come. */
+      #hold(piece) {
+        const dropping = this.#dropping;
+        if (dropping) {
+          dropping.length += piece.length;
+          dropping.tail = own2((dropping.tail + piece).slice(-ENDS));
+          return;
+        }
+        this.#recent.push(piece);
+        if (this.#recent.length >= BLOCK)
+          this.#pieces.push(this.#recent.splice(0).join(""));
+        this.#held += piece.length;
+        if (this.#held <= this.cap)
+          return;
+        const line = { length: this.#held, ...this.#ends() };
+        this.#dropping = line;
+        this.onDropped(line.length, line, false);
+      }
+      /** The last part of a line, its newline come. */
+      #end(piece) {
+        const dropping = this.#dropping;
+        if (dropping) {
+          this.#dropping = null;
+          const tail = (dropping.tail + piece).slice(-ENDS);
+          this.onDropped(dropping.length + piece.length, { head: dropping.head, tail }, true);
+          return;
+        }
+        const length = this.#held + piece.length;
+        if (length > this.cap) {
+          this.#recent.push(piece);
+          this.onDropped(length, this.#ends(), true);
+          return;
+        }
+        const line = this.#line(piece);
+        this.#reset();
+        this.onLine(line);
+      }
+      /** The line held, with `last` after it. */
+      #line(last) {
+        return this.#held === 0 ? last : [...this.#pieces, ...this.#recent, last].join("");
+      }
+      #reset() {
+        this.#pieces = [];
+        this.#recent = [];
+        this.#held = 0;
+      }
+      /**
+       * The first and last characters of the line held, and the line let go:
+       * taken from the pieces, so neither keeps the whole of a long line alive.
+       */
+      #ends() {
+        const pieces = [...this.#pieces, ...this.#recent];
+        let head = "";
+        for (const piece of pieces) {
+          head += piece.slice(0, ENDS - head.length);
+          if (head.length >= ENDS)
+            break;
+        }
+        let tail = "";
+        for (let i = pieces.length - 1; i >= 0 && tail.length < ENDS; i--) {
+          tail = (pieces[i] ?? "").slice(-(ENDS - tail.length)) + tail;
+        }
+        this.#reset();
+        return { head: own2(head), tail: own2(tail) };
+      }
+    };
+    ENDS = 128;
+    BLOCK = 256;
+  }
+});
+
+// dist/transport.js
+import { spawn } from "node:child_process";
+function replyId({ head, tail }) {
+  const value = String.raw`(?:-?\d+|"(?:[^"\\]|\\.)*")`;
+  const member = String.raw`\s*"(?:jsonrpc|id)"\s*:\s*${value}\s*`;
+  const before = new RegExp(String.raw`^\s*\{((?:${member},){0,2})\s*"(?:result|error)"\s*:\s*\{`).exec(head);
+  if (!before || !/\}\s*$/.test(tail))
+    return void 0;
+  const after = new RegExp(String.raw`,((?:${member},?){1,2})\}\s*$`).exec(tail);
+  const members2 = `${before[1] ?? ""},${after?.[1] ?? ""}`;
+  if (!new RegExp(String.raw`"jsonrpc"\s*:\s*"2\.0"`).test(members2))
+    return void 0;
+  const found = new RegExp(String.raw`"id"\s*:\s*(${value})`).exec(members2);
+  if (!found?.[1])
+    return void 0;
+  try {
+    const id = JSON.parse(found[1]);
+    return typeof id === "number" || typeof id === "string" ? id : void 0;
+  } catch {
+    return void 0;
+  }
+}
+var KERNEL_LINE_CAP, RECENT_LINE_LIMIT, KILL_ESCALATION_MS, REAP_TIMEOUT_MS, FilteringStdioTransport;
+var init_transport = __esm({
+  "dist/transport.js"() {
+    "use strict";
+    init_types();
+    init_lines();
+    KERNEL_LINE_CAP = 4 * 1024 * 1024;
+    RECENT_LINE_LIMIT = 15;
+    KILL_ESCALATION_MS = 5e3;
+    REAP_TIMEOUT_MS = 8e3;
+    FilteringStdioTransport = class {
+      onmessage;
+      onerror;
+      onclose;
+      #options;
+      #child = null;
+      /**
+       * Settles once Node has said whether the spawn happened. A close() that
+       * lands before then used to return at `!this.#spawned` and drop the handle,
+       * so a kernel forked a moment earlier was never signalled and ran on with
+       * its licence seat — reached by stopping a server the instant its kernel
+       * appeared.
+       */
+      #spawnGate = null;
+      #lines = new CappedLines(KERNEL_LINE_CAP, (line) => this.#emit(line), (length, ends, ended) => this.#dropped(length, ends, ended));
+      /**
+       * Requests sent and not yet answered, by id: what a reply dropped for its
+       * length may name, by the id it began or ended with (`replyId`).
+       */
+      #unanswered = /* @__PURE__ */ new Set();
+      #closing = false;
+      #spawned = false;
+      #fatalReported = false;
+      #recent = [];
+      constructor(options) {
+        this.#options = options;
+      }
+      get pid() {
+        return this.#child?.pid;
+      }
+      /** The last non-protocol lines the kernel produced, oldest first. */
+      recentOutput() {
+        return [...this.#recent];
+      }
+      async start() {
+        if (this.#child)
+          throw new Error("FilteringStdioTransport is already started");
+        const child = spawn(this.#options.command, this.#options.args ?? [], {
+          stdio: ["pipe", "pipe", "pipe"],
+          env: this.#options.env,
+          cwd: this.#options.cwd,
+          shell: false,
+          windowsHide: true,
+          // A new process group on POSIX — we keep the handle and never unref, so
+          // the kernel's lifetime still tracks ours — so close() can signal the
+          // whole group. The kernel spawns children of its own: the notebook
+          // front-end MathLink launches for WriteNotebook. Killing only the kernel
+          // pid orphaned that front-end to init, where its SharedMemory link
+          // busy-polls a now-dead peer at 100% CPU forever. Windows has no
+          // equivalent here and keeps the single-process kill.
+          detached: process.platform !== "win32"
+        });
+        this.#child = child;
+        this.#spawnGate = new Promise((resolve, reject) => {
+          const settle2 = (fn) => {
+            child.removeListener("spawn", onSpawn);
+            child.removeListener("error", onError);
+            fn();
+          };
+          const onSpawn = () => settle2(resolve);
+          const onError = (err) => settle2(() => {
+            this.#child = null;
+            reject(new Error(`could not start ${this.#options.command}: ${err.message}`));
+          });
+          child.once("spawn", onSpawn);
+          child.once("error", onError);
+        });
+        await this.#spawnGate;
+        this.#spawned = true;
+        child.on("error", (err) => this.#fail(err));
+        child.on("exit", (code2, signal) => {
+          this.#flush();
+          if (!this.#closing) {
+            this.#fail(new Error(`the Wolfram kernel exited unexpectedly (code=${code2} signal=${signal})`));
+          }
+          this.onclose?.();
+        });
+        child.stdin?.on("error", (err) => this.#record(`stdin: ${err.message}`));
+        child.stdout?.setEncoding("utf8");
+        child.stdout?.on("data", (chunk) => this.#lines.push(chunk));
+        child.stderr?.setEncoding("utf8");
+        child.stderr?.on("data", (chunk) => {
+          for (const line of chunk.split(/\r?\n/)) {
+            const text = line.trim();
+            if (text)
+              this.#record(text);
+          }
+        });
+      }
+      async send(message, _options) {
+        const stdin = this.#child?.stdin;
+        if (!stdin?.writable)
+          throw new Error("the Wolfram kernel is not running");
+        const line = `${JSON.stringify(message)}
+`;
+        const id = "method" in message && "id" in message ? message.id : void 0;
+        if (id !== void 0)
+          this.#unanswered.add(id);
+        await new Promise((resolve, reject) => {
+          stdin.write(line, (err) => {
+            if (!err)
+              return resolve();
+            if (id !== void 0)
+              this.#unanswered.delete(id);
+            reject(err);
+          });
+        });
+      }
+      /**
+       * Shut the child down.
+       *
+       * Must never hang. A caller reaches here on the failure path, and blocking
+       * forever would swallow the error that sent it here and wedge the session, so
+       * both the exit wait and the kill escalation are bounded.
+       */
+      async close() {
+        this.#closing = true;
+        const child = this.#child;
+        this.#child = null;
+        this.#flush();
+        if (!child)
+          return;
+        if (!this.#spawned) {
+          const started = await (this.#spawnGate ?? Promise.reject(new Error("never spawned"))).then(() => true, () => false);
+          if (!started)
+            return;
+        }
+        if (child.exitCode !== null || child.signalCode !== null)
+          return;
+        const exited = this.#waitForExit(child, REAP_TIMEOUT_MS);
+        try {
+          child.stdin?.end();
+        } catch {
+        }
+        this.#signal(child, "SIGTERM");
+        const escalation = setTimeout(() => this.#signal(child, "SIGKILL"), KILL_ESCALATION_MS);
+        escalation.unref?.();
+        try {
+          await exited;
+        } finally {
+          clearTimeout(escalation);
+        }
+      }
+      /**
+       * Signal the child — and on POSIX its whole process group — so the kernel's
+       * own descendants die with it. The kernel is spawned as a group leader
+       * (`detached`), so `-pid` addresses the group; if the group is already gone,
+       * or this is a platform without one, fall back to the plain per-process kill.
+       */
+      #signal(child, sig) {
+        const pid = child.pid;
+        if (pid !== void 0 && process.platform !== "win32") {
+          try {
+            process.kill(-pid, sig);
+            return;
+          } catch {
+          }
+        }
+        try {
+          child.kill(sig);
+        } catch {
+        }
+      }
+      #waitForExit(child, timeoutMs) {
+        return new Promise((resolve) => {
+          let settled = false;
+          const finish = () => {
+            if (settled)
+              return;
+            settled = true;
+            clearTimeout(timer);
+            child.removeListener("exit", finish);
+            resolve();
+          };
+          const timer = setTimeout(finish, timeoutMs);
+          timer.unref?.();
+          child.once("exit", finish);
+        });
+      }
+      #fail(error2) {
+        if (this.#fatalReported)
+          return;
+        this.#fatalReported = true;
+        this.onerror?.(error2);
+        this.#options.onFatal?.(error2);
+      }
+      #record(line) {
+        this.#recent.push(line);
+        if (this.#recent.length > RECENT_LINE_LIMIT)
+          this.#recent.shift();
+        this.#options.onOutput?.(line);
+      }
+      /**
+       * Record whatever is in the buffer without a newline after it, then clear it.
+       *
+       * A kernel that dies mid-line loses that line otherwise, and the lines that
+       * matter most are exactly the ones a dying kernel writes: `close()` used to
+       * blank the buffer, and `kernel.ts` then read `recentOutput()` — after the
+       * close — for the words to put in the error. So a licence refusal or an
+       * activation prompt that arrived without a trailing newline was reported as
+       * nothing at all.
+       */
+      #flush() {
+        const tail = this.#lines.take();
+        if (tail.trim())
+          this.#emit(tail);
+      }
+      /**
+       * A line over the cap, by its length alone. Where it was the reply to a
+       * request outstanding, that request is answered with an error naming its
+       * length: left unanswered, it waited out its ceiling, and with none waited for
+       * ever, though the kernel had answered and was free (#200). An error from the
+       * kernel's side of the protocol, so both paths report it alike and neither
+       * takes the kernel for a hung one.
+       */
+      #dropped(length, ends, ended) {
+        if (!ended) {
+          this.#record(`dropping kernel output over the ${KERNEL_LINE_CAP} a line may run to`);
+          return;
+        }
+        this.#record(`dropped a line of ${length} characters of kernel output, over the ${KERNEL_LINE_CAP} a line may run to`);
+        const id = replyId(ends);
+        if (id === void 0 || !this.#unanswered.has(id))
+          return;
+        this.#unanswered.delete(id);
+        this.#deliver({
+          jsonrpc: "2.0",
+          id,
+          error: {
+            code: ErrorCode.InternalError,
+            message: `the kernel's reply was ${length} characters, longer than the ${KERNEL_LINE_CAP} this server reads from a kernel, and was dropped`
+          }
+        });
+      }
+      #emit(raw) {
+        const line = raw.replace(/\r$/, "").trim();
+        if (!line)
+          return;
+        if (line[0] !== "{" && line[0] !== "[") {
+          this.#record(line);
+          return;
+        }
+        let parsed;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          this.#record(line);
+          return;
+        }
+        const messages = Array.isArray(parsed) ? parsed : [parsed];
+        for (const message of messages)
+          this.#deliver(message);
+      }
+      #deliver(message) {
+        if (typeof message === "object" && message !== null && "id" in message && message.id !== void 0 && this.#unanswered.has(message.id) && (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message))) {
+          this.#unanswered.delete(message.id);
+        }
+        try {
+          this.onmessage?.(message);
+        } catch (err) {
+          this.onerror?.(err instanceof Error ? err : new Error(String(err)));
+        }
+      }
+    };
+  }
+});
+
 // dist/broker-protocol.js
 var broker_protocol_exports = {};
 __export(broker_protocol_exports, {
   BROKER_PROTOCOL: () => BROKER_PROTOCOL,
+  FRAME_CAP: () => FRAME_CAP,
   FrameReader: () => FrameReader,
+  FrameTooLarge: () => FrameTooLarge,
+  LIST_CAP: () => LIST_CAP,
+  REQUEST_CAP: () => REQUEST_CAP,
   SOCKET_MODE: () => SOCKET_MODE,
   SUN_PATH_BYTES: () => SUN_PATH_BYTES,
   brokerAddress: () => brokerAddress,
@@ -8393,6 +8831,7 @@ __export(broker_protocol_exports, {
   encodeFrame: () => encodeFrame,
   fitsSocketPath: () => fitsSocketPath,
   isEvent: () => isEvent,
+  overCap: () => overCap,
   socketFault: () => socketFault
 });
 import { createHash as createHash3 } from "node:crypto";
@@ -8469,9 +8908,9 @@ function brokerDirectory() {
   if (socketFault(join3(temporary, terseName("0".repeat(DIGEST_CHARS)))) === null) {
     return temporary;
   }
-  const own2 = join3(cacheDir(), "run");
-  ensurePrivateDirectory(own2);
-  return own2;
+  const own3 = join3(cacheDir(), "run");
+  ensurePrivateDirectory(own3);
+  return own3;
 }
 function socketFault(address) {
   if (process.platform === "win32")
@@ -8508,44 +8947,82 @@ function directoryFault(dir) {
   }
   return null;
 }
+function overCap(frame) {
+  return frame.length - 1 > FRAME_CAP;
+}
 function encodeFrame(frame) {
   return `${JSON.stringify(frame)}
 `;
 }
-var BROKER_PROTOCOL, SUN_PATH_BYTES, buildIdentity, DIGEST_CHARS, SOCKET_MODE, MAX_UNTERMINATED_BYTES, FrameReader;
+var BROKER_PROTOCOL, SUN_PATH_BYTES, buildIdentity, DIGEST_CHARS, SOCKET_MODE, FRAME_CAP, REQUEST_CAP, LIST_CAP, FrameTooLarge, FrameReader;
 var init_broker_protocol = __esm({
   "dist/broker-protocol.js"() {
     "use strict";
     init_cache();
     init_flavour();
+    init_lines();
+    init_transport();
     init_version();
     BROKER_PROTOCOL = 9;
     SUN_PATH_BYTES = process.platform === "linux" ? 108 : 104;
     DIGEST_CHARS = 12;
     SOCKET_MODE = 384;
-    MAX_UNTERMINATED_BYTES = 4 * 1024 * 1024;
+    FRAME_CAP = 6 * KERNEL_LINE_CAP;
+    REQUEST_CAP = FRAME_CAP - KERNEL_LINE_CAP;
+    LIST_CAP = REQUEST_CAP / 2;
+    FrameTooLarge = class extends Error {
+      op;
+      length;
+      constructor(op, length) {
+        super(`the ${op} request is ${length} characters, over the ${FRAME_CAP} the broker's socket carries`);
+        this.op = op;
+        this.length = length;
+        this.name = "FrameTooLarge";
+      }
+    };
     FrameReader = class {
       onFrame;
-      #buffer = "";
-      constructor(onFrame) {
+      onDropped;
+      #lines;
+      /**
+       * @param onDropped told of each frame dropped, and why, by its size alone:
+       * a frame holds a request or its result, which is no log's to keep. Dropped
+       * silently, a reply over the cap left its request to wait out its whole
+       * ceiling with nothing in either log to say why (#186).
+       */
+      constructor(onFrame, onDropped = () => {
+      }) {
         this.onFrame = onFrame;
+        this.onDropped = onDropped;
+        this.#lines = new CappedLines(FRAME_CAP, (line) => this.#read(line.trim()), (length, _ends, ended) => this.#report(ended ? `dropped a frame of ${length} characters, over the ${FRAME_CAP} cap` : `dropping a frame over the ${FRAME_CAP} cap, ${length} characters in with no newline yet`));
       }
       push(chunk) {
-        this.#buffer += chunk;
-        if (this.#buffer.length > MAX_UNTERMINATED_BYTES) {
-          this.#buffer = "";
+        this.#lines.push(chunk);
+      }
+      #read(line) {
+        if (!line)
+          return;
+        let frame;
+        try {
+          frame = JSON.parse(line);
+        } catch {
+          this.#report(`dropped a frame of ${line.length} characters that is not JSON`);
           return;
         }
-        let index;
-        while ((index = this.#buffer.indexOf("\n")) !== -1) {
-          const line = this.#buffer.slice(0, index).trim();
-          this.#buffer = this.#buffer.slice(index + 1);
-          if (!line)
-            continue;
-          try {
-            this.onFrame(JSON.parse(line));
-          } catch {
-          }
+        try {
+          this.onFrame(frame);
+        } catch {
+        }
+      }
+      /**
+       * Never thrown past: `BrokerBackend` is public and takes its logger from the
+       * caller, and one that throws here left the cap unenforced or the frames
+       * behind this one unread.
+       */
+      #report(why) {
+        try {
+          this.onDropped(why);
+        } catch {
         }
       }
     };
@@ -18238,250 +18715,6 @@ var init_client2 = __esm({
   }
 });
 
-// dist/transport.js
-import { spawn } from "node:child_process";
-var MAX_UNTERMINATED_BYTES2, RECENT_LINE_LIMIT, KILL_ESCALATION_MS, REAP_TIMEOUT_MS, FilteringStdioTransport;
-var init_transport = __esm({
-  "dist/transport.js"() {
-    "use strict";
-    MAX_UNTERMINATED_BYTES2 = 4 * 1024 * 1024;
-    RECENT_LINE_LIMIT = 15;
-    KILL_ESCALATION_MS = 5e3;
-    REAP_TIMEOUT_MS = 8e3;
-    FilteringStdioTransport = class {
-      onmessage;
-      onerror;
-      onclose;
-      #options;
-      #child = null;
-      /**
-       * Settles once Node has said whether the spawn happened. A close() that
-       * lands before then used to return at `!this.#spawned` and drop the handle,
-       * so a kernel forked a moment earlier was never signalled and ran on with
-       * its licence seat — reached by stopping a server the instant its kernel
-       * appeared.
-       */
-      #spawnGate = null;
-      #buffer = "";
-      #closing = false;
-      #spawned = false;
-      #fatalReported = false;
-      #recent = [];
-      constructor(options) {
-        this.#options = options;
-      }
-      get pid() {
-        return this.#child?.pid;
-      }
-      /** The last non-protocol lines the kernel produced, oldest first. */
-      recentOutput() {
-        return [...this.#recent];
-      }
-      async start() {
-        if (this.#child)
-          throw new Error("FilteringStdioTransport is already started");
-        const child = spawn(this.#options.command, this.#options.args ?? [], {
-          stdio: ["pipe", "pipe", "pipe"],
-          env: this.#options.env,
-          cwd: this.#options.cwd,
-          shell: false,
-          windowsHide: true,
-          // A new process group on POSIX — we keep the handle and never unref, so
-          // the kernel's lifetime still tracks ours — so close() can signal the
-          // whole group. The kernel spawns children of its own: the notebook
-          // front-end MathLink launches for WriteNotebook. Killing only the kernel
-          // pid orphaned that front-end to init, where its SharedMemory link
-          // busy-polls a now-dead peer at 100% CPU forever. Windows has no
-          // equivalent here and keeps the single-process kill.
-          detached: process.platform !== "win32"
-        });
-        this.#child = child;
-        this.#spawnGate = new Promise((resolve, reject) => {
-          const settle2 = (fn) => {
-            child.removeListener("spawn", onSpawn);
-            child.removeListener("error", onError);
-            fn();
-          };
-          const onSpawn = () => settle2(resolve);
-          const onError = (err) => settle2(() => {
-            this.#child = null;
-            reject(new Error(`could not start ${this.#options.command}: ${err.message}`));
-          });
-          child.once("spawn", onSpawn);
-          child.once("error", onError);
-        });
-        await this.#spawnGate;
-        this.#spawned = true;
-        child.on("error", (err) => this.#fail(err));
-        child.on("exit", (code2, signal) => {
-          this.#flush();
-          if (!this.#closing) {
-            this.#fail(new Error(`the Wolfram kernel exited unexpectedly (code=${code2} signal=${signal})`));
-          }
-          this.onclose?.();
-        });
-        child.stdin?.on("error", (err) => this.#record(`stdin: ${err.message}`));
-        child.stdout?.setEncoding("utf8");
-        child.stdout?.on("data", (chunk) => this.#ingest(chunk));
-        child.stderr?.setEncoding("utf8");
-        child.stderr?.on("data", (chunk) => {
-          for (const line of chunk.split(/\r?\n/)) {
-            const text = line.trim();
-            if (text)
-              this.#record(text);
-          }
-        });
-      }
-      async send(message, _options) {
-        const stdin = this.#child?.stdin;
-        if (!stdin?.writable)
-          throw new Error("the Wolfram kernel is not running");
-        await new Promise((resolve, reject) => {
-          stdin.write(`${JSON.stringify(message)}
-`, (err) => err ? reject(err) : resolve());
-        });
-      }
-      /**
-       * Shut the child down.
-       *
-       * Must never hang. A caller reaches here on the failure path, and blocking
-       * forever would swallow the error that sent it here and wedge the session, so
-       * both the exit wait and the kill escalation are bounded.
-       */
-      async close() {
-        this.#closing = true;
-        const child = this.#child;
-        this.#child = null;
-        this.#flush();
-        if (!child)
-          return;
-        if (!this.#spawned) {
-          const started = await (this.#spawnGate ?? Promise.reject(new Error("never spawned"))).then(() => true, () => false);
-          if (!started)
-            return;
-        }
-        if (child.exitCode !== null || child.signalCode !== null)
-          return;
-        const exited = this.#waitForExit(child, REAP_TIMEOUT_MS);
-        try {
-          child.stdin?.end();
-        } catch {
-        }
-        this.#signal(child, "SIGTERM");
-        const escalation = setTimeout(() => this.#signal(child, "SIGKILL"), KILL_ESCALATION_MS);
-        escalation.unref?.();
-        try {
-          await exited;
-        } finally {
-          clearTimeout(escalation);
-        }
-      }
-      /**
-       * Signal the child — and on POSIX its whole process group — so the kernel's
-       * own descendants die with it. The kernel is spawned as a group leader
-       * (`detached`), so `-pid` addresses the group; if the group is already gone,
-       * or this is a platform without one, fall back to the plain per-process kill.
-       */
-      #signal(child, sig) {
-        const pid = child.pid;
-        if (pid !== void 0 && process.platform !== "win32") {
-          try {
-            process.kill(-pid, sig);
-            return;
-          } catch {
-          }
-        }
-        try {
-          child.kill(sig);
-        } catch {
-        }
-      }
-      #waitForExit(child, timeoutMs) {
-        return new Promise((resolve) => {
-          let settled = false;
-          const finish = () => {
-            if (settled)
-              return;
-            settled = true;
-            clearTimeout(timer);
-            child.removeListener("exit", finish);
-            resolve();
-          };
-          const timer = setTimeout(finish, timeoutMs);
-          timer.unref?.();
-          child.once("exit", finish);
-        });
-      }
-      #fail(error2) {
-        if (this.#fatalReported)
-          return;
-        this.#fatalReported = true;
-        this.onerror?.(error2);
-        this.#options.onFatal?.(error2);
-      }
-      #record(line) {
-        this.#recent.push(line);
-        if (this.#recent.length > RECENT_LINE_LIMIT)
-          this.#recent.shift();
-        this.#options.onOutput?.(line);
-      }
-      /**
-       * Record whatever is in the buffer without a newline after it, then clear it.
-       *
-       * A kernel that dies mid-line loses that line otherwise, and the lines that
-       * matter most are exactly the ones a dying kernel writes: `close()` used to
-       * blank the buffer, and `kernel.ts` then read `recentOutput()` — after the
-       * close — for the words to put in the error. So a licence refusal or an
-       * activation prompt that arrived without a trailing newline was reported as
-       * nothing at all.
-       */
-      #flush() {
-        const tail = this.#buffer;
-        this.#buffer = "";
-        if (tail.trim())
-          this.#emit(tail);
-      }
-      #ingest(chunk) {
-        this.#buffer += chunk;
-        let index;
-        while ((index = this.#buffer.indexOf("\n")) !== -1) {
-          const line = this.#buffer.slice(0, index);
-          this.#buffer = this.#buffer.slice(index + 1);
-          this.#emit(line);
-        }
-        if (this.#buffer.length > MAX_UNTERMINATED_BYTES2) {
-          this.#record(`dropped ${this.#buffer.length} bytes of unterminated kernel output`);
-          this.#buffer = "";
-        }
-      }
-      #emit(raw) {
-        const line = raw.replace(/\r$/, "").trim();
-        if (!line)
-          return;
-        if (line[0] !== "{" && line[0] !== "[") {
-          this.#record(line);
-          return;
-        }
-        let parsed;
-        try {
-          parsed = JSON.parse(line);
-        } catch {
-          this.#record(line);
-          return;
-        }
-        const messages = Array.isArray(parsed) ? parsed : [parsed];
-        for (const message of messages) {
-          try {
-            this.onmessage?.(message);
-          } catch (err) {
-            this.onerror?.(err instanceof Error ? err : new Error(String(err)));
-          }
-        }
-      }
-    };
-  }
-});
-
 // dist/inspect.js
 var inspect_exports = {};
 __export(inspect_exports, {
@@ -18798,11 +19031,18 @@ function requestOptions(signal) {
 }
 async function drainPages(page, stop) {
   const all = [];
+  let length = 2;
   let cursor;
   for (let guard = 0; guard < 50; guard++) {
     stopIfLate(stop);
     const result = await page(cursor);
-    all.push(...result.items);
+    for (const item of result.items) {
+      length += JSON.stringify(item).length + (all.length > 0 ? 1 : 0);
+      all.push(item);
+    }
+    if (length > LIST_CAP) {
+      throw new Error(`the list is over ${length} characters joined from its pages, longer than the ${LIST_CAP} one list may run to`);
+    }
     cursor = result.nextCursor;
     if (!cursor)
       break;
@@ -18866,6 +19106,7 @@ var init_kernel = __esm({
     init_client2();
     init_types();
     init_config();
+    init_broker_protocol();
     init_transport();
     init_flavour();
     init_inspect();
@@ -19869,7 +20110,7 @@ var init_broker_client = __esm({
       }
       #attach(socket) {
         socket.setEncoding("utf8");
-        const reader = new FrameReader((raw) => this.#onFrame(raw));
+        const reader = new FrameReader((raw) => this.#onFrame(raw), (why) => this.#options.log(`broker connection: ${why}`));
         socket.on("data", (chunk) => reader.push(chunk));
         socket.on("close", () => this.#failAll(new Error("the Wolfram broker closed the connection")));
         socket.on("error", (err) => this.#failAll(err));
@@ -19941,13 +20182,20 @@ var init_broker_client = __esm({
         }
         const id = this.#nextId++;
         const sent = timeoutMs === void 0 ? void 0 : deadlineDelay(timeoutMs);
-        const frame = {
-          id,
-          op,
-          ...params === void 0 ? {} : { params },
-          ...sent === void 0 ? {} : { timeoutMs: sent },
-          ...expiresAt === void 0 ? {} : { expiresAt }
-        };
+        let frame;
+        try {
+          frame = encodeFrame({
+            id,
+            op,
+            ...params === void 0 ? {} : { params },
+            ...sent === void 0 ? {} : { timeoutMs: sent },
+            ...expiresAt === void 0 ? {} : { expiresAt }
+          });
+        } catch (err) {
+          return Promise.reject(err instanceof Error ? err : new Error(String(err)));
+        }
+        if (overCap(frame))
+          return Promise.reject(new FrameTooLarge(op, frame.length - 1));
         const ceiling = expiresAt === null ? 0 : brokerCeilingMs(op, sent, this.#options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS);
         const waitMs = typeof expiresAt === "number" ? Math.max(0, expiresAt - Date.now()) + REQUEST_GRACE_MS : ceiling;
         const answer = new Promise((resolve, reject) => {
@@ -19986,7 +20234,7 @@ var init_broker_client = __esm({
           if (onprogress)
             this.#progress.set(id, onprogress);
           this.#pending.set(id, settle2);
-          this.#socket.write(encodeFrame(frame), (err) => {
+          this.#socket.write(frame, (err) => {
             if (err) {
               this.#pending.delete(id);
               settle2.reject(err);
@@ -22688,6 +22936,8 @@ The failure was: ${window.reason}`;
 // dist/broker-server.js
 var broker_server_exports = {};
 __export(broker_server_exports, {
+  eventFrame: () => eventFrame,
+  fitted: () => fitted,
   startBroker: () => startBroker
 });
 import { createServer } from "node:net";
@@ -22766,6 +23016,21 @@ function resolveLicence(options) {
     return { maxProcesses: "unknown", type: null };
   return { maxProcesses: facts.maxLicenseProcesses, type: facts.licenseType };
 }
+function fitted(response) {
+  const frame = encodeFrame(response);
+  if (!overCap(frame))
+    return frame;
+  return encodeFrame({
+    id: response.id,
+    ok: false,
+    error: `the kernel's reply was ${frame.length - 1} characters as the broker sends it, over the ${FRAME_CAP} its socket carries`,
+    ...response.source === void 0 ? {} : { source: response.source }
+  });
+}
+function eventFrame(event) {
+  const frame = encodeFrame(event);
+  return overCap(frame) ? void 0 : frame;
+}
 async function startBroker(options) {
   const { address, log } = options;
   const connections = /* @__PURE__ */ new Map();
@@ -22836,7 +23101,11 @@ async function startBroker(options) {
     }
   }
   function broadcast(event, flavour) {
-    const frame = encodeFrame(event);
+    const frame = eventFrame(event);
+    if (frame === void 0) {
+      log(`not sending a ${event.event} event over the ${FRAME_CAP} cap`);
+      return;
+    }
     for (const [socket, state] of connections) {
       if (flavour !== void 0 && state.flavour?.digest !== flavour)
         continue;
@@ -22969,7 +23238,7 @@ async function startBroker(options) {
     socket.setEncoding("utf8");
     const inFlight = /* @__PURE__ */ new Map();
     const state = connections.get(socket) ?? { flavour: null };
-    const reader = new FrameReader((frame) => {
+    const onFrame = (frame) => {
       const request = frame;
       if (typeof request?.id !== "number")
         return;
@@ -23013,18 +23282,22 @@ async function startBroker(options) {
           socket.write(encodeFrame({ id: request.id, ok: true }));
         return;
       }
-      const emit = (frame2) => {
-        if (socket.writable)
-          socket.write(encodeFrame(frame2));
+      const emit = (event) => {
+        const frame2 = eventFrame(event);
+        if (frame2 === void 0)
+          log(`not sending a ${event.event} event over the ${FRAME_CAP} cap`);
+        else if (socket.writable)
+          socket.write(frame2);
       };
       outstanding++;
       void handle(request, state, inFlight, emit).then((response) => {
         if (socket.writable)
-          socket.write(encodeFrame(response));
+          socket.write(fitted(response));
       }).finally(() => {
         outstanding--;
       });
-    });
+    };
+    const reader = new FrameReader(onFrame, (why) => log(`proxy connection: ${why}`));
     socket.on("data", (chunk) => reader.push(chunk));
     socket.on("error", () => socket.destroy());
     socket.on("close", () => {
@@ -23949,6 +24222,7 @@ init_kernel();
 init_locate();
 init_log();
 init_server_source();
+init_broker_protocol();
 init_version();
 var PROTOCOL_ERRORS = /* @__PURE__ */ new Set([
   ErrorCode.ParseError,
@@ -23999,6 +24273,17 @@ function relayable(err) {
     code: err.code,
     ...err.data === void 0 ? {} : { data: err.data }
   });
+}
+function refuseOverlong(method, params) {
+  let length;
+  try {
+    length = JSON.stringify(params ?? {}).length;
+  } catch {
+    return;
+  }
+  if (length <= REQUEST_CAP)
+    return;
+  throw relayable(new McpError(ErrorCode.InvalidParams, `the ${method} request's parameters are ${length} characters, longer than the ${REQUEST_CAP} this server sends`));
 }
 async function relayed(answer) {
   try {
@@ -24169,7 +24454,11 @@ function createWolframServer(config2, log, makeBackend) {
   }
   log(`profile=${config2.serverName} idle=${idleText(config2.idleMs)} cache=${usableCache ? "hit" : "miss"}`);
   const backend = makeBackend(install);
-  const fromKernel = (schema, handler) => server.setRequestHandler(schema, (request, extra) => relayed(Promise.resolve(handler(request, extra)).finally(follow)));
+  const fromCache = /* @__PURE__ */ new WeakSet();
+  const fromKernel = (schema, handler) => server.setRequestHandler(schema, (request, extra) => relayed(Promise.resolve(handler(request, extra)).finally(() => {
+    if (!fromCache.has(extra))
+      follow();
+  })));
   let toolCache = usableCache?.tools ?? null;
   let promptCache = usableCache?.prompts ?? null;
   let promptsSeen = Boolean(upstream.prompts);
@@ -24249,8 +24538,9 @@ function createWolframServer(config2, log, makeBackend) {
       log(`re-reading the lists failed, keeping them: ${errorText(err)}`);
     });
   }
-  fromKernel(ListToolsRequestSchema, async () => {
+  fromKernel(ListToolsRequestSchema, async (_request, extra) => {
     if (toolCache) {
+      fromCache.add(extra);
       log(`tools/list served from cache (${toolCache.length} tools), kernel not started`);
       return { tools: [...toolCache, STATUS_TOOL] };
     }
@@ -24272,6 +24562,7 @@ function createWolframServer(config2, log, makeBackend) {
         ]
       };
     }
+    refuseOverlong("tools/call", { name, arguments: args ?? {} });
     try {
       const progressToken = request.params._meta?.progressToken;
       const timeoutMs = evaluationCeilingMs(config2.callTimeoutMs, args);
@@ -24307,25 +24598,38 @@ function createWolframServer(config2, log, makeBackend) {
     }
   });
   if (capabilities.prompts) {
-    fromKernel(ListPromptsRequestSchema, async () => {
-      if (promptCache)
+    fromKernel(ListPromptsRequestSchema, async (_request, extra) => {
+      if (promptCache) {
+        fromCache.add(extra);
         return { prompts: promptCache };
+      }
       const { prompts } = await backend.listPrompts();
       return { prompts };
     });
-    fromKernel(GetPromptRequestSchema, async (request, extra) => backend.getPrompt(request.params, {
-      timeoutMs: config2.callTimeoutMs,
-      expiresAt: expiryOf(config2.callTimeoutMs),
-      signal: extra.signal
-    }));
+    fromKernel(GetPromptRequestSchema, async (request, extra) => {
+      const expiresAt = expiryOf(config2.callTimeoutMs);
+      refuseOverlong("prompts/get", request.params);
+      return backend.getPrompt(request.params, {
+        timeoutMs: config2.callTimeoutMs,
+        expiresAt,
+        signal: extra.signal
+      });
+    });
   }
   if (capabilities.resources) {
-    fromKernel(ListResourcesRequestSchema, async (request) => backend.listResources(request.params));
-    fromKernel(ReadResourceRequestSchema, async (request, extra) => backend.readResource(request.params, {
-      timeoutMs: config2.callTimeoutMs,
-      expiresAt: expiryOf(config2.callTimeoutMs),
-      signal: extra.signal
-    }));
+    fromKernel(ListResourcesRequestSchema, async (request) => {
+      refuseOverlong("resources/list", request.params);
+      return backend.listResources(request.params);
+    });
+    fromKernel(ReadResourceRequestSchema, async (request, extra) => {
+      const expiresAt = expiryOf(config2.callTimeoutMs);
+      refuseOverlong("resources/read", request.params);
+      return backend.readResource(request.params, {
+        timeoutMs: config2.callTimeoutMs,
+        expiresAt,
+        signal: extra.signal
+      });
+    });
   }
   return {
     server,
