@@ -673,7 +673,15 @@ export function createWolframServer(
     }
   }
 
-  backend.onKernelReady((ops) => reload(ops));
+  // Kernel starts heard, counted, so a re-read asked before one is not applied
+  // after it: on a broker the event and the re-read's answer can arrive in one
+  // read of the socket, and the event's refresh is then under way before the
+  // answer's, with nothing yet moved to show it.
+  let readies = 0;
+  backend.onKernelReady((ops) => {
+    readies++;
+    return reload(ops);
+  });
 
   // A re-read in flight, which answers arriving meanwhile leave to finish.
   let relisting = false;
@@ -698,14 +706,14 @@ export function createWolframServer(
     const served = backend.servedFrom?.();
     if (served === undefined || served === seen || relisting || !backend.relist) return;
     relisting = true;
-    const was = seen;
+    const heard = readies;
     void backend
       .relist(served)
       .then(
         async (lists) => {
-          // Nothing known; or a kernel's start moved the lists on meanwhile,
-          // and these, read as an older one started, would undo that.
-          if (lists === null || seen !== was) return;
+          // Nothing known; or a kernel's lists arrived meanwhile, and these,
+          // read as an older one started, would undo them.
+          if (lists === null || readies !== heard) return;
           seen = served;
           log("a kernel started from another server source answered; re-reading the lists");
           await reload(opsFrom(lists));

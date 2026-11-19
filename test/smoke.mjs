@@ -1751,6 +1751,20 @@ heading("Re-reading the lists starts no kernel and grows no pool (#198)");
   const flavour = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage" });
   const named = (lists) =>
     lists === null ? "null" : typeof lists === "string" ? lists : upstreamTools(lists?.tools ?? []).map((t) => t.name).join();
+  // Knobs for the fake that a kernel reads from this process's environment as
+  // it spawns, set for `fn` alone.
+  const withEnv = async (vars, fn) => {
+    const saved = Object.fromEntries(Object.keys(vars).map((name) => [name, process.env[name]]));
+    Object.assign(process.env, vars);
+    try {
+      return await fn();
+    } finally {
+      for (const [name, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  };
   // Each part counts its own starts.
   const counted = (tag) => {
     const path = join(home, `198-${tag}-starts.log`);
@@ -1873,6 +1887,38 @@ heading("Re-reading the lists starts no kernel and grows no pool (#198)");
         listed,
       );
     }
+    // The same, with the answer and the start heard in one turn, as one read
+    // of a broker's socket delivers them: neither refresh has moved anything
+    // yet when the other begins.
+    {
+      let ready;
+      let answer;
+      const client = await session(
+        recording([], {
+          onKernelReady: (handler) => {
+            ready = handler;
+          },
+          relist: () => new Promise((resolve) => (answer = resolve)),
+        }),
+      );
+      await call(client);
+      await until(() => answer !== undefined, 2_000);
+      answer?.(listsOf("Older", "elsewhere"));
+      void ready({
+        source: "newer",
+        capabilities: async () => ({ tools: {} }),
+        listTools: async () => ({ tools: [tool("Newer")] }),
+        listPrompts: async () => ({ prompts: [] }),
+      });
+      await settle();
+      const listed = upstreamTools((await client.listTools()).tools).map((t) => t.name).join();
+      await client.close();
+      check(
+        "and one heard in the same turn as a kernel's start does too",
+        listed === "Newer",
+        listed,
+      );
+    }
   }
 
   // A broker's pool keeps the lists each kernel gave as it started: known
@@ -1957,6 +2003,51 @@ heading("Re-reading the lists starts no kernel and grows no pool (#198)");
     await pool.stop();
   }
 
+  // A slot whose kernel idled out and restarted from another source, after a
+  // paclet upgrade, and whose read of the new kernel's lists then failed, still
+  // holds the lists of the kernel before. Asked for the new source's, it must
+  // not answer with those.
+  {
+    const { path, count } = counted("pool-restart");
+    const bench = pacletBench("198-restart");
+    bench.declare();
+    bench.install("Demo-1.0", "Demo");
+    const benched = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage", ...bench.env });
+    const pool = new lib.KernelPool({
+      bin: fakeKernel,
+      serverName: "WolframLanguage",
+      idleMs: 1_000,
+      startTimeoutMs: 10_000,
+      clientInfo,
+      log: () => {},
+      reserveSeats: 0,
+      licence: { maxProcesses: 2, type: null },
+      licenceConfigured: true,
+      extraEnv: { FAKE_MARKER: path, FAKE_TOOLS_FILE: bench.env.FAKE_TOOLS_FILE },
+    });
+    const lists = (source) =>
+      typeof pool.lists === "function" ? pool.lists(benched, source) : "no lists";
+    const before = await pool.run(benched, async (_client, _request, served) => served);
+    await until(() => pool.running === 0, 5_000);
+    bench.install("Demo-2.0", "Demo");
+    // Its next kernel's tools/list fails, the first process under this state.
+    const restarted = await withEnv(
+      { FAKE_MODE: "fail-list-once", FAKE_STATE: join(home, "198-restart-state") },
+      () => pool.run(benched, async (_client, _request, served) => served),
+    );
+    check(
+      "a slot restarted from another source, whose read failed, knows no lists for that source",
+      before !== restarted && count() === 2 && lists(restarted) === null,
+      `${count()} started; ${named(lists(restarted))} for the new source`,
+    );
+    check(
+      "and still those it read before, for the source they came from",
+      named(lists(before)) === "WolframLanguageEvaluator",
+      named(lists(before)),
+    );
+    await pool.stop();
+  }
+
   // A session that has chosen no backend, or whose backend has gone, re-reads
   // nothing rather than preparing one to do it: a private kernel or a broker.
   {
@@ -1984,20 +2075,8 @@ heading("Re-reading the lists starts no kernel and grows no pool (#198)");
     await deferred.stop();
   }
 
-  // Over a broker's socket. The fake's knobs are read as each kernel spawns,
-  // from this process's environment, since the broker runs in it.
-  const withEnv = async (vars, fn) => {
-    const saved = Object.fromEntries(Object.keys(vars).map((name) => [name, process.env[name]]));
-    Object.assign(process.env, vars);
-    try {
-      return await fn();
-    } finally {
-      for (const [name, value] of Object.entries(saved)) {
-        if (value === undefined) delete process.env[name];
-        else process.env[name] = value;
-      }
-    }
-  };
+  // Over a broker's socket, whose kernels read the fake's knobs from this
+  // process's environment as each spawns, since the broker runs in it.
   // The broker, and the address it listens at, which it does not say.
   const brokerAt = async (tag, log = () => {}) => {
     const address = join(privateDir(join(home, `run-198-${tag}`)), "broker.sock");
@@ -2015,10 +2094,10 @@ heading("Re-reading the lists starts no kernel and grows no pool (#198)");
     });
     return { address, broker };
   };
-  const attachTo = (address) =>
+  const attachTo = (address, as = flavour) =>
     lib.BrokerBackend.attachIfRunning({
       address,
-      flavour,
+      flavour: as,
       spawnCommand: join(home, "definitely-not-a-binary"),
       spawnArgs: [],
       spawnEnv: {},
@@ -2074,10 +2153,18 @@ heading("Re-reading the lists starts no kernel and grows no pool (#198)");
     await withEnv({ FAKE_MARKER: path, FAKE_INIT_DELAY_MS: "3000" }, async () => {
       let broker = null;
       let left = null;
+      let watcher = null;
       let later = null;
       try {
         const started = await brokerAt("left", (line) => logged.push(line));
         broker = started.broker;
+        // A session of another flavour, which hears nothing of this kernel,
+        // keeps the broker up and asks how its pool is, so no session of the
+        // kernel's flavour is attached until its start, and its read, are done.
+        watcher = await attachTo(
+          started.address,
+          lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage", WOLFRAM_CLOUDBASE: "https://watcher.invalid" }),
+        );
         left = await attachTo(started.address);
         void left
           .callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, { timeoutMs: 0 })
@@ -2085,11 +2172,12 @@ heading("Re-reading the lists starts no kernel and grows no pool (#198)");
         // Spawned: the fake marks its start before it answers initialize.
         await until(() => count() === 1, 5_000);
         await left.stop();
-        later = await attachTo(started.address);
+        // Released once its start is done, read and all, the dropped call with it.
         await until(async () => {
-          const status = await later.status(5_000);
+          const status = await watcher.status(5_000);
           return status.kernels === 1 && status.busy === 0;
         }, 10_000);
+        later = await attachTo(started.address);
         const known = await relistOf(later, source);
         const leftAt = logged.findIndex((l) => /proxy disconnected/.test(l));
         const readyAt = logged.findIndex((l) => /kernel ready in/.test(l));
@@ -2105,6 +2193,7 @@ heading("Re-reading the lists starts no kernel and grows no pool (#198)");
         );
       } finally {
         await later?.stop();
+        await watcher?.stop();
         await broker?.stop?.();
       }
     });

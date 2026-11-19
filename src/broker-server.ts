@@ -316,7 +316,7 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
       // Only the sessions this kernel can serve. Telling the others would put
       // one flavour's tool list into another's cache entry, under a key that
       // exists to keep them apart. A proxy that hears nothing keeps its lists.
-      onKernelReady: (lists, flavour) => broadcast({ event: "kernelReady", ...lists }, flavour),
+      onKernelLists: (lists, flavour) => broadcast({ event: "kernelReady", ...lists }, flavour),
     });
   })();
   // Nothing may reject unhandled while nobody is awaiting it yet.

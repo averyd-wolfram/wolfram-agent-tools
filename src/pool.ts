@@ -113,13 +113,27 @@ export interface KernelPoolOptions {
   /** Each kernel's report, for the caller to keep. */
   onFacts?: ((facts: KernelFacts, chosen: string[]) => void) | undefined;
   /**
-   * Called with a kernel's lists each time the pool reads them: as it starts,
-   * and as it says they changed. Read here, inside the queue while the slot is
-   * still held, since going back through `run` for them grew the pool to the
-   * whole budget on one call. With what the kernel was started from, so they
-   * are cached under that (#6).
+   * Called once per freshly started kernel, with that kernel's client.
+   *
+   * The client is passed deliberately: this runs inside the queue, while the
+   * slot is still held, so anything the caller needs from the new kernel has to
+   * be read here rather than by going back through `run`. `source` is what
+   * the kernel was started from, so its lists can be cached under that (#6).
    */
-  onKernelReady?: ((lists: KernelLists, flavour: string) => void | Promise<void>) | undefined;
+  onKernelReady?:
+    | ((
+        client: Client,
+        flavour: string,
+        late: AbortSignal | undefined,
+        source: string | undefined,
+      ) => void | Promise<void>)
+    | undefined;
+  /**
+   * Called with a kernel's lists each time the pool reads them: as it starts,
+   * and as it says they changed. The pool reads them itself, to answer `lists`,
+   * so a caller that wants them takes them here rather than reading again.
+   */
+  onKernelLists?: ((lists: KernelLists, flavour: string) => void | Promise<void>) | undefined;
   /** For the suite, which cannot wait out a window of real time. */
   clock?: (() => number) | undefined;
 }
@@ -294,11 +308,13 @@ export class KernelPool {
    * null where none did: what a session re-reads its lists from, after an
    * answer from a kernel of another source (#3). From memory, so no kernel is
    * held, started or grown for it (#198). Only one `#mine` would hand this
-   * session, so a kernel that could not have served it never answers it.
+   * session, so a kernel that could not have served it never answers it. By
+   * the lists' own source, not the slot's: a slot restarted from another
+   * source, whose read then failed, still holds the lists of the one before.
    */
   lists(flavour: KernelFlavour, source: string): KernelLists | null {
     return (
-      this.#slots.find((s) => this.#mine(s, flavour) && s.session.source === source)?.lists ?? null
+      this.#slots.find((s) => this.#mine(s, flavour) && s.lists?.source === source)?.lists ?? null
     );
   }
   get licence(): LicenceInfo {
@@ -379,11 +395,13 @@ export class KernelPool {
         // that attaches to this kernel later can be answered from them: a
         // kernel whose session left during its start was never read (#198).
         // The first request waits for this as it waited for the broadcast.
+        await this.#options.onKernelReady?.(client, flavour.digest, late, session.source);
         let lists: KernelLists;
         try {
           lists = { ...(await readLists(client, requestOptions(), late)), source: session.source };
         } catch (err) {
-          // Whoever has lists keeps them, as before the kernel started.
+          // Whoever has lists keeps them, as before the kernel started; and the
+          // slot keeps its last, which say which kernel's they are (`lists`).
           this.#options.log(`could not read the new kernel's tools: ${errorText(err)}`);
           return;
         }
@@ -394,7 +412,7 @@ export class KernelPool {
         }
         const slot = this.#slots.find((s) => s.session === session);
         if (slot) slot.lists = lists;
-        await this.#options.onKernelReady?.(lists, flavour.digest);
+        await this.#options.onKernelLists?.(lists, flavour.digest);
       },
     });
     const inherited = new Set(
