@@ -726,6 +726,10 @@ export function createWolframServer(
       } finally {
         relisting = false;
       }
+      // An answer from another source while this was under way was let go, as
+      // in flight; followed now, or its lists waited for an answer that may
+      // never come but from the cache. Again only on a change, so it ends.
+      if (backend.servedFrom?.() !== served) follow();
     })();
   }
 

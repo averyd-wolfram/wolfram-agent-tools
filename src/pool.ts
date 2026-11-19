@@ -132,8 +132,12 @@ export interface KernelPoolOptions {
    * Called with a kernel's lists each time the pool reads them: as it starts,
    * and as it says they changed. The pool reads them itself, to answer `lists`,
    * so a caller that wants them takes them here rather than reading again.
+   * `serves` says whether the pool would hand this kernel to a session of a
+   * flavour, so they reach only a session they describe.
    */
-  onKernelLists?: ((lists: KernelLists, flavour: string) => void | Promise<void>) | undefined;
+  onKernelLists?:
+    | ((lists: KernelLists, serves: (flavour: KernelFlavour) => boolean) => void | Promise<void>)
+    | undefined;
   /** For the suite, which cannot wait out a window of real time. */
   clock?: (() => number) | undefined;
 }
@@ -425,7 +429,10 @@ export class KernelPool {
           slot.lists = lists;
           slot.listsRead = ++this.#listsRead;
         }
-        await this.#options.onKernelLists?.(lists, flavour.digest);
+        await this.#options.onKernelLists?.(
+          lists,
+          (f) => slot !== undefined && this.#mine(slot, f),
+        );
       },
     });
     const inherited = new Set(

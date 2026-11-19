@@ -1871,6 +1871,39 @@ heading("Re-reading the lists starts no kernel and grows no pool (#198)");
       check("once they are re-read, an answer re-reads nothing", afterReread === "tools/call", afterReread);
     }
 
+    // An answer from another source while a re-read is under way is followed
+    // once it ends: let go as in flight, its lists waited for an answer that
+    // might come only from the cache.
+    {
+      const asked = [];
+      let served = "elsewhere";
+      let answer;
+      const client = await session(
+        recording(asked, {
+          servedFrom: () => served,
+          relist: (source) => {
+            asked.push(`relist ${source}`);
+            return source === "elsewhere"
+              ? new Promise((resolve) => (answer = resolve))
+              : Promise.resolve(listsOf("Newest", source));
+          },
+        }),
+      );
+      await call(client);
+      await until(() => answer !== undefined, 2_000);
+      served = "another";
+      await call(client);
+      answer?.(listsOf("Older", "elsewhere"));
+      await settle();
+      const listed = upstreamTools((await client.listTools()).tools).map((t) => t.name).join();
+      await client.close();
+      check(
+        "an answer from another source during a re-read is followed when it ends",
+        asked.includes("relist another") && listed === "Newest",
+        `${asked.filter((a) => a.startsWith("relist")).join(", ")}; lists ${listed}`,
+      );
+    }
+
     // A cold list a kernel answered is kept, where nothing else filled the
     // session's lists: with its kernel's start-time read failed, every later
     // list went back to the backend, a kernel start where it had idled out.
@@ -2270,6 +2303,44 @@ heading("Re-reading the lists starts no kernel and grows no pool (#198)");
       } finally {
         await later?.stop();
         await watcher?.stop();
+        await broker?.stop?.();
+      }
+    });
+  }
+
+  // A kernel's lists reach only the sessions the pool would hand it: not one
+  // of the same digest that strips a name the kernel inherited (#180), which
+  // cached that kernel's lists under its own key.
+  if (socketsHere("who hears a kernel's lists")) {
+    const { path, count } = counted("broker-heard");
+    await withEnv({ FAKE_MARKER: path, FAKE_ANNOUNCE_TOOL: "1", MY_MODE: "the-brokers" }, async () => {
+      let broker = null;
+      let plain = null;
+      let stripping = null;
+      try {
+        const started = await brokerAt("heard");
+        broker = started.broker;
+        plain = await attachTo(started.address);
+        let plainHeard = 0;
+        plain.onKernelReady(() => void plainHeard++);
+        // Started, inheriting MY_MODE, before anyone declared it.
+        await plain.listTools();
+        const declaring = lib.kernelFlavour({ MCP_SERVER_NAME: "WolframLanguage", WOLFRAM_MCP_KERNEL_ENV: "MY_MODE" });
+        stripping = await attachTo(started.address, declaring);
+        let strippingHeard = 0;
+        stripping?.onKernelReady(() => void strippingHeard++);
+        // Its first call makes the kernel gain a tool and say so: its lists again.
+        await plain.callTool({ name: "WolframLanguageEvaluator", arguments: { code: "1+1" } }, { timeoutMs: 10_000 });
+        await until(() => plainHeard === 2, 5_000);
+        await new Promise((r) => setTimeout(r, 200));
+        check(
+          "a session stripping a name the kernel inherited, of the same digest, does not hear its lists",
+          declaring.digest === flavour.digest && plainHeard === 2 && strippingHeard === 0 && count() === 1,
+          `the plain session heard ${plainHeard}, the stripping one ${strippingHeard}; ${count()} started`,
+        );
+      } finally {
+        await stripping?.stop();
+        await plain?.stop();
         await broker?.stop?.();
       }
     });

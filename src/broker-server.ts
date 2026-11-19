@@ -313,32 +313,35 @@ export async function startBroker(options: BrokerOptions): Promise<RunningBroker
       onFacts: (facts, chosen) => {
         if (options.allowInspect) recordFacts(options.bin, facts, chosen, log);
       },
-      // Only the sessions this kernel can serve. Telling the others would put
-      // one flavour's tool list into another's cache entry, under a key that
-      // exists to keep them apart. A proxy that hears nothing keeps its lists.
-      onKernelLists: (lists, flavour) => broadcast({ event: "kernelReady", ...lists }, flavour),
+      // Only the sessions this kernel can serve, as the pool decides it: not
+      // only of its digest, but not one stripping a name the kernel inherited
+      // (#180), which the pool would never hand it. Told, such a session cached
+      // that kernel's lists under its own key. A proxy that hears nothing keeps
+      // its lists.
+      onKernelLists: (lists, serves) =>
+        broadcast({ event: "kernelReady", ...lists }, (flavour) => serves(flavour)),
     });
   })();
   // Nothing may reject unhandled while nobody is awaiting it yet.
   preparing.catch(() => {});
 
   /**
-   * Tell the attached proxies, optionally only those of one flavour.
+   * Tell the attached proxies, optionally only those of the flavours `to` takes.
    *
    * Scoped, because `kernelReady` carries a tool list and a capability set read
    * from one kernel, and a session of another flavour would cache that as its
    * own — the capability cache is keyed by flavour precisely so those cannot be
    * confused, and an unscoped broadcast would put the wrong answer under the
-   * right key.
+   * right key. A session that has not declared one is told nothing scoped.
    */
-  function broadcast(event: BrokerEvent, flavour?: string): void {
+  function broadcast(event: BrokerEvent, to?: (flavour: KernelFlavour) => boolean): void {
     const frame = eventFrame(event);
     if (frame === undefined) {
       log(`not sending a ${event.event} event over the ${FRAME_CAP} cap`);
       return;
     }
     for (const [socket, state] of connections) {
-      if (flavour !== undefined && state.flavour?.digest !== flavour) continue;
+      if (to !== undefined && (state.flavour === null || !to(state.flavour))) continue;
       if (socket.writable) socket.write(frame);
     }
   }
