@@ -136,7 +136,7 @@ that milestone uses unless the owner says otherwise.
 | D32 | Core stays client-neutral | **Decided by the owner, 2026-10-05:** the core reads no client's variables directly. A small launch-context layer maps each client's plugin root, data directory and options (`CLAUDE_PLUGIN_*`, `PLUGIN_ROOT`/`PLUGIN_DATA`, `CURSOR_PLUGIN_ROOT`, Cursor `variables`, Qwen `settings[]`) onto the server's own `WOLFRAM_MCP_*` settings, generalising what the SessionStart hook already does for Claude Code's `lsp` option. It maps only what reaches it: a variable a client strips is MA's core item 1, solved by not depending on it, not by this layer | MA |
 | D33 | The bundle is a downstream interface | **Decided by the owner, 2026-10-05:** other projects may build their own plugins on the release's `wolfram-mcp-server.mjs`, serving their own AgentTools server, without a fork. The asset's name, the `SHA256SUMS.txt` format (`sha256sum -c`: `<hex>  <name>`, one line per asset) and the per-tag download path are a contract: a downstream package pins the bundle by version and checksum, as every package of ours carries one identical bundle (MA). What a downstream package may rely on — the environment contract, the status probe, the fixture for its own tests — is the work of §5 MD, and stays out of the contract until MD's checks pin it | MD |
 | D34 | Following releases from another project | **Decided by the owner, 2026-10-06 (#7, #43):** a `release` branch carries the newest release as a Claude Code marketplace named `wolfram-agent-tools`: `plugin/`, exactly that release's verified `wolfram-plugin-<version>.zip`, and `.claude-plugin/marketplace.json` naming it `./plugin`. A project commits `extraKnownMarketplaces` at `"ref": "release"` with `"autoUpdate": true` and gets every release with no edit, or pins `"ref": "wolfram--v<version>"`, the branch commit tagged with Claude Code's own `<plugin>--v<version>` convention, which plugin dependency ranges also resolve against. The branch and GitHub's Latest have one writer: the release run's `advance` job (`scripts/release-branch.mjs`), which reads the newest published release after every build in the run and moves the branch forward to it, never back, tags it, and marks it Latest. Builds publish with Latest off, so a release finished late or built by hand moves neither until a release run does. Release runs never overlap, and each repeats whatever the last left undone. The design follows Claude Code's hosting documentation: auto-update is off for third-party marketplaces unless `autoUpdate` is set, and a plugin updates when its `plugin.json` version changes | M1 distribution acceptance |
-| D35 | Seats across releases | **Decided by the owner, 2026-11-17 (#59, #176):** every kernel this package starts — a broker's, a private one, the LSP's — takes a seat from one lease per installation and licence before it spawns, so no start is one the licence refuses, however many releases' brokers run. Each release keeps its own broker, so *sharing may never change an answer* stands; one broker shared across releases was rejected on measurement (§5 MD item 2) | MD |
+| D35 | Seats across releases | **Decided by the owner, 2026-11-17 (#59, #176):** every kernel this package starts itself — a broker's, a private one, the LSP's, not one `wolframscript` starts — takes a seat from one lease per licence before it spawns, so once the lease has a size, the kernels of the releases that take it never together exceed it, however many of their brokers run. It bounds what it counts, not what the licence sees (§5 MD item 2). Each release keeps its own broker, so *sharing may never change an answer* stands; one broker shared across releases was rejected on measurement | MD |
 
 ---
 
@@ -753,8 +753,9 @@ are *traced* in this tree on 2026-10-05 unless marked otherwise.
    another broker's kernels, the LSP kernel, or a private kernel. The reserve does not help:
    on four seats, two brokers allow three kernels each. The licence itself cannot be overrun, so
    the starts past it fail as a kernel that exits (`Wolfram kernel error`) — or hang until the
-   start timeout, which is §7's open question — and on the shared path a failed start sets no
-   back-off, so each later call tries again. *Work:* decided in M3's design, where "concurrent
+   start timeout, which is §7's open question — and a failed start is now backed off in the
+   pool as on the private path (#19, #20, #22), for ten minutes where it was refused a seat,
+   which is #143. *Work:* decided in M3's design, where "concurrent
    package versions" and "an independent broker" are already listed; the candidates are a
    per-installation seat lease that every broker and the LSP take (a lock file in the broker
    directory), or sharing one broker between compatible bundles by keying on `BROKER_PROTOCOL`
@@ -763,63 +764,58 @@ are *traced* in this tree on 2026-10-05 unless marked otherwise.
    argument, not just a key change.
    *Decided by the maintainer, 2026-11-17 (#59, #176): **a seat lease every kernel takes.**
    Sharing one broker across releases (design A on #176) is rejected, on what was measured
-   below.* #59's acceptance asked for one broker; it becomes this: no kernel this package
-   starts is one the licence refuses, however many releases and brokers are running.
-   - **What it is.** One lease per installation and licence, which every kernel this package
-     starts takes a seat from before it spawns: a broker's pool, a private kernel, the LSP's.
-     A start that finds no free seat waits for one, as a pool's waiter does now, rather than
-     spawn a kernel the licence would refuse. Where the licence is unlimited there is no lease.
-   - **Before the licence is known there is no lease.** Only a kernel reports the licence, so
-     on a cold machine, after `clear-cache`, or under `WOLFRAM_MCP_INSPECT=0`, nothing can
-     size it, and a provisional size would let an LSP kernel, which reports no facts, hold
-     the only seat and keep every tool kernel waiting (Codex on #176). So until a kernel's
-     report sizes the lease, starts behave as today, and a kernel started meanwhile, the LSP's
-     included, holds no seat. A cold machine can therefore still meet a refused start, which
-     #143 turns into a short wait.
-   - **Its key.** The installation, not the kernel binary's path: one installation was used
-     through two binaries on this machine (`Executables/wolfram`, and `WolframKernel` after
-     `WolframScript.conf` changed on 2026-11-04), and two leases for one licence would each
-     grant all of it. And the licence: an entitlement (`WOLFRAMINIT`) brings its own seat
-     limit, so it has its own lease, keyed by the entitlement itself rather than the variable's
-     raw text, which two spellings of one entitlement would split (Codex on #176).
-   - **Its place.** A per-user directory that `WOLFRAM_MCP_RUNTIME_DIR`, `XDG_RUNTIME_DIR` and
-     `XDG_CACHE_HOME` don't move, since launchers that set them differently would otherwise
-     each make a lease for one licence (Codex on #176, recorded on #59).
-   - **Its size is the licence's seats, and the reserve stays each pool's.** Each pool keeps
-     its budget of seats less the reserve, so with one broker nothing changes. A lease of
-     seats less the reserve would keep that seat free across every kernel, but on a 2-seat
-     licence it would leave the tools no seat while the LSP's kernel runs, and that kernel runs
-     for the session's life. So the lease stops refused
-     starts, and the reserve across two brokers stays MD-2's known limit.
-   - **A seat lives as long as its kernel.** The launcher takes the seat before it spawns,
-     and once the kernel is running the seat names the kernel's own process, not the
-     launcher's: a launcher killed while its kernel lives on must not free a seat the licence
-     still counts (Codex on #176). A seat is freed when the process it names is gone. A pid
-     alone can't say that, since a dead process's pid can be reused, so a seat names its
-     process by pid and start time. The window between taking the seat and naming the kernel
-     belongs to the launcher, and is freed with it.
+   below.* #59's acceptance asked for one broker; it becomes this: once the lease has a size,
+   the kernels of every release that takes it never together exceed that size, which is the
+   licence's count as configured or as a kernel reported it. The licence can still refuse a start the lease
+   did not count (*What it doesn't count*), and #143 turns that into a short wait.
+   - **What it is.** One lease per licence, which every kernel this package starts takes a
+     seat from before it spawns: a broker's pool, a private kernel (`doctor`'s diagnostic
+     kernel among them), the LSP's. A start that
+     finds no free seat waits for one, rather than spawn a kernel the lease has no room for.
+     Where the licence is unlimited, nothing waits.
+   - **What it doesn't count**, so the licence can still refuse a start beside it, as M3's
+     bound already says of unmanaged processes:
+     - kernels of a release from before the lease, or of a downstream package pinned to such
+       a release's bundle (D33), which take no seat;
+     - kernels `wolframscript` starts, whose process this package never holds: `doctor`'s
+       discovery probe at step 7, and the opt-in `npm run test:custom`;
+     - processes this package doesn't manage, such as Mathematica;
+     - seats past the true count, where `WOLFRAM_MCP_LICENSE_LIMIT` is set above it;
+     - an on-demand entitlement's seat that its licence manager holds after the kernel exits,
+       measured at about an hour (an open M1 finding, below).
+   - **Open for the implementation**, recorded on #59 with the review findings behind each,
+     and each settled by a check that fails first: how a launcher names the licence before
+     any kernel runs; where the lease lives, and where its size does, which `clear-cache`
+     must not remove; how a seat passes from launcher to kernel; how a lease with no size yet
+     counts; and what bounds a wait on each path: the LSP's has no deadline today, and a
+     broker's list requests wait in its pool with no expiry, though the proxy times them out
+     (`brokerCeilingMs`), so a waiter could start a kernel after its caller was answered.
+   - **The reserve stays each pool's.** Each pool keeps its budget of seats less the reserve,
+     so with one broker nothing changes. A lease of seats less the reserve would keep that
+     seat free across every kernel, but on a 2-seat licence it would leave the tools no seat
+     while the LSP's kernel runs, and that kernel runs for the session's life. So the lease
+     bounds the kernels it counts, and the reserve across two brokers stays MD-2's known
+     limit. This departs from M3's design checkpoint, which counts the LSP inside one budget
+     of seats less the reserve, so M3 walks its saturation case against the lease.
    - **What it keeps, and what it costs.** Every session is served by its own release's code,
      so *sharing may never change an answer* stands as written. Two releases still run two
      brokers, and a server both use runs a kernel in each. A start can wait for a seat another
-     release's idle kernel holds, until that kernel's idle shutdown (10 minutes by default).
-   - **Checks first:**
+     release's idle kernel holds, which frees only when that kernel exits: at its idle
+     shutdown, or, where `WOLFRAM_MCP_IDLE_MINUTES=0` turns that off, when its broker's last
+     session leaves.
+   - **Checks first**, with the rest on #59 beside the open questions:
      - two brokers of different code identities on one installation never hold more kernels
-       together than the lease allows, and a start that finds the lease full waits, then
-       starts when the other's kernel stops;
+       together than the lease allows, and a start that finds the lease full waits;
      - the LSP kernel and a private kernel count against the lease, and on a 2-seat licence
        the LSP's kernel and one tool kernel still both run, as today;
-     - an entitlement's kernels count against their own lease, not the activation's;
-     - a seat whose kernel was killed is freed, and so is one whose pid now belongs to
-       another process; a seat whose launcher was killed while its kernel lives on is not;
-     - on a cold machine, an LSP kernel started first leaves the tools' kernels free to
-       start.
-   - **The harm it removes**, as measured. An idle kernel stops after 10 minutes, so an older
-     release's broker holds no seat unless its session used a kernel recently: the 0.1.7
-     broker still running on 2026-11-17 held none. The harm is two releases in use at once on
-     a limited licence, where today the later start is refused and backed off for ten minutes
-     as though the installation were broken (#143). The lease turns that into a wait. #143's
-     seat-refusal measurement comes first, since the lease's checks need a refused start to
-     compare against.
+     - an entitlement's kernels count against their own lease, not the activation's.
+   - **The harm it removes**, as measured. An idle kernel stops after 10 minutes by default,
+     so an older release's broker holds no seat unless its session used a kernel recently:
+     the 0.1.7 broker still running on 2026-11-17 held none. The harm is two releases in use
+     at once on a limited licence, where today the later start is refused and backed off for
+     ten minutes as though the installation were broken (#143). The lease turns that into a
+     wait for a seat. #143's seat-refusal measurement comes first, since the lease's checks
+     need a refused start to compare against.
    - **Why not one broker across releases (A).** Measured against the release history on
      2026-11-17; the figures are on #59, and `git diff --name-only v<a> v<b> -- src/` with
      `BROKER_PROTOCOL` at each tag reproduces them.
@@ -1042,7 +1038,9 @@ D7, the expanded plugin view, follows on top.
 - **Saturation:** MCP and LSP are different protocols, and an LSP kernel is held for the
   session, not idle between calls. On a 2-seat licence with one reserved seat, the managed
   budget is one. If the LSP holds it, MCP must either wait (bounded), be refused clearly, or
-  preempt. The design chooses a priority. The recommendation is that MCP calls preempt an
+  preempt. D35's lease (§5 MD item 2) takes the licence's seats and leaves the reserve to
+  each pool, so on 2 seats the LSP and one MCP kernel both run; walk the case with a third
+  contender, in either order, against the lease. The design chooses a priority. The recommendation is that MCP calls preempt an
   enabled LSP's *start*, but never a running LSP, and are refused clearly when no seat can be
   had within the start budget.
 - **Ownership:** owner attachment, cancellation and EOF, broker or launcher crash and
